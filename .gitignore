@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large outputs, uploads, and test data
+output/
+uploads/*.mp4
+uploads/*.jpg
+uploads/*.jpeg
+uploads/*.png
+test_images/
+
+# Model files & checkpoints
+*.ply
+*.pth
+*.ckpt
+*.splat
+
+# Dependencies
+node_modules/
+instantsplat_repo/
