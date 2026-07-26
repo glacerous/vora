@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>InstantSplat — 3D Reconstruction Pipeline</title>
+  <meta name="description" content="Convert video or photos into interactive 3D Gaussian Splat models using InstantSplat on Modal GPU cloud.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:        #05091a;
+      --surface:   rgba(255,255,255,0.04);
+      --border:    rgba(255,255,255,0.07);
+      --text:      #f0f4ff;
+      --muted:     #7480a0;
+      --accent1:   #7c3aed;
+      --accent2:   #3b82f6;
+      --success:   #22c55e;
+      --error:     #ef4444;
+      --font:      'Outfit', sans-serif;
+      --font-head: 'Space Grotesk', sans-serif;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── Background ─────────────────────────────────────────────── */
+    .bg-orbs {
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      overflow: hidden;
+    }
+    .orb {
+      position: absolute; border-radius: 50%; filter: blur(80px); opacity: .25;
+    }
+    .orb-1 { width: 600px; height: 600px; background: var(--accent1); top: -200px; left: -200px; }
+    .orb-2 { width: 500px; height: 500px; background: var(--accent2); bottom: -150px; right: -150px; }
+    .orb-3 { width: 300px; height: 300px; background: #06b6d4; top: 50%; left: 50%; transform: translate(-50%,-50%); opacity: .12; }
+
+    /* ── Layout ──────────────────────────────────────────────────── */
+    .wrapper {
+      position: relative; z-index: 1;
+      max-width: 960px; margin: 0 auto;
+      padding: 40px 24px 80px;
+    }
+
+    /* ── Header ──────────────────────────────────────────────────── */
+    header { text-align: center; margin-bottom: 48px; }
+    .logo-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 999px; padding: 6px 18px;
+      font-size: 12px; font-weight: 600; letter-spacing: .06em;
+      color: var(--muted); text-transform: uppercase; margin-bottom: 20px;
+    }
+    .logo-dot { width: 8px; height: 8px; border-radius: 50%; background: linear-gradient(135deg,var(--accent1),var(--accent2)); }
+    h1 {
+      font-family: var(--font-head); font-size: clamp(32px, 5vw, 56px);
+      font-weight: 700; letter-spacing: -.02em; line-height: 1.1;
+      background: linear-gradient(135deg, #fff 30%, #a78bfa 70%, #60a5fa);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      margin-bottom: 14px;
+    }
+    .subtitle { color: var(--muted); font-size: 16px; font-weight: 400; max-width: 480px; margin: 0 auto; line-height: 1.6; }
+
+    /* ── Steps bar ───────────────────────────────────────────────── */
+    .steps {
+      display: flex; align-items: center; gap: 0;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 16px; padding: 6px; margin-bottom: 36px;
+      overflow: hidden;
+    }
+    .step {
+      flex: 1; text-align: center; padding: 10px 8px;
+      border-radius: 12px; font-size: 13px; font-weight: 500;
+      color: var(--muted); transition: all .3s; cursor: default;
+      display: flex; flex-direction: column; align-items: center; gap: 3px;
+    }
+    .step-icon { font-size: 18px; }
+    .step.active {
+      background: linear-gradient(135deg, rgba(124,58,237,.25), rgba(59,130,246,.25));
+      color: var(--text);
+      box-shadow: 0 0 20px rgba(124,58,237,.15);
+    }
+    .step.done { color: var(--success); }
+    .step-sep { color: var(--border); font-size: 18px; padding: 0 2px; flex: 0; }
+
+    /* ── Card ────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 32px;
+      backdrop-filter: blur(16px);
+      margin-bottom: 20px;
+      animation: fadeUp .35s ease both;
+    }
+    @keyframes fadeUp {
+      from { opacity:0; transform: translateY(12px); }
+      to   { opacity:1; transform: translateY(0); }
+    }
+
+    /* ── Tabs ────────────────────────────────────────────────────── */
+    .tabs {
+      display: flex; gap: 4px; margin-bottom: 24px;
+      background: rgba(0,0,0,.25); border-radius: 12px; padding: 4px;
+    }
+    .tab {
+      flex: 1; text-align: center; padding: 10px 20px;
+      border-radius: 9px; font-size: 14px; font-weight: 600;
+      color: var(--muted); cursor: pointer; transition: all .2s;
+      border: none; background: none;
+    }
+    .tab.active {
+      background: linear-gradient(135deg, var(--accent1), var(--accent2));
+      color: #fff; box-shadow: 0 4px 16px rgba(124,58,237,.3);
+    }
+
+    /* ── Drop Zone ───────────────────────────────────────────────── */
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: 16px; padding: 48px 24px;
+      text-align: center; cursor: pointer;
+      transition: all .2s; position: relative;
+    }
+    .dropzone:hover, .dropzone.drag-over {
+      border-color: var(--accent1);
+      background: rgba(124,58,237,.06);
+    }
+    .dropzone input { position: absolute; inset:0; opacity:0; cursor:pointer; width:100%; height:100%; }
+    .dz-icon { font-size: 48px; margin-bottom: 12px; display: block; }
+    .dz-title { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+    .dz-sub { color: var(--muted); font-size: 14px; }
+
+    /* ── Options row ─────────────────────────────────────────────── */
+    .options-row {
+      display: flex; gap: 16px; margin-top: 20px; flex-wrap: wrap;
+    }
+    .opt-group { flex: 1; min-width: 180px; }
+    .opt-label {
+      display: flex; justify-content: space-between;
+      font-size: 13px; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: .06em;
+      margin-bottom: 8px;
+    }
+    .opt-val { color: var(--text); }
+    input[type=range] {
+      width: 100%; accent-color: var(--accent1); height: 4px;
+      border-radius: 2px; cursor: pointer;
+    }
+    .preset-btns { display: flex; gap: 6px; }
+    .preset-btn {
+      flex: 1; padding: 8px 4px; border-radius: 8px;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      border: 1px solid var(--border); background: var(--surface);
+      color: var(--muted); transition: all .15s;
+    }
+    .preset-btn:hover, .preset-btn.sel {
+      border-color: var(--accent1); color: var(--text);
+      background: rgba(124,58,237,.15);
+    }
+
+    /* ── Primary button ──────────────────────────────────────────── */
+    .btn-primary {
+      display: inline-flex; align-items: center; gap: 10px;
+      padding: 14px 32px; border-radius: 14px;
+      background: linear-gradient(135deg, var(--accent1), var(--accent2));
+      color: #fff; font-size: 16px; font-weight: 700;
+      border: none; cursor: pointer; width: 100%; justify-content: center;
+      margin-top: 20px; transition: all .2s;
+      box-shadow: 0 4px 24px rgba(124,58,237,.3);
+    }
+    .btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 32px rgba(124,58,237,.4); }
+    .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-secondary {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 24px; border-radius: 12px;
+      background: var(--surface); color: var(--text);
+      border: 1px solid var(--border); font-size: 14px; font-weight: 600;
+      cursor: pointer; transition: all .15s;
+    }
+    .btn-secondary:hover { border-color: rgba(255,255,255,.2); background: rgba(255,255,255,.06); }
+
+    /* ── Progress bar ────────────────────────────────────────────── */
+    .progress-card {
+      display: flex; align-items: center; gap: 16px;
+      background: rgba(124,58,237,.08);
+      border: 1px solid rgba(124,58,237,.2);
+      border-radius: 16px; padding: 20px 24px;
+      margin-bottom: 20px;
+    }
+    .spinner {
+      width: 36px; height: 36px; flex-shrink: 0;
+      border: 3px solid rgba(124,58,237,.2);
+      border-top-color: var(--accent1);
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .progress-text { flex: 1; }
+    .progress-stage { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+    .progress-msg { font-size: 13px; color: var(--muted); }
+
+    /* ── Success / Error cards ───────────────────────────────────── */
+    .success-card {
+      background: rgba(34,197,94,.08);
+      border: 1px solid rgba(34,197,94,.25);
+      border-radius: 16px; padding: 24px 28px;
+      display: flex; align-items: center; gap: 16px;
+      margin-bottom: 20px;
+    }
+    .success-icon { font-size: 36px; }
+    .error-card {
+      background: rgba(239,68,68,.08);
+      border: 1px solid rgba(239,68,68,.25);
+      border-radius: 16px; padding: 20px 24px;
+      margin-bottom: 20px; font-size: 14px; color: #f87171;
+    }
+
+    /* ── Frame grid ──────────────────────────────────────────────── */
+    .frame-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+      gap: 8px; margin-top: 16px;
+    }
+    .frame-thumb {
+      aspect-ratio: 16/9; border-radius: 8px; overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .frame-thumb img { width:100%; height:100%; object-fit:cover; }
+
+    /* ── View Result ─────────────────────────────────────────────── */
+    .view-btn {
+      display: flex; align-items: center; justify-content: center; gap: 12px;
+      padding: 18px; border-radius: 16px;
+      background: linear-gradient(135deg, #22c55e, #16a34a);
+      color: #fff; font-size: 18px; font-weight: 700;
+      text-decoration: none; margin-top: 12px;
+      transition: all .2s;
+      box-shadow: 0 4px 24px rgba(34,197,94,.3);
+    }
+    .view-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 32px rgba(34,197,94,.4); }
+
+    /* ── Tips ────────────────────────────────────────────────────── */
+    .tips {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 16px; padding: 20px 24px;
+    }
+    .tips h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 12px; }
+    .tip-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+    .tip-list li { font-size: 13px; color: var(--muted); display: flex; gap: 8px; align-items: flex-start; }
+    .tip-list li span { flex-shrink: 0; }
+
+    /* ── Responsive ─────────────────────────────────────────────── */
+    @media (max-width: 600px) {
+      .options-row { flex-direction: column; }
+      .steps { font-size: 11px; }
+      .step-icon { font-size: 15px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="bg-orbs">
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+    <div class="orb orb-3"></div>
+  </div>
+
+  <div class="wrapper">
+    <header>
+      <div class="logo-badge"><span class="logo-dot"></span> InstantSplat Pipeline</div>
+      <h1>Photos → 3D Gaussian Splat</h1>
+      <p class="subtitle">Upload a video or photos — we extract sharp frames, reconstruct on Modal GPU, and render in your browser.</p>
+    </header>
+
+    <!-- Pipeline steps -->
+    <div class="steps">
+      <div class="step" id="step-upload"><span class="step-icon">📁</span>Upload</div>
+      <div class="step-sep">›</div>
+      <div class="step" id="step-extract"><span class="step-icon">🎞️</span>Extract</div>
+      <div class="step-sep">›</div>
+      <div class="step" id="step-reconstruct"><span class="step-icon">🖥️</span>Reconstruct</div>
+      <div class="step-sep">›</div>
+      <div class="step" id="step-view"><span class="step-icon">🌐</span>View 3D</div>
+    </div>
+
+    <!-- Error banner -->
+    <div class="error-card" id="error-banner" style="display:none">
+      ⚠️ <span id="error-text"></span>
+    </div>
+
+    <!-- Progress indicator -->
+    <div class="progress-card" id="progress-card" style="display:none">
+      <div class="spinner"></div>
+      <div class="progress-text">
+        <div class="progress-stage" id="progress-stage">Working…</div>
+        <div class="progress-msg" id="progress-msg"></div>
+      </div>
+    </div>
+
+    <!-- ── Upload card ── -->
+    <div class="card" id="upload-card">
+      <div class="tabs">
+        <button class="tab active" id="tab-video" onclick="switchTab('video')">🎬 Video (recommended)</button>
+        <button class="tab" id="tab-photos" onclick="switchTab('photos')">📸 Photos</button>
+      </div>
+
+      <!-- Video tab -->
+      <div id="panel-video">
+        <div class="dropzone" id="video-drop">
+          <input type="file" id="video-input" accept="video/*" onchange="videoSelected(this)">
+          <span class="dz-icon">🎬</span>
+          <div class="dz-title">Drop video here or click to select</div>
+          <div class="dz-sub" id="video-name">MP4 / MOV / AVI — up to 4 GB</div>
+        </div>
+
+        <div class="options-row">
+          <div class="opt-group">
+            <div class="opt-label">Target frames <span class="opt-val" id="frames-val">25</span></div>
+            <input type="range" id="frames-slider" min="10" max="50" value="25"
+                   oninput="document.getElementById('frames-val').textContent=this.value">
+          </div>
+          <div class="opt-group">
+            <div class="opt-label">Quality preset</div>
+            <div class="preset-btns">
+              <button class="preset-btn" onclick="setPreset(15,5)">Fast</button>
+              <button class="preset-btn sel" onclick="setPreset(25,7)">Balanced</button>
+              <button class="preset-btn" onclick="setPreset(40,10)">Best</button>
+            </div>
+          </div>
+        </div>
+
+        <button class="btn-primary" id="btn-extract" onclick="startExtract()" disabled>
+          🎞️ Extract Frames
+        </button>
+      </div>
+
+      <!-- Photos tab -->
+      <div id="panel-photos" style="display:none">
+        <div class="dropzone" id="photos-drop">
+          <input type="file" id="photos-input" accept="image/*" multiple onchange="photosSelected(this)">
+          <span class="dz-icon">📸</span>
+          <div class="dz-title">Drop photos here or click to select</div>
+          <div class="dz-sub" id="photos-name">JPG / PNG — select multiple files</div>
+        </div>
+        <button class="btn-primary" id="btn-upload-photos" onclick="uploadPhotos()" disabled>
+          📤 Upload Photos
+        </button>
+      </div>
+    </div>
+
+    <!-- ── Frame preview ── -->
+    <div class="card" id="frames-card" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div>
+          <div style="font-size:18px;font-weight:700" id="frames-title">Extracted Frames</div>
+          <div style="font-size:13px;color:var(--muted)" id="frames-subtitle"></div>
+        </div>
+        <button class="btn-secondary" onclick="resetPipeline()">↺ Reset</button>
+      </div>
+      <div class="frame-grid" id="frame-grid"></div>
+      <button class="btn-primary" id="btn-reconstruct" onclick="startReconstruct()">
+        🖥️ Start 3D Reconstruction on Modal GPU
+      </button>
+    </div>
+
+    <!-- ── Result ── -->
+    <div class="success-card" id="result-card" style="display:none">
+      <div class="success-icon">✅</div>
+      <div>
+        <div style="font-size:18px;font-weight:700;margin-bottom:4px">Reconstruction Complete!</div>
+        <div style="font-size:13px;color:var(--muted)" id="result-msg"></div>
+      </div>
+    </div>
+    <a href="/viewer.html" target="_blank" class="view-btn" id="view-btn" style="display:none">
+      🌐 Open 3D Viewer
+    </a>
+
+    <!-- ── Tips ── -->
+    <div class="tips" style="margin-top:24px">
+      <h3>📖 Tips for best results</h3>
+      <ul class="tip-list">
+        <li><span>🎥</span> Record a slow, steady pan around the object (~20-30 sec). Faster = more blur = worse result.</li>
+        <li><span>💡</span> Diffuse indoor light (near a window) beats direct sunlight — avoids harsh shadows.</li>
+        <li><span>📐</span> Walk a complete circle. Add a second pass tilted slightly downward for top coverage.</li>
+        <li><span>🔒</span> Tap-hold in your camera app to lock exposure (AE/AF Lock) before recording.</li>
+        <li><span>🖥️</span> Reflective screens, glass, and metal will show floater artifacts — this is a known limitation of 3DGS.</li>
+        <li><span>💰</span> Each reconstruction costs ~$0.05–0.15 on your Modal A10G free credits ($30 budget).</li>
+      </ul>
+    </div>
+  </div>
+
+  <script>
+    // ── State ───────────────────────────────────────────────────────────────
+    let currentTab   = 'video';
+    let videoFile    = null;
+    let photosFiles  = null;
+    let pollTimer    = null;
+    let lastStage    = null;
+
+    // ── Tabs ────────────────────────────────────────────────────────────────
+    function switchTab(tab) {
+      currentTab = tab;
+      document.getElementById('tab-video').classList.toggle('active',  tab === 'video');
+      document.getElementById('tab-photos').classList.toggle('active', tab === 'photos');
+      document.getElementById('panel-video').style.display  = tab === 'video'  ? '' : 'none';
+      document.getElementById('panel-photos').style.display = tab === 'photos' ? '' : 'none';
+    }
+
+    // ── Presets ─────────────────────────────────────────────────────────────
+    function setPreset(frames, _) {
+      document.getElementById('frames-slider').value = frames;
+      document.getElementById('frames-val').textContent = frames;
+      document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('sel'));
+      event.target.classList.add('sel');
+    }
+
+    // ── File selection ──────────────────────────────────────────────────────
+    function videoSelected(input) {
+      videoFile = input.files[0];
+      if (videoFile) {
+        const mb = (videoFile.size / 1024 / 1024).toFixed(1);
+        document.getElementById('video-name').textContent = `${videoFile.name} (${mb} MB)`;
+        document.getElementById('btn-extract').disabled = false;
+      }
+    }
+
+    function photosSelected(input) {
+      photosFiles = input.files;
+      if (photosFiles.length) {
+        document.getElementById('photos-name').textContent = `${photosFiles.length} photos selected`;
+        document.getElementById('btn-upload-photos').disabled = false;
+      }
+    }
+
+    // Drag & drop
+    ['video-drop', 'photos-drop'].forEach(id => {
+      const el = document.getElementById(id);
+      el.addEventListener('dragover',  e => { e.preventDefault(); el.classList.add('drag-over'); });
+      el.addEventListener('dragleave', ()  => el.classList.remove('drag-over'));
+      el.addEventListener('drop', e => {
+        e.preventDefault(); el.classList.remove('drag-over');
+        const inp = el.querySelector('input');
+        if (e.dataTransfer.files.length) {
+          // Trigger the onchange handler
+          const dt = new DataTransfer();
+          Array.from(e.dataTransfer.files).forEach(f => dt.items.add(f));
+          inp.files = dt.files;
+          inp.dispatchEvent(new Event('change'));
+        }
+      });
+    });
+
+    // ── Upload video → extract frames ────────────────────────────────────────
+    function startExtract() {
+      if (!videoFile) return;
+      const frames = document.getElementById('frames-slider').value;
+
+      setUI('extracting');
+      showProgress('Uploading', 'Uploading video…');
+
+      const fd = new FormData();
+      fd.append('video', videoFile);
+      fd.append('frames', frames);
+      fd.append('blur_thresh', 80);
+
+      const xhr = new XMLHttpRequest();
+      xhr.upload.addEventListener('progress', e => {
+        if (e.lengthComputable) {
+          const pct = (e.loaded / e.total * 100).toFixed(1);
+          document.getElementById('progress-msg').textContent = `Uploading… ${pct}%`;
+        }
+      });
+      xhr.onload = () => { if (xhr.status === 200) startPolling(); };
+      xhr.onerror = () => showError('Upload failed — check your network');
+      xhr.open('POST', '/upload_video');
+      xhr.send(fd);
+    }
+
+    // ── Upload photos directly ───────────────────────────────────────────────
+    function uploadPhotos() {
+      if (!photosFiles || !photosFiles.length) return;
+      setUI('extracting');
+      showProgress('Uploading', 'Uploading photos…');
+
+      const fd = new FormData();
+      Array.from(photosFiles).forEach(f => fd.append('photos', f));
+
+      fetch('/use_photos', { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(d => { if (d.success) startPolling(); else showError(d.error); })
+        .catch(() => showError('Upload failed'));
+    }
+
+    // ── Reconstruct ──────────────────────────────────────────────────────────
+    function startReconstruct() {
+      setUI('reconstructing');
+      showProgress('Sending to GPU', 'Queueing Modal job…');
+      fetch('/reconstruct', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => { if (d.started) startPolling(); else showError(d.error); })
+        .catch(() => showError('Failed to start reconstruction'));
+    }
+
+    // ── Polling ──────────────────────────────────────────────────────────────
+    function startPolling() {
+      clearInterval(pollTimer);
+      pollTimer = setInterval(poll, 1200);
+      poll();
+    }
+
+    function stopPolling() { clearInterval(pollTimer); pollTimer = null; }
+
+    async function poll() {
+      try {
+        const r = await fetch('/status');
+        const d = await r.json();
+
+        if (d.stage === lastStage && d.message === lastMsg) return;
+        lastStage = d.stage; lastMsg = d.message;
+
+        updateStepsBar(d.stage);
+
+        if (d.stage === 'extracting') {
+          showProgress('Extracting Frames', d.message);
+        } else if (d.stage === 'extracted') {
+          stopPolling();
+          hideProgress();
+          showFrames(d.frames, d.frame_count);
+        } else if (d.stage === 'reconstructing') {
+          showProgress('Reconstructing on GPU', d.message);
+        } else if (d.stage === 'done') {
+          stopPolling();
+          hideProgress();
+          showResult(d.message);
+        } else if (d.stage === 'error') {
+          stopPolling();
+          hideProgress();
+          showError(d.error || d.message);
+        }
+      } catch (_) {}
+    }
+    let lastMsg = '';
+
+    // ── UI helpers ────────────────────────────────────────────────────────────
+    function setUI(stage) {
+      document.getElementById('error-banner').style.display = 'none';
+    }
+
+    function showProgress(stage, msg) {
+      const card = document.getElementById('progress-card');
+      card.style.display = 'flex';
+      document.getElementById('progress-stage').textContent = stage;
+      document.getElementById('progress-msg').textContent = msg;
+    }
+
+    function hideProgress() {
+      document.getElementById('progress-card').style.display = 'none';
+    }
+
+    function showError(msg) {
+      document.getElementById('error-banner').style.display = '';
+      document.getElementById('error-text').textContent = msg;
+      document.getElementById('progress-card').style.display = 'none';
+    }
+
+    function showFrames(frames, count) {
+      document.getElementById('frames-card').style.display = '';
+      document.getElementById('frames-title').textContent = `${count} Frames Extracted`;
+      document.getElementById('frames-subtitle').textContent = 'Review frames below, then start reconstruction.';
+      const grid = document.getElementById('frame-grid');
+      grid.innerHTML = frames.slice(0, 50).map(f =>
+        `<div class="frame-thumb"><img src="/frames/${f}" loading="lazy" alt="${f}"></div>`
+      ).join('');
+    }
+
+    function showResult(msg) {
+      document.getElementById('result-card').style.display = 'flex';
+      document.getElementById('result-msg').textContent = msg;
+      document.getElementById('view-btn').style.display = 'flex';
+      document.getElementById('btn-reconstruct').textContent = '🔄 Reconstruct Again';
+      document.getElementById('btn-reconstruct').disabled = false;
+    }
+
+    function resetPipeline() {
+      stopPolling();
+      videoFile = null; photosFiles = null; lastStage = null; lastMsg = '';
+      document.getElementById('frames-card').style.display = 'none';
+      document.getElementById('result-card').style.display = 'none';
+      document.getElementById('view-btn').style.display = 'none';
+      document.getElementById('progress-card').style.display = 'none';
+      document.getElementById('error-banner').style.display = 'none';
+      document.getElementById('video-input').value = '';
+      document.getElementById('video-name').textContent = 'MP4 / MOV / AVI — up to 4 GB';
+      document.getElementById('btn-extract').disabled = true;
+    }
+
+    function updateStepsBar(stage) {
+      const map = {
+        idle:          [0, 0, 0, 0],
+        extracting:    [1, 2, 0, 0],
+        extracted:     [1, 1, 0, 0],
+        reconstructing:[1, 1, 2, 0],
+        done:          [1, 1, 1, 1],
+        error:         [0, 0, 0, 0],
+      };
+      const steps = ['step-upload','step-extract','step-reconstruct','step-view'];
+      const vals  = map[stage] || [0,0,0,0];
+      steps.forEach((id, i) => {
+        const el = document.getElementById(id);
+        el.classList.toggle('active', vals[i] === 2);
+        el.classList.toggle('done',   vals[i] === 1);
+      });
+    }
+
+    // ── Init — check existing state on load ──────────────────────────────────
+    poll();
+  </script>
+</body>
+</html>

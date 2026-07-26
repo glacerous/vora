@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>InstantSplat 3D Reconstruction Viewer</title>
+    <!-- Modern Premium Typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Space+Grotesk:wght@400;700&display=swap" rel="stylesheet">
+    
+    <!-- Import map for Three.js and Gaussian Splats 3D library -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "gaussian-splats-3d": "https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.0/build/gaussian-splats-3d.module.js"
+        }
+    }
+    </script>
+
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --panel-bg: rgba(15, 23, 42, 0.75);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-color: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --accent-color: #3b82f6;
+            --accent-glow: rgba(59, 130, 246, 0.4);
+            --font-main: 'Outfit', sans-serif;
+            --font-title: 'Space Grotesk', sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-main);
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* Ambient background glow */
+        .bg-glow {
+            position: absolute;
+            top: -10%;
+            left: -10%;
+            width: 50vw;
+            height: 50vh;
+            background: radial-gradient(circle, rgba(59, 130, 246, 0.15) 0%, rgba(0,0,0,0) 70%);
+            z-index: 0;
+            pointer-events: none;
+        }
+
+        #splat-container {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+
+        /* Glassmorphism Control Panel */
+        .control-panel {
+            position: absolute;
+            top: 24px;
+            left: 24px;
+            z-index: 10;
+            background: var(--panel-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            width: 360px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5),
+                        inset 0 1px 1px rgba(255, 255, 255, 0.1);
+            animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        h1 {
+            font-family: var(--font-title);
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+            background: linear-gradient(135deg, #fff 0%, #a5b4fc 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 20px;
+            line-height: 1.4;
+        }
+
+        .meta-group {
+            margin-top: 16px;
+            border-top: 1px solid var(--border-color);
+            padding-top: 16px;
+        }
+
+        .meta-item {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            margin-bottom: 8px;
+        }
+
+        .meta-label {
+            color: var(--text-secondary);
+        }
+
+        .meta-value {
+            font-family: monospace;
+            color: #60a5fa;
+            word-break: break-all;
+            text-align: right;
+            max-width: 60%;
+        }
+
+        /* Status Badge */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-radius: 9999px;
+            font-size: 11px;
+            font-weight: 600;
+            background: rgba(59, 130, 246, 0.1);
+            color: #60a5fa;
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            margin-top: 12px;
+        }
+
+        .status-badge.success {
+            background: rgba(34, 197, 94, 0.1);
+            color: #4ade80;
+            border: 1px solid rgba(34, 197, 94, 0.2);
+        }
+
+        .status-badge.loading {
+            background: rgba(234, 179, 8, 0.1);
+            color: #facc15;
+            border: 1px solid rgba(234, 179, 8, 0.2);
+            animation: pulse 1.5s infinite;
+        }
+
+        /* UI instructions overlay */
+        .instructions {
+            position: absolute;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            background: var(--panel-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: 999px;
+            padding: 8px 24px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+            pointer-events: none;
+            display: flex;
+            gap: 16px;
+        }
+
+        .instruction-item strong {
+            color: var(--text-color);
+        }
+
+        /* Scene rotation control panel */
+        .rotation-panel {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            z-index: 10;
+            background: var(--panel-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 14px 16px;
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+            animation: fadeIn 0.3s ease;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+            min-width: 180px;
+        }
+        .rotation-panel.visible { display: flex; }
+        .rotation-panel-title {
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+        .rotation-axis-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .axis-label {
+            font-size: 12px;
+            font-weight: 700;
+            width: 20px;
+            color: var(--text-color);
+        }
+        .rot-btn {
+            flex: 1;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            border-radius: 8px;
+            padding: 5px 0;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .rot-btn:hover {
+            background: rgba(59,130,246,0.2);
+            border-color: rgba(59,130,246,0.4);
+        }
+        .rot-reset-btn {
+            width: 100%;
+            margin-top: 2px;
+            background: rgba(239,68,68,0.1);
+            border: 1px solid rgba(239,68,68,0.25);
+            color: #f87171;
+            border-radius: 8px;
+            padding: 6px 0;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .rot-reset-btn:hover { background: rgba(239,68,68,0.2); }
+        .rot-toggle-btn {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            z-index: 11;
+            background: var(--panel-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 8px 14px;
+            color: var(--text-secondary);
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: color 0.15s, border-color 0.15s;
+            display: none;
+        }
+        .rot-toggle-btn.visible { display: block; }
+        .rot-toggle-btn:hover { color: var(--text-color); border-color: rgba(255,255,255,0.2); }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-glow"></div>
+
+    <!-- 3D Viewer Container -->
+    <div id="splat-container"></div>
+
+    <!-- Control Panel -->
+    <div class="control-panel">
+        <h1>InstantSplat 3D Viewer</h1>
+        <div class="subtitle">WebGL viewer for Gaussian Splatting models reconstructed using InstantSplat on Modal.</div>
+        
+        <div class="meta-group">
+            <div class="meta-item">
+                <span class="meta-label">Splat Path</span>
+                <span id="path-val" class="meta-value">-</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Status</span>
+                <span><span id="status-badge" class="status-badge loading">Loading</span></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scene Orientation Toggle Button (shown after load) -->
+    <button class="rot-toggle-btn" id="rot-toggle" onclick="document.getElementById('rot-panel').classList.toggle('visible')">⟳ Orientation</button>
+
+    <!-- Scene Rotation Controls -->
+    <div class="rotation-panel" id="rot-panel">
+        <div class="rotation-panel-title">Scene Rotation</div>
+        <div class="rotation-axis-row">
+            <span class="axis-label" style="color:#f87171">X</span>
+            <button class="rot-btn" id="rx-neg" title="Rotate X -15°">↑</button>
+            <button class="rot-btn" id="rx-pos" title="Rotate X +15°">↓</button>
+        </div>
+        <div class="rotation-axis-row">
+            <span class="axis-label" style="color:#4ade80">Y</span>
+            <button class="rot-btn" id="ry-neg" title="Rotate Y -15°">↺</button>
+            <button class="rot-btn" id="ry-pos" title="Rotate Y +15°">↻</button>
+        </div>
+        <div class="rotation-axis-row">
+            <span class="axis-label" style="color:#60a5fa">Z</span>
+            <button class="rot-btn" id="rz-neg" title="Rotate Z -15°">↶</button>
+            <button class="rot-btn" id="rz-pos" title="Rotate Z +15°">↷</button>
+        </div>
+        <button class="rot-reset-btn" id="rot-reset">Reset Rotation</button>
+    </div>
+
+    <!-- Interactions Instruction -->
+    <div class="instructions" style="border-radius: 12px; padding: 10px 20px; font-size: 11px; max-width: 90%; flex-wrap: wrap; justify-content: center;">
+        <span class="instruction-item">🖱️ <strong>Left Click + Drag</strong> to Orbit</span>
+        <span class="instruction-item">🖱️ <strong>Right Click + Drag</strong> to Pan</span>
+        <span class="instruction-item">📜 <strong>Scroll</strong> to Zoom</span>
+        <span class="instruction-item">⌨️ <strong>WASD</strong> to Fly</span>
+        <span class="instruction-item">⌨️ <strong>Q/E</strong> for Up/Down</span>
+        <span class="instruction-item">⚡ <strong>Shift</strong> Speed Boost</span>
+        <span class="instruction-item">⚙️ <strong>[ / ]</strong> Adjust Flight Speed: <span id="speed-indicator">0.05</span></span>
+    </div>
+
+    <script type="module">
+        // =========================================================================
+        // CONFIGURATION: CHANGE YOUR SPLAT / PLY FILE PATH HERE
+        // =========================================================================
+        const SPLAT_PATH = 'output/result.ply'; 
+        // =========================================================================
+
+        import * as THREE from 'three';
+        import * as GaussianSplats3D from 'gaussian-splats-3d';
+
+        // Update UI info
+        document.getElementById('path-val').textContent = SPLAT_PATH;
+        const statusBadge = document.getElementById('status-badge');
+
+        try {
+            // 3D Gaussian Splatting uses OpenCV / Y-down convention, so cameraUp is [0, -1, 0]
+            // to make the scene appear right-side up in the browser.
+            const viewer = new GaussianSplats3D.Viewer({
+                'cameraUp': [0, -1, 0],
+                'initialCameraPosition': [0, -1, 4],
+                'initialCameraLookAt': [0, 0, 0],
+                'selfDrivenMode': true,
+                'useBuiltInControls': true,
+                'sharedMemoryForWorkers': false,
+                'rootElement': document.getElementById('splat-container')
+            });
+
+            viewer.init();
+            
+            statusBadge.textContent = "Loading Splat...";
+            
+            viewer.addSplatScene(SPLAT_PATH, {
+                'showLoadingUI': true
+            })
+            .then(() => {
+                let currentSpeed = 0.05;
+                const speedIndicator = document.getElementById('speed-indicator');
+
+                // Auto-fit camera to the loaded splat's bounding sphere
+                try {
+                    const splatMesh = viewer.splatMesh;
+                    if (splatMesh) {
+                        // Compute bounding sphere of the loaded scene
+                        splatMesh.geometry.computeBoundingSphere();
+                        const sphere = splatMesh.geometry.boundingSphere;
+                        if (sphere && sphere.radius > 0) {
+                            const c = sphere.center;
+                            const r = sphere.radius;
+                            // Place camera at 3x radius along +Z from center
+                            const camPos = [c.x, c.y, c.z + r * 3];
+                            viewer.camera.position.set(camPos[0], camPos[1], camPos[2]);
+                            viewer.camera.lookAt(c.x, c.y, c.z);
+                            console.log('Auto-fit camera:', camPos, '→ look at', [c.x, c.y, c.z]);
+
+                            // Base flight speed dynamically on the scene's radius
+                            currentSpeed = Math.max(0.005, r / 100);
+                            speedIndicator.textContent = currentSpeed.toFixed(3);
+                        }
+                    }
+                } catch(fitErr) {
+                    console.warn('Auto-fit failed:', fitErr);
+                }
+                statusBadge.textContent = "Active";
+                statusBadge.className = "status-badge success";
+                window.viewer = viewer;
+                viewer.start();
+
+                // Show orientation controls now that the scene is loaded
+                document.getElementById('rot-toggle').classList.add('visible');
+
+                // Wire up rotation buttons — each click rotates the splatMesh by 15°
+                const STEP = Math.PI / 12; // 15 degrees
+                const mesh = () => viewer.splatMesh;
+                document.getElementById('rx-neg').onclick = () => { if(mesh()) mesh().rotation.x -= STEP; };
+                document.getElementById('rx-pos').onclick = () => { if(mesh()) mesh().rotation.x += STEP; };
+                document.getElementById('ry-neg').onclick = () => { if(mesh()) mesh().rotation.y -= STEP; };
+                document.getElementById('ry-pos').onclick = () => { if(mesh()) mesh().rotation.y += STEP; };
+                document.getElementById('rz-neg').onclick = () => { if(mesh()) mesh().rotation.z -= STEP; };
+                document.getElementById('rz-pos').onclick = () => { if(mesh()) mesh().rotation.z += STEP; };
+                document.getElementById('rot-reset').onclick = () => {
+                    if(mesh()) { mesh().rotation.set(0, 0, 0); }
+                };
+
+                // ── Custom WASD + QE Flying Controls ─────────────────────────────
+                const activeKeys = {};
+                window.addEventListener('keydown', (e) => {
+                    activeKeys[e.code] = true;
+
+                    // Manual flight speed adjustment using [ and ]
+                    if (e.code === 'BracketLeft') {
+                        currentSpeed = Math.max(0.001, currentSpeed * 0.7);
+                        speedIndicator.textContent = currentSpeed.toFixed(3);
+                    } else if (e.code === 'BracketRight') {
+                        currentSpeed = Math.min(2.0, currentSpeed * 1.3);
+                        speedIndicator.textContent = currentSpeed.toFixed(3);
+                    }
+                });
+                window.addEventListener('keyup', (e) => {
+                    activeKeys[e.code] = false;
+                });
+
+                // Re-usable vector memory
+                const tempDir = new THREE.Vector3();
+                const tempSide = new THREE.Vector3();
+                const tempUp = new THREE.Vector3();
+
+                function updateMovement() {
+                    if (!viewer.camera || !viewer.controls) return;
+
+                    let dx = 0; // Left/Right
+                    let dy = 0; // Up/Down
+                    let dz = 0; // Forward/Backward
+
+                    if (activeKeys['KeyW']) dz -= 1;
+                    if (activeKeys['KeyS']) dz += 1;
+                    if (activeKeys['KeyA']) dx -= 1;
+                    if (activeKeys['KeyD']) dx += 1;
+                    if (activeKeys['KeyQ']) dy -= 1;
+                    if (activeKeys['KeyE']) dy += 1;
+
+                    if (dx !== 0 || dy !== 0 || dz !== 0) {
+                        const boost = (activeKeys['ShiftLeft'] || activeKeys['ShiftRight']) ? 3.0 : 1.0;
+                        const step = currentSpeed * boost;
+
+                        // Local forward direction
+                        viewer.camera.getWorldDirection(tempDir);
+
+                        // Local right direction
+                        tempSide.crossVectors(tempDir, viewer.camera.up).normalize();
+
+                        // Local up direction
+                        tempUp.copy(viewer.camera.up).normalize();
+
+                        // Offset vector calculation
+                        const offset = new THREE.Vector3()
+                            .addScaledVector(tempDir, -dz * step) // forward
+                            .addScaledVector(tempSide, dx * step)  // side
+                            .addScaledVector(tempUp, -dy * step);  // up/down (correct Y-down axis)
+
+                        // Translate both camera position and OrbitControls look-at target
+                        viewer.camera.position.add(offset);
+                        viewer.controls.target.add(offset);
+
+                        // Signal changes to the camera system
+                        viewer.controls.update();
+                    }
+
+                    requestAnimationFrame(updateMovement);
+                }
+
+                // Launch updates
+                requestAnimationFrame(updateMovement);
+
+            })
+            .catch((err) => {
+                console.error(err);
+                statusBadge.textContent = "Error Loading File";
+                statusBadge.className = "status-badge";
+                statusBadge.style.color = "#f87171";
+                statusBadge.style.background = "rgba(239, 68, 68, 0.1)";
+                statusBadge.style.borderColor = "rgba(239, 68, 68, 0.2)";
+                alert("Failed to load splat file: " + SPLAT_PATH + "\n\nMake sure the file exists and that you are serving this directory, or opening with a browser that allows local file sharing (some browsers block local file loading via file:// due to CORS policies. In that case, start a quick python server using `python -m http.server 8000` in the directory, and visit http://localhost:8000/viewer.html).");
+            });
+
+        } catch (e) {
+            console.error("Initialization error", e);
+            statusBadge.textContent = "WebGL Error";
+            statusBadge.className = "status-badge";
+            statusBadge.style.color = "#f87171";
+        }
+    </script>
+</body>
+</html>
