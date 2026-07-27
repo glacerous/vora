@@ -5,6 +5,9 @@ Run with: py server.py
 Open:     http://localhost:8000
 """
 import os
+from dotenv import load_dotenv
+load_dotenv()
+
 import glob
 import threading
 import time
@@ -31,6 +34,7 @@ state = {
     "message":     "Ready.",
     "frame_count": 0,
     "error":       None,
+    "carbon_estimation": None,
 }
 
 def upd(stage, msg, **kw):
@@ -101,7 +105,47 @@ def _extract_thread(video_path, target, blur_thresh):
         upd("error", str(e), error=str(e))
 
 
-def _reconstruct_thread():
+def run_carbon_analysis(ply_path):
+    try:
+        from carbon.dbh_extractor import extract_dbh
+        from carbon.allometric import estimate_carbon
+        
+        # Default scale_factor is 1.0 (will load calibration.json if present)
+        dbh_result = extract_dbh(
+            ply_path=ply_path, 
+            scale_factor=1.0, 
+            vertical_axis='z', 
+            breast_height=1.3
+        )
+        
+        if "error" in dbh_result:
+            return {"error": dbh_result["error"]}
+            
+        carbon_result = estimate_carbon(
+            dbh_cm=dbh_result['dbh_cm'], 
+            height_m=dbh_result['height_m'], 
+            wood_density=0.6
+        )
+        
+        return {
+            "dbh_cm": dbh_result["dbh_cm"],
+            "height_m": dbh_result["height_m"],
+            "confidence": dbh_result["confidence_note"],
+            "method": dbh_result["method"],
+            "slice_points_count": dbh_result["slice_points_count"],
+            "mean_fit_error_cm": dbh_result["mean_fit_error_cm"],
+            "biomass_kg": carbon_result["total_biomass_kg"],
+            "above_ground_biomass_kg": carbon_result["above_ground_biomass_kg"],
+            "below_ground_biomass_kg": carbon_result["below_ground_biomass_kg"],
+            "carbon_kg": carbon_result["carbon_kg"],
+            "co2e_kg": carbon_result["co2e_kg"],
+            "disclaimer": carbon_result["disclaimer"]
+        }
+    except Exception as e:
+        return {"error": f"Failed to compute carbon metrics: {e}"}
+
+
+def _reconstruct_thread(tree_code):
     try:
         upd("reconstructing", "Connecting to Modal…")
         import modal
@@ -127,7 +171,38 @@ def _reconstruct_thread():
 
         elapsed = time.time() - t0
         mb = len(result) / 1024 / 1024
-        upd("done", f"✓ Done in {elapsed:.0f}s — {mb:.1f} MB Gaussian Splat ready!")
+        
+        # Run DBH and carbon estimation
+        upd("reconstructing", "✓ Reconstruction done. Estimating DBH and Carbon...")
+        carbon_est = run_carbon_analysis(out)
+        state["carbon_estimation"] = carbon_est
+        
+        # Persist results to Cloudflare R2 and D1
+        if carbon_est and "error" not in carbon_est:
+            try:
+                upd("reconstructing", "Uploading splat file to Cloudflare R2...")
+                from storage.r2_client import upload_splat
+                splat_file_url = upload_splat(out, tree_code)
+                
+                upd("reconstructing", "Saving scan results to Cloudflare D1...")
+                from storage.d1_client import save_scan_result
+                save_scan_result(
+                    tree_code=tree_code,
+                    dbh_cm=carbon_est.get("dbh_cm"),
+                    tinggi_m=carbon_est.get("height_m"),
+                    biomassa_kg=carbon_est.get("biomass_kg"),
+                    karbon_kg=carbon_est.get("carbon_kg"),
+                    co2e_kg=carbon_est.get("co2e_kg"),
+                    splat_file_url=splat_file_url,
+                    confidence_note=carbon_est.get("confidence")
+                )
+                upd("done", f"✓ Done in {elapsed:.0f}s — {mb:.1f} MB Gaussian Splat ready! (Tree code: {tree_code})")
+            except Exception as e:
+                print(f"Persistence error: {e}")
+                upd("error", f"Reconstruction done, but failed to save: {e}", error=str(e))
+        else:
+            error_msg = carbon_est.get("error") if carbon_est else "Unknown carbon analysis error"
+            upd("error", f"Reconstruction done, but carbon analysis failed: {error_msg}", error=error_msg)
 
     except Exception as e:
         upd("error", str(e), error=str(e))
@@ -207,10 +282,32 @@ def use_photos():
 def reconstruct():
     if state["stage"] not in ("extracted", "done", "error"):
         return jsonify({"error": "Not ready — extract frames first"}), 400
+    
+    # Read tree_code from request json, form, or args
+    tree_code = None
+    if request.is_json:
+        data = request.get_json() or {}
+        tree_code = data.get("tree_code")
+    else:
+        tree_code = request.form.get("tree_code") or request.args.get("tree_code")
+        
+    if not tree_code:
+        from storage.d1_client import generate_tree_code
+        tree_code = generate_tree_code()
+        
     state["error"] = None
     upd("reconstructing", "Queuing reconstruction…")
-    threading.Thread(target=_reconstruct_thread, daemon=True).start()
-    return jsonify({"started": True})
+    threading.Thread(target=_reconstruct_thread, args=(tree_code,), daemon=True).start()
+    return jsonify({"started": True, "tree_code": tree_code})
+
+@app.route("/history/<tree_code>", methods=["GET"])
+def history(tree_code):
+    try:
+        from storage.d1_client import get_scan_history
+        records = get_scan_history(tree_code)
+        return jsonify({"success": True, "tree_code": tree_code, "history": records})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 if __name__ == "__main__":
     import socket
@@ -235,6 +332,13 @@ if __name__ == "__main__":
                 port += 1
 
     port = find_free_port(8000)
+    
+    # Pre-calculate carbon metrics if result.ply already exists
+    existing_ply = os.path.join(OUTPUT_DIR, "result.ply")
+    if os.path.exists(existing_ply):
+        print("Found existing result.ply. Pre-calculating carbon metrics...")
+        state["carbon_estimation"] = run_carbon_analysis(existing_ply)
+        
     print("=" * 50)
     print("  3D Reconstruction Pipeline")
     print(f"  http://localhost:{port}")
