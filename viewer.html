@@ -340,7 +340,22 @@
         // CONFIGURATION: CHANGE YOUR SPLAT / PLY FILE PATH HERE
         // =========================================================================
         const urlParams = new URLSearchParams(window.location.search);
-        const SPLAT_PATH = urlParams.get('url') || urlParams.get('file') || 'output/result.ply'; 
+        let splatPath = urlParams.get('url') || urlParams.get('file') || 'output/result.ply';
+
+        // Rewrite R2 URLs containing /tree_scans/ to use the local server streaming proxy
+        if (splatPath.includes('/tree_scans/')) {
+            const parts = splatPath.split('/tree_scans/');
+            if (parts.length === 2) {
+                const subParts = parts[1].split('/');
+                if (subParts.length === 2) {
+                    const treeCode = subParts[0];
+                    const filename = subParts[1];
+                    splatPath = `/splat-proxy/${treeCode}/${filename}`;
+                    console.log('Routing R2 URL through local streaming proxy:', splatPath);
+                }
+            }
+        }
+        const SPLAT_PATH = splatPath;
         // =========================================================================
 
         import * as THREE from 'three';
