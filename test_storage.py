@@ -83,7 +83,12 @@ def test_file_download(url: str):
     """
     print(f"\n--- STEP 2: File Download Accessibility Check ---")
     is_presigned = "X-Amz-Signature" in url
-    url_type = "presigned (r2.cloudflarestorage.com)" if is_presigned else "public r2.dev"
+    if is_presigned:
+        url_type = "presigned (r2.cloudflarestorage.com)"
+    elif "r2.dev" in url:
+        url_type = "public r2.dev"
+    else:
+        url_type = "public custom domain"
     print(f"     URL type: {url_type}")
 
     try:
