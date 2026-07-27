@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+boto3
+requests
+python-dotenv
+opencv-python-headless
+numpy
+modal
