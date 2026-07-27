@@ -339,7 +339,8 @@
         // =========================================================================
         // CONFIGURATION: CHANGE YOUR SPLAT / PLY FILE PATH HERE
         // =========================================================================
-        const SPLAT_PATH = 'output/result.ply'; 
+        const urlParams = new URLSearchParams(window.location.search);
+        const SPLAT_PATH = urlParams.get('url') || urlParams.get('file') || 'output/result.ply'; 
         // =========================================================================
 
         import * as THREE from 'three';
