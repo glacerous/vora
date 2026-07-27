@@ -237,6 +237,28 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+from fastapi.middleware.cors import CORSMiddleware
+
+# CORS Configuration
+# WARNING: Narrow this list down to your specific production Vercel frontend domains before submission.
+origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",  # Common Vite dev port
+    # "https://your-frontend.vercel.app",  # Add your production Vercel domain here
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    # For initial loose development, allow_origins=["*"] is used.
+    # Note: To support credentials (cookies, authorization headers), allow_origins MUST be set to
+    # an explicit list of origins (like the 'origins' variable above), and allow_credentials must be True.
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 # ── Static / file-serving routes ─────────────────────────────────────────────
 
 @app.get("/", include_in_schema=False)
