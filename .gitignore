@@ -20,3 +20,8 @@ test_images/
 # Dependencies
 node_modules/
 instantsplat_repo/
+
+# Environment variables
+.env
+.env.*
+
