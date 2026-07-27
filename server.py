@@ -18,8 +18,10 @@ import cv2
 import numpy as np
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
+import boto3
+from botocore.config import Config
 
 load_dotenv()
 
@@ -398,7 +400,72 @@ async def history(tree_code: str):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
+@app.get(
+    "/splat-proxy/{tree_code}/{filename}",
+    summary="Proxy and stream splat files from Cloudflare R2",
+)
+async def splat_proxy(tree_code: str, filename: str):
+    """
+    Proxies splat/ply files from Cloudflare R2, streaming them back to the client.
+    Bypasses DNS/SSL blocks on R2.dev subdomains by using the direct S3 API.
+    """
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    access_key = os.environ.get("R2_ACCESS_KEY_ID")
+    secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
+    bucket_name = os.environ.get("R2_BUCKET_NAME")
+
+    if not all([account_id, access_key, secret_key, bucket_name]):
+        raise HTTPException(status_code=500, detail="R2 storage credentials not configured")
+
+    endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
+    object_key = f"tree_scans/{tree_code}/{filename}"
+
+    try:
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            config=Config(signature_version="s3v4"),
+            region_name="auto"
+        )
+        # Fetch object metadata and stream from R2 (boto3 call is blocking, so run in thread pool)
+        response = await asyncio.to_thread(
+            s3.get_object,
+            Bucket=bucket_name,
+            Key=object_key
+        )
+    except Exception as exc:
+        err_msg = str(exc)
+        if "NoSuchKey" in err_msg:
+            raise HTTPException(status_code=404, detail="File not found in storage")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch from R2: {err_msg}")
+
+    body = response["Body"]
+
+    def iter_chunks():
+        try:
+            while True:
+                # Read 1 MB chunk (blocking call, but executed safely in thread by StreamingResponse)
+                chunk = body.read(1024 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            body.close()
+
+    media_type = "application/octet-stream"
+    if filename.endswith(".ply"):
+        media_type = "application/x-ply"
+
+    headers = {
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Length": str(response.get("ContentLength", ""))
+    }
+
+    return StreamingResponse(iter_chunks(), media_type=media_type, headers=headers)
+
 # ── Dev entry point ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server_fastapi:app", host="0.0.0.0", port=8001, reload=False)
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False)
