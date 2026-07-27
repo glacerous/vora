@@ -24,4 +24,5 @@ instantsplat_repo/
 # Environment variables
 .env
 .env.*
+!.env.example
 
