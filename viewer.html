@@ -342,8 +342,8 @@
         const urlParams = new URLSearchParams(window.location.search);
         let splatPath = urlParams.get('url') || urlParams.get('file') || 'output/result.ply';
 
-        // Rewrite R2 URLs containing /tree_scans/ to use the local server streaming proxy
-        if (splatPath.includes('/tree_scans/')) {
+        // Rewrite R2 URLs containing r2.dev to use the local server streaming proxy (bypasses ISP blocks)
+        if (splatPath.includes('r2.dev') && splatPath.includes('/tree_scans/')) {
             const parts = splatPath.split('/tree_scans/');
             if (parts.length === 2) {
                 const subParts = parts[1].split('/');
