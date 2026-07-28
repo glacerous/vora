@@ -42,6 +42,7 @@ state: dict = {
     "error":             None,
     "carbon_estimation": None,
     "overlap_warning":   None,
+    "cancel_requested":  False,
 }
 
 def upd(stage: str, msg: str, **kw: Any) -> None:
@@ -270,6 +271,8 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
 
         candidates, fi = [], 0
         while True:
+            if state.get("cancel_requested", False):
+                raise RuntimeError("Job cancelled by user")
             ok, frame = cap.read()
             if not ok:
                 break
@@ -277,6 +280,9 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
                 candidates.append((fi, _blur(frame), frame.copy()))
             fi += 1
         cap.release()
+
+        if state.get("cancel_requested", False):
+            raise RuntimeError("Job cancelled by user")
 
         print(f"[EXTRACT] Found {len(candidates)} sharp candidate frames (blur_thresh={blur_thresh})")
 
@@ -291,6 +297,8 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         
         # Overlap Check & Dynamic Resampling (Fase 3)
         upd("extracting", f"Checking overlap & resampling frames...")
+        if state.get("cancel_requested", False):
+            raise RuntimeError("Job cancelled by user")
         resampled_idxs = _check_overlap_and_resample(candidates, idxs, threshold=0.15)
         n = len(resampled_idxs)
         
@@ -300,6 +308,8 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
             os.remove(f)
 
         for j, (_, _score, frame) in enumerate([candidates[i] for i in resampled_idxs]):
+            if state.get("cancel_requested", False):
+                raise RuntimeError("Job cancelled by user")
             h, w = frame.shape[:2]
             if w > 1920:
                 frame = cv2.resize(frame, (1920, int(h * 1920 / w)))
@@ -315,13 +325,20 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         upd("extracted", f"\u2713 {n} sharp frames ready")
         print(f"[EXTRACT] Completed. {n} frames written to {FRAMES_DIR}")
 
-    except Exception as exc:
-        print(f"[EXTRACT ERROR] {exc}")
-        upd("error", str(exc), error=str(exc))
+    except BaseException as exc:
+        if state.get("cancel_requested", False):
+            print("[EXTRACT] Cancel requested by user. Aborting...")
+            upd("idle", "Ready.")
+            state["cancel_requested"] = False
+        else:
+            print(f"[EXTRACT ERROR] {exc}")
+            upd("error", str(exc), error=str(exc))
 
 # ── Background thread: GPU reconstruction + R2/D1 persistence (sync, IO heavy) ─
-def _reconstruct_thread(tree_code: str, remove_background: bool = True) -> None:
+def _reconstruct_thread(tree_code: str, remove_background: bool = False) -> None:
     try:
+        if state.get("cancel_requested", False):
+            raise RuntimeError("Job cancelled by user")
         upd("reconstructing", "Connecting to Modal…")
         import modal
 
@@ -374,6 +391,8 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = True) -> None:
         print(f"[RECONSTRUCT] Connecting to Modal pipeline for tree_code '{tree_code}' at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t0))}")
         print(f"[RECONSTRUCT] Uploading {len(imgs)} frames to GPU cloud (background removed: {remove_background})...")
         
+        if state.get("cancel_requested", False):
+            raise RuntimeError("Job cancelled by user")
         fn     = modal.Function.from_name("instantsplat-app", "run_reconstruction")
         
         t_remote_start = time.time()
@@ -436,8 +455,13 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = True) -> None:
             upd("error", f"Reconstruction done, but carbon analysis failed: {err}", error=err)
 
     except BaseException as exc:
-        print(f"[RECONSTRUCT ERROR] Critical pipeline failure: {exc}")
-        upd("error", str(exc), error=str(exc))
+        if state.get("cancel_requested", False):
+            print("[RECONSTRUCT] Cancel requested by user. Aborting...")
+            upd("idle", "Ready.")
+            state["cancel_requested"] = False
+        else:
+            print(f"[RECONSTRUCT ERROR] Critical pipeline failure: {exc}")
+            upd("error", str(exc), error=str(exc))
 
 # ── Application lifespan: pre-calculate carbon if result.ply already exists ──
 @asynccontextmanager
@@ -559,6 +583,7 @@ async def upload_video(
             out.write(chunk)
 
     state["error"] = None
+    state["cancel_requested"] = False
     upd("extracting", "Video received, starting smart extraction…")
     # BackgroundTasks dispatches sync callables to thread pool automatically
     background_tasks.add_task(_extract_thread, path, frames, blur_thresh)
@@ -584,6 +609,7 @@ async def use_photos(photos: List[UploadFile] = File(...)):
     n = len(photos)
     state["frame_count"] = n
     state["error"] = None
+    state["cancel_requested"] = False
     upd("extracted", f"\u2713 {n} photos loaded")
     return {"success": True, "count": n}
 
@@ -603,23 +629,31 @@ async def reconstruct(
     if state["stage"] not in ("extracted", "done", "error"):
         raise HTTPException(status_code=400, detail="Not ready — extract frames first")
 
-    tree_code = (body.tree_code if body else None) or tree_code_query
-    
-    # Resolve optional remove_background toggle
-    remove_bg = True
-    if remove_bg_query is not None:
-        remove_bg = remove_bg_query
-    elif body is not None and body.remove_background is not None:
-        remove_bg = body.remove_background
+    # Force remove_background to False as requested by user
+    remove_bg = False
 
-    if not tree_code:
-        from storage.d1_client import generate_tree_code
-        tree_code = generate_tree_code()
+    # Reset cancellation request
+    state["cancel_requested"] = False
+
+    # Generate or resolve tree code
+    import random
+    final_code = tree_code_query or (body.tree_code if body else None) or f"POHON-{random.randint(1000, 9999)}"
+    final_code = final_code.strip().upper()
 
     state["error"] = None
     upd("reconstructing", "Queuing reconstruction…")
-    background_tasks.add_task(_reconstruct_thread, tree_code, remove_bg)
-    return {"started": True, "tree_code": tree_code}
+    background_tasks.add_task(_reconstruct_thread, final_code, remove_bg)
+    return {"started": True, "tree_code": final_code}
+
+
+@app.post("/cancel", summary="Cancel active pipeline job")
+async def cancel_job():
+    """Signals cancellation to background threads and resets state to idle."""
+    state["cancel_requested"] = True
+    upd("idle", "Ready (Previous job cancelled).")
+    state["overlap_warning"] = None
+    state["error"] = None
+    return {"success": True, "message": "Cancellation request registered."}
 
 @app.get(
     "/history/{tree_code}",
