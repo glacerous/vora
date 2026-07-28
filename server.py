@@ -71,14 +71,69 @@ class ScansResponse(BaseModel):
     success: bool
     scans: List[Any]
 
+# ── Helper: load scale_factor from calibration.json (scan-id-aware) ─────────
+import json as _json
+import logging as _logging
+
+_calib_logger = _logging.getLogger("calibration")
+
+def _load_scale_factor_for_scan(scan_id: str = None) -> float:
+    """
+    Looks up scale_factor from calibration.json.
+    Priority: scan_id entry → 'default' entry → hardcoded 1.0 (with WARNING).
+    """
+    calib_path = os.path.join(BASE_DIR, "calibration.json")
+    if os.path.exists(calib_path):
+        try:
+            with open(calib_path, "r") as fh:
+                registry = _json.load(fh)
+            # 1. Try scan-specific entry first
+            if scan_id and scan_id in registry:
+                sf = float(registry[scan_id]["scale_factor"])
+                _calib_logger.info(
+                    f"[CALIBRATION] Loaded scan-specific scale_factor={sf:.8f} "
+                    f"for scan_id='{scan_id}' from {calib_path}"
+                )
+                return sf
+            # 2. Fall back to global 'default' entry if present
+            if "default" in registry:
+                sf = float(registry["default"]["scale_factor"])
+                _calib_logger.info(
+                    f"[CALIBRATION] No scan-specific calibration for '{scan_id}'. "
+                    f"Using global 'default' scale_factor={sf:.8f} from {calib_path}"
+                )
+                return sf
+            _calib_logger.warning(
+                f"[CALIBRATION] calibration.json exists at {calib_path} but contains "
+                f"no entry for scan_id='{scan_id}' and no 'default' key. "
+                f"Falling back to scale_factor=1.0 — DBH/height values will be UNCALIBRATED."
+            )
+        except Exception as e:
+            _calib_logger.warning(
+                f"[CALIBRATION] Failed to read {calib_path}: {e}. "
+                f"Falling back to scale_factor=1.0 — DBH/height values will be UNCALIBRATED."
+            )
+    else:
+        _calib_logger.warning(
+            "[CALIBRATION] ⚠ WARNING: calibration.json NOT FOUND. "
+            "Using scale_factor=1.0 (uncalibrated default). "
+            "DBH and height measurements will be in arbitrary PLY units, NOT real-world meters. "
+            "Run calibrate_scale.py to create a calibration file."
+        )
+    return 1.0
+
+
 # ── Helper: carbon analysis (sync, CPU-bound — always called inside thread) ──
-def run_carbon_analysis(ply_path: str) -> dict:
+def run_carbon_analysis(ply_path: str, scan_id: str = None) -> dict:
     try:
         from carbon.allometric import estimate_carbon
         from carbon.dbh_extractor import extract_dbh
 
+        # Load scale_factor from calibration.json (scan-id-aware, with fallback + warnings)
+        scale_factor = _load_scale_factor_for_scan(scan_id)
+
         dbh_result = extract_dbh(
-            ply_path=ply_path, scale_factor=1.0,
+            ply_path=ply_path, scale_factor=scale_factor,
             vertical_axis="z", breast_height=1.3,
         )
         if "error" in dbh_result:
@@ -96,6 +151,8 @@ def run_carbon_analysis(ply_path: str) -> dict:
             "method":                  dbh_result["method"],
             "slice_points_count":      dbh_result["slice_points_count"],
             "mean_fit_error_cm":       dbh_result["mean_fit_error_cm"],
+            "scale_factor_used":       scale_factor,
+            "calibrated":              scale_factor != 1.0,
             "biomass_kg":              carbon_result["total_biomass_kg"],
             "above_ground_biomass_kg": carbon_result["above_ground_biomass_kg"],
             "below_ground_biomass_kg": carbon_result["below_ground_biomass_kg"],
@@ -249,7 +306,7 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = True) -> None:
         print(f"[RECONSTRUCT] Total pipeline runtime: {elapsed:.2f} seconds")
 
         upd("reconstructing", "\u2713 Reconstruction done. Estimating DBH and Carbon...")
-        carbon_est = run_carbon_analysis(out)
+        carbon_est = run_carbon_analysis(out, scan_id=tree_code)
         state["carbon_estimation"] = carbon_est
 
         if carbon_est and "error" not in carbon_est:
@@ -298,8 +355,10 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = True) -> None:
 async def lifespan(application: FastAPI):
     existing_ply = os.path.join(OUTPUT_DIR, "result.ply")
     if os.path.exists(existing_ply):
-        print("Found existing result.ply. Pre-calculating carbon metrics...")
-        state["carbon_estimation"] = await asyncio.to_thread(run_carbon_analysis, existing_ply)
+        print("Found existing result.ply. Pre-calculating carbon metrics (no scan_id context at startup)...")
+        # At server startup we don't know which scan_id was last processed,
+        # so pass None — _load_scale_factor_for_scan will warn and use default/global.
+        state["carbon_estimation"] = await asyncio.to_thread(run_carbon_analysis, existing_ply, None)
 
     print("=" * 50)
     print("  3D Reconstruction Pipeline (FastAPI)")

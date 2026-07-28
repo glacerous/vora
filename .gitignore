@@ -26,3 +26,5 @@ instantsplat_repo/
 .env.*
 !.env.example
 
+# Scale calibration (local per-deployment measurement data)
+calibration.json
