@@ -340,3 +340,146 @@ def extract_dbh(ply_path, scale_factor=1.0, vertical_axis='z', breast_height=1.3
         "slice_points_count": len(points_2d),
         "mean_fit_error_cm": float(round(mean_err * scale * 100, 2))
     }
+
+
+def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
+                             breast_height: float = 1.3) -> dict:
+    """
+    Extracts tree DBH directly from a MASt3R geometric point cloud (points3d.ply).
+
+    This is more accurate than using the Gaussian splat output because every point
+    in a MASt3R cloud represents an actual observed 3D surface location, not an
+    opacity field.  The trade-off is a sparser cloud (~5 k-50 k pts) compared to
+    millions of Gaussian splat centres, so we compensate with a wider adaptive
+    slice tolerance and multi-slice median aggregation.
+
+    Parameters
+    ----------
+    ply_path      : path to the MASt3R plain xyz(+rgb) PLY file
+    scale_factor  : units-to-metres conversion (from calibration.json, or 1.0)
+    breast_height : standard breast height in metres (default 1.3 m)
+
+    Returns
+    -------
+    dict with keys: {dbh_cm, height_m, confidence_note, method,
+                     slice_points_count, mean_fit_error_cm}  — or {"error": ...}
+    """
+    logger.info("[MAST3R DBH] Starting DBH extraction from MASt3R point cloud...")
+    scale = load_scale_factor(scale_factor)
+
+    try:
+        points = parse_ply_points(ply_path)
+    except Exception as exc:
+        logger.error(f"[MAST3R DBH] Failed to load point cloud: {exc}")
+        return {"error": f"Failed to load MASt3R point cloud: {exc}"}
+
+    if len(points) < 30:
+        return {"error": f"MASt3R cloud too sparse for DBH extraction ({len(points)} pts)"}
+
+    # ── 1. Auto-detect vertical axis (axis with largest coordinate range) ──────
+    ranges = points.max(axis=0) - points.min(axis=0)
+    axis_idx = int(np.argmax(ranges))
+    axis_name = ["x", "y", "z"][axis_idx]
+    proj_axes = [i for i in [0, 1, 2] if i != axis_idx]
+    logger.info(f"[MAST3R DBH] Vertical axis={axis_name} (range={ranges[axis_idx]:.4f}), "
+                f"total points={len(points)}")
+
+    z_coords  = points[:, axis_idx]
+    z_min     = float(np.percentile(z_coords, 2))
+    z_max     = float(np.percentile(z_coords, 98))
+    total_h   = z_max - z_min          # height span in point-cloud units
+    estimated_height_m = float(total_h * scale)
+
+    logger.info(f"[MAST3R DBH] Height range: {z_min:.4f} – {z_max:.4f} units | "
+                f"estimated real height: {estimated_height_m:.2f} m")
+
+    # ── 2. Breast-height target in point-cloud units ───────────────────────────
+    bh_units  = breast_height / scale
+    z_target  = z_min + bh_units
+
+    # If breast height exceeds point cloud bounds, fall back to 30 % from bottom
+    if z_target >= z_max * 0.95:
+        z_target = z_min + 0.30 * total_h
+        logger.warning("[MAST3R DBH] Breast height exceeds cloud bounds. Using 30 % position.")
+
+    # ── 3. Adaptive slice tolerance (wider for sparse clouds) ─────────────────
+    #  Base: 10 cm in real metres converted to units.
+    #  Enlarge for sparse clouds (inverse-sqrt of density heuristic).
+    #  Cap at 15 % of tree height to avoid mixing trunk with crown.
+    base_tol  = 0.10 / scale
+    density_factor = max(1.0, (5000 / max(len(points), 1)) ** 0.5)
+    tol       = base_tol * density_factor
+    tol       = min(tol, total_h * 0.15)   # upper cap
+    tol       = max(tol, total_h * 0.02)   # lower cap
+    logger.info(f"[MAST3R DBH] Slice tolerance: {tol:.4f} units "
+                f"(base={base_tol:.4f}, density_factor={density_factor:.2f})")
+
+    # ── 4. Multi-slice aggregation around breast height ───────────────────────
+    #  Fit a circle at three Z positions; use their median radius.
+    offsets = [-tol * 0.4, 0.0, tol * 0.4]
+    radii   = []
+
+    for off in offsets:
+        z_t  = z_target + off
+        mask = np.abs(z_coords - z_t) <= tol
+        pts_slice = points[mask]
+        if len(pts_slice) < 5:
+            continue
+        pts_2d = pts_slice[:, proj_axes]
+        xc, yc, R, err = fit_circle_2d(pts_2d)
+        if R is not None and R > 0:
+            radii.append(R)
+            logger.info(f"[MAST3R DBH]   Slice @offset={off:+.3f}: R={R:.4f} units, pts={len(pts_slice)}")
+
+    # ── 5. Fallback: widest slice in lower 50 % of tree ───────────────────────
+    method_used = "MASt3R multi-slice median"
+    if not radii:
+        logger.warning("[MAST3R DBH] Multi-slice failed, trying lower-trunk fallback...")
+        mask = (z_coords >= z_min) & (z_coords <= z_min + total_h * 0.5)
+        pts_trunk = points[mask]
+        if len(pts_trunk) < 5:
+            return {"error": "No points in trunk region — cloud may be too sparse or misoriented"}
+        pts_2d = pts_trunk[:, proj_axes]
+        _, _, R, _ = fit_circle_robust(pts_2d)
+        if R is None:
+            return {"error": "Circle fitting failed on MASt3R trunk region"}
+        radii = [R]
+        method_used = "MASt3R lower-trunk fallback"
+
+    R_final = float(np.median(radii))
+    dbh_m   = R_final * 2.0 * scale
+    dbh_cm  = dbh_m * 100.0
+
+    # ── 6. Error estimate on the primary (centre) slice ────────────────────────
+    mask_best  = np.abs(z_coords - z_target) <= tol
+    pts_best   = points[mask_best]
+    slice_count = len(pts_best)
+    mean_err_cm = 0.0
+    if slice_count >= 5:
+        pts_2d = pts_best[:, proj_axes]
+        _, _, _, mean_err = fit_circle_robust(pts_2d)
+        if mean_err is not None:
+            mean_err_cm = float(round(mean_err * scale * 100, 2))
+
+    # ── 7. Confidence rating ──────────────────────────────────────────────────
+    if slice_count < 20:
+        confidence = "Low (sparse MASt3R cloud at breast height)"
+    elif mean_err_cm > 5.0:
+        confidence = "Low (high trunk fitting noise)"
+    elif mean_err_cm > 2.0:
+        confidence = "Medium (some trunk surface noise)"
+    else:
+        confidence = "High"
+
+    logger.info(f"[MAST3R DBH] Result: DBH={dbh_cm:.2f} cm, "
+                f"height={estimated_height_m:.2f} m, "
+                f"slices_used={len(radii)}, confidence={confidence}")
+
+    return {
+        "dbh_cm":             float(round(dbh_cm, 2)),
+        "height_m":           float(round(estimated_height_m, 2)),
+        "confidence_note":    confidence,
+        "method":             method_used,
+        "slice_points_count": slice_count,
+        "mean_fit_error_cm":  mean_err_cm,
+    }

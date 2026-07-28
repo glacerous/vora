@@ -32,7 +32,7 @@ image = (
     timeout=1800,  # 30 minutes
     image=image
 )
-def run_reconstruction(images_bytes: list[bytes]) -> bytes:
+def run_reconstruction(images_bytes: list[bytes]) -> dict:
     import os
     import time
     import shutil
@@ -329,10 +329,32 @@ def run_reconstruction(images_bytes: list[bytes]) -> bytes:
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: outlier removal failed ({cleanup_err}), returning unfiltered PLY")
 
     with open(output_file_path, "rb") as f:
-        data = f.read()
-        
+        splat_data = f.read()
+
+    # Locate the MASt3R plain xyz+rgb point cloud produced by init_geo.py.
+    # init_geo saves it as "result.ply" directly inside output_dir (not a splat).
+    points3d_data = None
+    mast3r_candidates = (
+        glob.glob(os.path.join(output_dir, "result.ply")) +
+        glob.glob(os.path.join(source_path, "sparse_*", "points3d.ply")) +
+        glob.glob(os.path.join(output_dir, "**", "points3d.ply"), recursive=True)
+    )
+    for candidate in mast3r_candidates:
+        if os.path.exists(candidate):
+            with open(candidate, "rb") as f:
+                points3d_data = f.read()
+            size_kb = len(points3d_data) / 1024
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Found MASt3R point cloud: {candidate} ({size_kb:.1f} KB)")
+            break
+
+    if points3d_data is None:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: MASt3R points3d.ply not found — measurement will fall back to splat")
+
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] --- Export completed successfully ---")
-    return data
+    return {
+        "splat": splat_data,
+        "points3d": points3d_data,  # None if not found
+    }
 
 
 @app.local_entrypoint()

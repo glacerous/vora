@@ -127,18 +127,39 @@ def _load_scale_factor_for_scan(scan_id: str = None) -> float:
 
 
 # ── Helper: carbon analysis (sync, CPU-bound — always called inside thread) ──
-def run_carbon_analysis(ply_path: str, scan_id: str = None) -> dict:
+def run_carbon_analysis(ply_path: str, points3d_path: str = None, scan_id: str = None) -> dict:
     try:
         from carbon.allometric import estimate_carbon
-        from carbon.dbh_extractor import extract_dbh
+        from carbon.dbh_extractor import extract_dbh, extract_dbh_from_mast3r
 
         # Load scale_factor from calibration.json (scan-id-aware, with fallback + warnings)
         scale_factor = _load_scale_factor_for_scan(scan_id)
 
-        dbh_result = extract_dbh(
-            ply_path=ply_path, scale_factor=scale_factor,
-            vertical_axis="z", breast_height=1.3,
-        )
+        # ── Primary: extract from MASt3R geometric point cloud ────────────────
+        dbh_result = None
+        if points3d_path and os.path.exists(points3d_path):
+            print(f"[CARBON] Trying MASt3R point cloud for measurement: {points3d_path}")
+            try:
+                dbh_result = extract_dbh_from_mast3r(
+                    ply_path=points3d_path, scale_factor=scale_factor
+                )
+                if "error" in dbh_result:
+                    print(f"[CARBON] MASt3R extraction failed: {dbh_result['error']} — falling back to splat")
+                    dbh_result = None
+                else:
+                    print(f"[CARBON] MASt3R extraction succeeded: DBH={dbh_result['dbh_cm']} cm")
+            except Exception as mast3r_err:
+                print(f"[CARBON] MASt3R extraction exception: {mast3r_err} — falling back to splat")
+                dbh_result = None
+
+        # ── Fallback: extract from Gaussian splat (legacy method) ─────────────
+        if dbh_result is None:
+            print(f"[CARBON] Using splat-based extraction (legacy): {ply_path}")
+            dbh_result = extract_dbh(
+                ply_path=ply_path, scale_factor=scale_factor,
+                vertical_axis="z", breast_height=1.3,
+            )
+
         if "error" in dbh_result:
             return {"error": dbh_result["error"]}
 
@@ -448,17 +469,38 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False) -> None
         print(f"[RECONSTRUCT] GPU Reconstruction remote call completed at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t_remote_end))}")
         print(f"[RECONSTRUCT] Remote duration: {elapsed_remote:.2f} seconds")
 
+        # ── Unpack result (new dict format: {splat, points3d}) ──────────────
+        if isinstance(result, dict):
+            splat_bytes    = result.get("splat", b"")
+            points3d_bytes = result.get("points3d")   # may be None
+        else:
+            # Backward compat: old Modal version returned raw bytes
+            splat_bytes    = result
+            points3d_bytes = None
+
+        # Save splat (viewer)
         out = os.path.join(OUTPUT_DIR, "result.ply")
         with open(out, "wb") as f:
-            f.write(result)
+            f.write(splat_bytes)
+
+        mb = len(splat_bytes) / 1024 / 1024
+        print(f"[RECONSTRUCT] Saved splat PLY: {out} ({mb:.2f} MB)")
+
+        # Save MASt3R point cloud (measurement source)
+        points3d_path = None
+        if points3d_bytes:
+            points3d_path = os.path.join(OUTPUT_DIR, "points3d.ply")
+            with open(points3d_path, "wb") as f:
+                f.write(points3d_bytes)
+            print(f"[RECONSTRUCT] Saved MASt3R point cloud: {points3d_path} ({len(points3d_bytes)/1024:.1f} KB)")
+        else:
+            print("[RECONSTRUCT] No MASt3R point cloud returned — measurement will use splat")
 
         elapsed = time.time() - t0
-        mb      = len(result) / 1024 / 1024
-        print(f"[RECONSTRUCT] Saved output PLY: {out} ({mb:.2f} MB)")
         print(f"[RECONSTRUCT] Total pipeline runtime: {elapsed:.2f} seconds")
 
-        upd("reconstructing", "\u2713 Reconstruction done. Estimating DBH and Carbon...")
-        carbon_est = run_carbon_analysis(out, scan_id=tree_code)
+        upd("reconstructing", "✓ Reconstruction done. Estimating DBH and Carbon...")
+        carbon_est = run_carbon_analysis(out, points3d_path=points3d_path, scan_id=tree_code)
         state["carbon_estimation"] = carbon_est
 
         if carbon_est and "error" not in carbon_est:
@@ -491,7 +533,7 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False) -> None
                     confidence_note=carbon_est.get("confidence"),
                     thumbnail_url=thumbnail_url,
                 )
-                upd("done", f"\u2713 Done in {elapsed:.0f}s \u2014 {mb:.1f} MB Gaussian Splat ready! (Tree code: {tree_code})")
+                upd("done", f"✓ Done in {elapsed:.0f}s — {mb:.1f} MB Gaussian Splat ready! (Tree code: {tree_code})")
             except Exception as exc:
                 print(f"Persistence error: {exc}")
                 upd("error", f"Reconstruction done, but failed to save: {exc}", error=str(exc))
