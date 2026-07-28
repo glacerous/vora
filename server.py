@@ -533,6 +533,7 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False) -> None
                     splat_file_url=splat_url,
                     confidence_note=carbon_est.get("confidence"),
                     thumbnail_url=thumbnail_url,
+                    geometry_3d=carbon_est.get("geometry_3d"),
                 )
                 upd("done", f"✓ Done in {elapsed:.0f}s — {mb:.1f} MB Gaussian Splat ready! (Tree code: {tree_code})")
             except Exception as exc:

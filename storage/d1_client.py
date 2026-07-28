@@ -51,17 +51,21 @@ def execute_d1_query(sql: str, params: list = None):
         
     return query_result.get("results", [])
 
+import json
+
 def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg: float,
-                     karbon_kg: float, co2e_kg: float, splat_file_url: str, confidence_note: str, thumbnail_url: str = None):
+                     karbon_kg: float, co2e_kg: float, splat_file_url: str, confidence_note: str,
+                     thumbnail_url: str = None, geometry_3d: dict = None):
     """
     Inserts a new scan record into the tree_scans database table on Cloudflare D1.
     """
     sql = """
-    INSERT INTO tree_scans (tree_code, scan_date, dbh_cm, tinggi_m, biomassa_kg, karbon_kg, co2e_kg, splat_file_url, confidence_note, thumbnail_url)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tree_scans (tree_code, scan_date, dbh_cm, tinggi_m, biomassa_kg, karbon_kg, co2e_kg, splat_file_url, confidence_note, thumbnail_url, geometry_3d)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     # Use ISO 8601 UTC format for scan_date
     scan_date = datetime.now(timezone.utc).isoformat()
+    geom_str = json.dumps(geometry_3d) if geometry_3d else None
     execute_d1_query(sql, [
         tree_code, 
         scan_date, 
@@ -72,7 +76,8 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
         co2e_kg, 
         splat_file_url, 
         confidence_note,
-        thumbnail_url
+        thumbnail_url,
+        geom_str
     ])
 
 def get_scan_history(tree_code: str):
@@ -80,14 +85,28 @@ def get_scan_history(tree_code: str):
     Retrieves all scan history for a specific tree_code sorted by scan_date.
     """
     sql = "SELECT * FROM tree_scans WHERE tree_code = ? ORDER BY scan_date DESC"
-    return execute_d1_query(sql, [tree_code])
+    rows = execute_d1_query(sql, [tree_code])
+    for r in rows:
+        if r.get("geometry_3d"):
+            try:
+                r["geometry_3d"] = json.loads(r["geometry_3d"])
+            except Exception:
+                pass
+    return rows
 
 def get_all_scans(limit: int = 20, offset: int = 0):
     """
     Retrieves all scan records from the database sorted by scan_date descending with limit & offset.
     """
     sql = "SELECT * FROM tree_scans ORDER BY scan_date DESC LIMIT ? OFFSET ?"
-    return execute_d1_query(sql, [int(limit), int(offset)])
+    rows = execute_d1_query(sql, [int(limit), int(offset)])
+    for r in rows:
+        if r.get("geometry_3d"):
+            try:
+                r["geometry_3d"] = json.loads(r["geometry_3d"])
+            except Exception:
+                pass
+    return rows
 
 def generate_tree_code() -> str:
     """
