@@ -82,6 +82,13 @@ def get_scan_history(tree_code: str):
     sql = "SELECT * FROM tree_scans WHERE tree_code = ? ORDER BY scan_date DESC"
     return execute_d1_query(sql, [tree_code])
 
+def get_all_scans(limit: int = 20, offset: int = 0):
+    """
+    Retrieves all scan records from the database sorted by scan_date descending with limit & offset.
+    """
+    sql = "SELECT * FROM tree_scans ORDER BY scan_date DESC LIMIT ? OFFSET ?"
+    return execute_d1_query(sql, [int(limit), int(offset)])
+
 def generate_tree_code() -> str:
     """
     Generates a unique tree code of format POHON-XXXX where XXXX is random alphanumeric.

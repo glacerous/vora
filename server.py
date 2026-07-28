@@ -66,6 +66,10 @@ class HistoryResponse(BaseModel):
     tree_code: str
     history: List[Any]
 
+class ScansResponse(BaseModel):
+    success: bool
+    scans: List[Any]
+
 # ── Helper: carbon analysis (sync, CPU-bound — always called inside thread) ──
 def run_carbon_analysis(ply_path: str) -> dict:
     try:
@@ -440,6 +444,23 @@ async def history(tree_code: str):
         from storage.d1_client import get_scan_history
         records = await asyncio.to_thread(get_scan_history, tree_code)
         return {"success": True, "tree_code": tree_code, "history": records}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+@app.get(
+    "/scans",
+    response_model=ScansResponse,
+    summary="Fetch all scan history with pagination",
+)
+async def get_scans(limit: int = 20, offset: int = 0):
+    """
+    Returns all scan records from Cloudflare D1 with optional limit and offset,
+    ordered by scan_date descending.
+    """
+    try:
+        from storage.d1_client import get_all_scans
+        records = await asyncio.to_thread(get_all_scans, limit, offset)
+        return {"success": True, "scans": records}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
