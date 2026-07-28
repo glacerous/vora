@@ -51,6 +51,7 @@ def upd(stage: str, msg: str, **kw: Any) -> None:
 class ReconstructRequest(BaseModel):
     """Optional JSON body for POST /reconstruct."""
     tree_code: Optional[str] = None
+    remove_background: Optional[bool] = True
 
 class StatusResponse(BaseModel):
     stage: str
@@ -174,7 +175,7 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         upd("error", str(exc), error=str(exc))
 
 # ── Background thread: GPU reconstruction + R2/D1 persistence (sync, IO heavy) ─
-def _reconstruct_thread(tree_code: str) -> None:
+def _reconstruct_thread(tree_code: str, remove_background: bool = True) -> None:
     try:
         upd("reconstructing", "Connecting to Modal…")
         import modal
@@ -184,15 +185,49 @@ def _reconstruct_thread(tree_code: str) -> None:
             raise ValueError("No frames found in test_images/")
 
         imgs = []
-        for f in files:
-            with open(f, "rb") as fh:
-                imgs.append(fh.read())
+        if remove_background:
+            try:
+                from rembg import remove
+                from PIL import Image
+                import io
+                print(f"[RECONSTRUCT] Running background removal using rembg on {len(files)} frames...")
+                for idx, f in enumerate(files):
+                    upd("reconstructing", f"Removing background: frame {idx+1}/{len(files)}...")
+                    with open(f, "rb") as fh:
+                        file_bytes = fh.read()
+                    
+                    # Process with rembg
+                    input_img = Image.open(io.BytesIO(file_bytes))
+                    output_img = remove(input_img)
+                    
+                    # Composite on a solid black background
+                    if output_img.mode == "RGBA":
+                        background = Image.new("RGBA", output_img.size, (0, 0, 0, 255))
+                        composited = Image.alpha_composite(background, output_img).convert("RGB")
+                    else:
+                        composited = output_img.convert("RGB")
+                    
+                    # Convert back to jpeg bytes
+                    out_io = io.BytesIO()
+                    composited.save(out_io, format="JPEG", quality=95)
+                    imgs.append(out_io.getvalue())
+                print(f"[RECONSTRUCT] Background removal complete.")
+            except Exception as bg_err:
+                print(f"[RECONSTRUCT ERROR] Background removal failed: {bg_err}. Falling back to original frames.")
+                imgs = []
+                for f in files:
+                    with open(f, "rb") as fh:
+                        imgs.append(fh.read())
+        else:
+            for f in files:
+                with open(f, "rb") as fh:
+                    imgs.append(fh.read())
 
         upd("reconstructing", f"Sending {len(imgs)} frames to Modal A10G GPU…")
         
         t0 = time.time()
         print(f"[RECONSTRUCT] Connecting to Modal pipeline for tree_code '{tree_code}' at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t0))}")
-        print(f"[RECONSTRUCT] Uploading {len(imgs)} frames to GPU cloud...")
+        print(f"[RECONSTRUCT] Uploading {len(imgs)} frames to GPU cloud (background removed: {remove_background})...")
         
         fn     = modal.Function.from_name("instantsplat-app", "run_reconstruction")
         
@@ -407,9 +442,10 @@ async def use_photos(photos: List[UploadFile] = File(...)):
 @app.post("/reconstruct", summary="Start GPU reconstruction on extracted frames")
 async def reconstruct(
     background_tasks: BackgroundTasks,
-    # Accept tree_code from JSON body OR query string for maximum flexibility
+    # Accept tree_code and remove_background from JSON body OR query string for maximum flexibility
     body: Optional[ReconstructRequest] = Body(default=None),
     tree_code_query: Optional[str] = Query(default=None, alias="tree_code"),
+    remove_bg_query: Optional[bool] = Query(default=None, alias="remove_background"),
 ):
     """
     Dispatches the GPU reconstruction job (via Modal) as a background task.
@@ -420,13 +456,21 @@ async def reconstruct(
         raise HTTPException(status_code=400, detail="Not ready — extract frames first")
 
     tree_code = (body.tree_code if body else None) or tree_code_query
+    
+    # Resolve optional remove_background toggle
+    remove_bg = True
+    if remove_bg_query is not None:
+        remove_bg = remove_bg_query
+    elif body is not None and body.remove_background is not None:
+        remove_bg = body.remove_background
+
     if not tree_code:
         from storage.d1_client import generate_tree_code
         tree_code = generate_tree_code()
 
     state["error"] = None
     upd("reconstructing", "Queuing reconstruction…")
-    background_tasks.add_task(_reconstruct_thread, tree_code)
+    background_tasks.add_task(_reconstruct_thread, tree_code, remove_bg)
     return {"started": True, "tree_code": tree_code}
 
 @app.get(
