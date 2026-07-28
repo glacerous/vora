@@ -242,18 +242,19 @@ app = FastAPI(
 from fastapi.middleware.cors import CORSMiddleware
 
 # CORS Configuration
-# WARNING: Narrow this list down to your specific production Vercel frontend domains before submission.
+# allow_credentials=False means we can safely use allow_origins=["*"].
+# Listed origins are documented for reference; the wildcard covers all of them.
 origins = [
     "http://localhost:3000",
-    "http://localhost:5173",  # Common Vite dev port
-    # "https://your-frontend.vercel.app",  # Add your production Vercel domain here
+    "http://localhost:5173",
+    "https://vora-frontend-six.vercel.app",  # production Vercel deployment
+    "https://vora-frontend.vercel.app",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    # For initial loose development, allow_origins=["*"] is used.
-    # Note: To support credentials (cookies, authorization headers), allow_origins MUST be set to
-    # an explicit list of origins (like the 'origins' variable above), and allow_credentials must be True.
+    # Using wildcard because this API is credential-free (no cookies / auth headers).
+    # Switch to the explicit `origins` list above if you add credential-based auth.
     allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
