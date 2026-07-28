@@ -52,13 +52,13 @@ def execute_d1_query(sql: str, params: list = None):
     return query_result.get("results", [])
 
 def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg: float,
-                     karbon_kg: float, co2e_kg: float, splat_file_url: str, confidence_note: str):
+                     karbon_kg: float, co2e_kg: float, splat_file_url: str, confidence_note: str, thumbnail_url: str = None):
     """
     Inserts a new scan record into the tree_scans database table on Cloudflare D1.
     """
     sql = """
-    INSERT INTO tree_scans (tree_code, scan_date, dbh_cm, tinggi_m, biomassa_kg, karbon_kg, co2e_kg, splat_file_url, confidence_note)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tree_scans (tree_code, scan_date, dbh_cm, tinggi_m, biomassa_kg, karbon_kg, co2e_kg, splat_file_url, confidence_note, thumbnail_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     # Use ISO 8601 UTC format for scan_date
     scan_date = datetime.now(timezone.utc).isoformat()
@@ -71,7 +71,8 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
         karbon_kg, 
         co2e_kg, 
         splat_file_url, 
-        confidence_note
+        confidence_note,
+        thumbnail_url
     ])
 
 def get_scan_history(tree_code: str):

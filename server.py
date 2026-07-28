@@ -192,8 +192,19 @@ def _reconstruct_thread(tree_code: str) -> None:
         if carbon_est and "error" not in carbon_est:
             try:
                 upd("reconstructing", "Uploading splat file to Cloudflare R2...")
-                from storage.r2_client import upload_splat
+                from storage.r2_client import upload_splat, upload_thumbnail
                 splat_url = upload_splat(out, tree_code)
+
+                # Select middle representative frame as thumbnail
+                thumbnail_url = None
+                if files:
+                    mid_idx = len(files) // 2
+                    representative_frame = files[mid_idx]
+                    try:
+                        upd("reconstructing", "Uploading representative frame as thumbnail to R2...")
+                        thumbnail_url = upload_thumbnail(representative_frame, tree_code)
+                    except Exception as thumb_err:
+                        print(f"Thumbnail upload error: {thumb_err}")
 
                 upd("reconstructing", "Saving scan results to Cloudflare D1...")
                 from storage.d1_client import save_scan_result
@@ -206,6 +217,7 @@ def _reconstruct_thread(tree_code: str) -> None:
                     co2e_kg=carbon_est.get("co2e_kg"),
                     splat_file_url=splat_url,
                     confidence_note=carbon_est.get("confidence"),
+                    thumbnail_url=thumbnail_url,
                 )
                 upd("done", f"\u2713 Done in {elapsed:.0f}s \u2014 {mb:.1f} MB Gaussian Splat ready! (Tree code: {tree_code})")
             except Exception as exc:
