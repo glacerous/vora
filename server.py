@@ -196,9 +196,19 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
             i += 1
             continue
 
-        # Get frame matrices
-        frame_a = candidates[idx_a][2]
-        frame_b = candidates[idx_b][2]
+        # Get frame matrices (handling both numpy array and encoded jpeg bytes)
+        raw_a = candidates[idx_a][2]
+        raw_b = candidates[idx_b][2]
+
+        if isinstance(raw_a, np.ndarray):
+            frame_a = raw_a
+        else:
+            frame_a = cv2.imdecode(raw_a, cv2.IMREAD_COLOR)
+
+        if isinstance(raw_b, np.ndarray):
+            frame_b = raw_b
+        else:
+            frame_b = cv2.imdecode(raw_b, cv2.IMREAD_COLOR)
 
         # Convert to grayscale
         gray_a = cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY)
@@ -280,8 +290,18 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
             ok, frame = cap.read()
             if not ok:
                 break
-            if fi % step == 0 and _blur(frame) >= blur_thresh:
-                candidates.append((fi, _blur(frame), frame.copy()))
+            
+            # Resize 4K to 1920px immediately after reading to free up memory
+            h, w = frame.shape[:2]
+            if w > 1920:
+                frame = cv2.resize(frame, (1920, int(h * 1920 / w)))
+
+            if fi % step == 0:
+                blur_score = _blur(frame)
+                if blur_score >= blur_thresh:
+                    ok_enc, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                    if ok_enc:
+                        candidates.append((fi, blur_score, encoded_img))
             fi += 1
             
     except Exception as exc:
@@ -327,12 +347,18 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         for f in glob.glob(os.path.join(FRAMES_DIR, "*")):
             os.remove(f)
 
-        for j, (_, _score, frame) in enumerate([candidates[i] for i in resampled_idxs]):
+        for j, (_, _score, raw_frame) in enumerate([candidates[i] for i in resampled_idxs]):
             if state.get("cancel_requested", False):
                 print("[EXTRACT] Cancel requested by user. Aborting...")
                 upd("idle", "Ready.")
                 state["cancel_requested"] = False
                 return
+            
+            if isinstance(raw_frame, np.ndarray):
+                frame = raw_frame
+            else:
+                frame = cv2.imdecode(raw_frame, cv2.IMREAD_COLOR)
+
             h, w = frame.shape[:2]
             if w > 1920:
                 frame = cv2.resize(frame, (1920, int(h * 1920 / w)))
