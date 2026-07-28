@@ -208,48 +208,58 @@
         .rot-toggle-btn { display: none !important; }
         .rot-toggle-btn:hover { color: var(--text-color); border-color: rgba(8,29,42,0.3); }
 
-        /* Carbon pills hidden — parent Next.js page renders them */
-        .carbon-pills-container { display: none !important; }
+        /* Carbon pills — right-side overlay, shown after data loads */
+        .carbon-pills-container {
+            position: absolute;
+            right: 24px;
+            top: 50%;
+            transform: translateY(-50%);
+            z-index: 10;
+            display: none; /* shown via JS after metrics load */
+            flex-direction: column;
+            gap: 8px;
+            width: 200px;
+            pointer-events: none;
+            animation: fadeIn 0.5s ease;
+        }
         .carbon-pill {
-            background: var(--panel-bg);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border: 2px solid var(--border-color);
-            border-radius: 12px;
-            padding: 10px 16px;
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15),
-                        inset 0 1px 0 rgba(255, 255, 255, 0.2);
+            background: rgba(255, 255, 255, 0.92);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            border-radius: 14px;
+            padding: 8px 14px;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
             display: flex;
             flex-direction: column;
-            gap: 3px;
+            gap: 1px;
             pointer-events: auto;
-            transition: transform 0.2s ease, border-color 0.2s ease;
         }
         .carbon-pill:hover {
-            transform: translateX(-4px);
-            border-color: var(--accent-color);
+            box-shadow: 0 4px 18px rgba(0, 0, 0, 0.12);
         }
         .pill-label {
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.06em;
-            color: var(--text-secondary);
+            letter-spacing: 0.07em;
+            color: #94a3b8;
         }
         .pill-value {
-            font-family: 'Anton', sans-serif;
-            font-size: 24px;
-            color: var(--text-color);
-            line-height: 1.0;
+            font-family: 'Outfit', sans-serif;
+            font-size: 20px;
+            font-weight: 600;
+            color: #0f172a;
+            line-height: 1.1;
             display: flex;
             align-items: baseline;
-            gap: 4px;
+            gap: 3px;
         }
         .pill-unit {
-            font-family: var(--font-main);
-            font-size: 11px;
-            font-weight: 600;
-            color: var(--text-secondary);
+            font-family: 'Outfit', sans-serif;
+            font-size: 10px;
+            font-weight: 500;
+            color: #94a3b8;
             text-transform: lowercase;
         }
 
