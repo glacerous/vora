@@ -312,7 +312,21 @@ def run_reconstruction(images_bytes: list[bytes]) -> dict:
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Outlier removal complete: {n_removed:,} removed ({pct:.1f}%) | {n_kept:,} Gaussians kept")
 
         # Write filtered PLY back to same file
-        filtered = vertex_data[combined_mask]
+        filtered = vertex_data[combined_mask].copy()  # make writable
+
+        # Pass 4: Scale inflation — enlarge remaining Gaussians to fill visual gaps.
+        # In log-space, adding a constant = multiplying actual size by exp(constant).
+        # +0.35 → each Gaussian becomes ~42% larger in every dimension.
+        # Cap at -0.5 (exp(-0.5) ≈ 0.61 units) so we don't create new large floaters.
+        INFLATE_AMOUNT = 0.35
+        INFLATE_CAP    = -0.5
+        scale_cols = [n for n in filtered.dtype.names if n.startswith("scale_")]
+        if scale_cols:
+            for sc in scale_cols:
+                filtered[sc] = np.minimum(
+                    filtered[sc] + INFLATE_AMOUNT, INFLATE_CAP
+                ).astype(filtered[sc].dtype)
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 4 (inflate):  scales +{INFLATE_AMOUNT} log-units (cap {INFLATE_CAP}) on {len(scale_cols)} channels | {n_kept:,} Gaussians")
         header_lines = ["ply", "format binary_little_endian 1.0", f"element vertex {n_kept}"]
         for p_type, p_name in raw_props:
             header_lines.append(f"property {p_type} {p_name}")
