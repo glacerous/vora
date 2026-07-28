@@ -7,27 +7,28 @@
   <meta name="description" content="Convert video or photos into interactive 3D Gaussian Splat models using InstantSplat on Modal GPU cloud.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Anton&family=Outfit:wght@300;400;500;600;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg:        #05091a;
-      --surface:   rgba(255,255,255,0.04);
-      --border:    rgba(255,255,255,0.07);
-      --text:      #f0f4ff;
-      --muted:     #7480a0;
-      --accent1:   #7c3aed;
-      --accent2:   #3b82f6;
-      --success:   #22c55e;
-      --error:     #ef4444;
+      --bg:        linear-gradient(180deg, #38bdf8 0%, #10b981 100%);
+      --surface:   rgba(255, 255, 255, 0.88);
+      --border:    rgba(255, 255, 255, 0.5);
+      --text:      #081d2a;
+      --muted:     #3a5466;
+      --accent1:   #0284c7;
+      --accent2:   #16a34a;
+      --success:   #15803d;
+      --error:     #b91c1c;
       --font:      'Outfit', sans-serif;
-      --font-head: 'Space Grotesk', sans-serif;
+      --font-head: 'Anton', sans-serif;
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
       font-family: var(--font);
-      background: var(--bg);
+      background: var(--bg) no-repeat fixed;
+      background-size: cover;
       color: var(--text);
       min-height: 100vh;
       overflow-x: hidden;
@@ -35,15 +36,8 @@
 
     /* ── Background ─────────────────────────────────────────────── */
     .bg-orbs {
-      position: fixed; inset: 0; z-index: 0; pointer-events: none;
-      overflow: hidden;
+      display: none;
     }
-    .orb {
-      position: absolute; border-radius: 50%; filter: blur(80px); opacity: .25;
-    }
-    .orb-1 { width: 600px; height: 600px; background: var(--accent1); top: -200px; left: -200px; }
-    .orb-2 { width: 500px; height: 500px; background: var(--accent2); bottom: -150px; right: -150px; }
-    .orb-3 { width: 300px; height: 300px; background: #06b6d4; top: 50%; left: 50%; transform: translate(-50%,-50%); opacity: .12; }
 
     /* ── Layout ──────────────────────────────────────────────────── */
     .wrapper {
@@ -63,13 +57,13 @@
     }
     .logo-dot { width: 8px; height: 8px; border-radius: 50%; background: linear-gradient(135deg,var(--accent1),var(--accent2)); }
     h1 {
-      font-family: var(--font-head); font-size: clamp(32px, 5vw, 56px);
-      font-weight: 700; letter-spacing: -.02em; line-height: 1.1;
-      background: linear-gradient(135deg, #fff 30%, #a78bfa 70%, #60a5fa);
-      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      font-family: var(--font-head); font-size: clamp(40px, 6vw, 68px);
+      font-weight: 400; letter-spacing: 0.02em; line-height: 1.0;
+      color: #081d2a;
       margin-bottom: 14px;
+      text-transform: uppercase;
     }
-    .subtitle { color: var(--muted); font-size: 16px; font-weight: 400; max-width: 480px; margin: 0 auto; line-height: 1.6; }
+    .subtitle { color: #1e3a4f; font-size: 16px; font-weight: 500; max-width: 520px; margin: 0 auto; line-height: 1.6; }
 
     /* ── Steps bar ───────────────────────────────────────────────── */
     .steps {
@@ -80,15 +74,16 @@
     }
     .step {
       flex: 1; text-align: center; padding: 10px 8px;
-      border-radius: 12px; font-size: 13px; font-weight: 500;
+      border-radius: 12px; font-size: 13px; font-weight: 600;
       color: var(--muted); transition: all .3s; cursor: default;
       display: flex; flex-direction: column; align-items: center; gap: 3px;
     }
     .step-icon { font-size: 18px; }
     .step.active {
-      background: linear-gradient(135deg, rgba(124,58,237,.25), rgba(59,130,246,.25));
+      background: linear-gradient(135deg, rgba(2,132,199,.15), rgba(22,163,74,.15));
       color: var(--text);
-      box-shadow: 0 0 20px rgba(124,58,237,.15);
+      box-shadow: 0 0 20px rgba(2,132,199,.1);
+      border: 1px solid rgba(2,132,199,0.25);
     }
     .step.done { color: var(--success); }
     .step-sep { color: var(--border); font-size: 18px; padding: 0 2px; flex: 0; }
@@ -111,7 +106,7 @@
     /* ── Tabs ────────────────────────────────────────────────────── */
     .tabs {
       display: flex; gap: 4px; margin-bottom: 24px;
-      background: rgba(0,0,0,.25); border-radius: 12px; padding: 4px;
+      background: rgba(11,30,45,0.12); border-radius: 12px; padding: 4px;
     }
     .tab {
       flex: 1; text-align: center; padding: 10px 20px;
@@ -121,19 +116,19 @@
     }
     .tab.active {
       background: linear-gradient(135deg, var(--accent1), var(--accent2));
-      color: #fff; box-shadow: 0 4px 16px rgba(124,58,237,.3);
+      color: #fff; box-shadow: 0 4px 16px rgba(2,132,199,.25);
     }
 
     /* ── Drop Zone ───────────────────────────────────────────────── */
     .dropzone {
-      border: 2px dashed var(--border);
+      border: 2px dashed rgba(8, 29, 42, 0.25);
       border-radius: 16px; padding: 48px 24px;
       text-align: center; cursor: pointer;
       transition: all .2s; position: relative;
     }
     .dropzone:hover, .dropzone.drag-over {
       border-color: var(--accent1);
-      background: rgba(124,58,237,.06);
+      background: rgba(2,132,199,.06);
     }
     .dropzone input { position: absolute; inset:0; opacity:0; cursor:pointer; width:100%; height:100%; }
     .dz-icon { font-size: 48px; margin-bottom: 12px; display: block; }
@@ -165,7 +160,7 @@
     }
     .preset-btn:hover, .preset-btn.sel {
       border-color: var(--accent1); color: var(--text);
-      background: rgba(124,58,237,.15);
+      background: rgba(2,132,199,.15);
     }
 
     /* ── Primary button ──────────────────────────────────────────── */
@@ -176,9 +171,9 @@
       color: #fff; font-size: 16px; font-weight: 700;
       border: none; cursor: pointer; width: 100%; justify-content: center;
       margin-top: 20px; transition: all .2s;
-      box-shadow: 0 4px 24px rgba(124,58,237,.3);
+      box-shadow: 0 4px 24px rgba(2,132,199,.35);
     }
-    .btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 32px rgba(124,58,237,.4); }
+    .btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 32px rgba(2,132,199,.45); }
     .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
     .btn-secondary {
       display: inline-flex; align-items: center; gap: 8px;
@@ -187,19 +182,19 @@
       border: 1px solid var(--border); font-size: 14px; font-weight: 600;
       cursor: pointer; transition: all .15s;
     }
-    .btn-secondary:hover { border-color: rgba(255,255,255,.2); background: rgba(255,255,255,.06); }
+    .btn-secondary:hover { border-color: rgba(8,29,42,.3); background: rgba(8,29,42,.04); }
 
     /* ── Progress bar ────────────────────────────────────────────── */
     .progress-card {
       display: flex; align-items: center; gap: 16px;
-      background: rgba(124,58,237,.08);
-      border: 1px solid rgba(124,58,237,.2);
+      background: rgba(2,132,199,.08);
+      border: 1px solid rgba(2,132,199,.25);
       border-radius: 16px; padding: 20px 24px;
       margin-bottom: 20px;
     }
     .spinner {
       width: 36px; height: 36px; flex-shrink: 0;
-      border: 3px solid rgba(124,58,237,.2);
+      border: 3px solid rgba(2,132,199,.2);
       border-top-color: var(--accent1);
       border-radius: 50%;
       animation: spin .8s linear infinite;
@@ -211,8 +206,8 @@
 
     /* ── Success / Error cards ───────────────────────────────────── */
     .success-card {
-      background: rgba(34,197,94,.08);
-      border: 1px solid rgba(34,197,94,.25);
+      background: rgba(22,163,74,.15);
+      border: 1px solid rgba(22,163,74,.35);
       border-radius: 16px; padding: 24px 28px;
       display: flex; align-items: center; gap: 16px;
       margin-bottom: 20px;
