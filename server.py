@@ -435,7 +435,8 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = True) -> None:
             err = (carbon_est or {}).get("error", "Unknown carbon analysis error")
             upd("error", f"Reconstruction done, but carbon analysis failed: {err}", error=err)
 
-    except Exception as exc:
+    except BaseException as exc:
+        print(f"[RECONSTRUCT ERROR] Critical pipeline failure: {exc}")
         upd("error", str(exc), error=str(exc))
 
 # ── Application lifespan: pre-calculate carbon if result.ply already exists ──
