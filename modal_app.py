@@ -306,6 +306,20 @@ def run_reconstruction(images_bytes: list[bytes]) -> dict:
             n_scale = int((~scale_mask).sum())
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 3 (scale):   removed {n_scale:,} | remaining {combined_mask.sum():,}")
 
+        # Pass 4: Anisotropy filter — remove needle-like elongated Gaussians.
+        # Needles have one very long dimension and two very short ones.
+        # In log-space: max_scale - min_scale > threshold means the long axis is
+        # exp(threshold) times larger than the short axis.
+        # threshold=2.0 → 7.4x. Real needles are 20-100x so this is conservative.
+        MAX_ANISOTROPY_LOG = 2.0
+        if scale_names:
+            min_scales = scales.min(axis=1)
+            anisotropy  = max_scales - min_scales
+            aniso_mask  = anisotropy <= MAX_ANISOTROPY_LOG
+            combined_mask &= aniso_mask
+            n_aniso = int((~aniso_mask).sum())
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 4 (anisotropy): removed {n_aniso:,} needle Gaussians | remaining {combined_mask.sum():,}")
+
         n_kept    = int(combined_mask.sum())
         n_removed = num_vertices - n_kept
         pct       = n_removed / num_vertices * 100
