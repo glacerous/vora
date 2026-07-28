@@ -7,7 +7,7 @@
     <!-- Modern Premium Typography -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Space+Grotesk:wght@400;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Anton&family=Outfit:wght@300;400;600;800&family=Space+Grotesk:wght@400;700&display=swap" rel="stylesheet">
     
     <!-- Import map for Three.js and Gaussian Splats 3D library -->
     <script type="importmap">
@@ -21,15 +21,15 @@
 
     <style>
         :root {
-            --bg-color: #0b0f19;
-            --panel-bg: rgba(15, 23, 42, 0.75);
-            --border-color: rgba(255, 255, 255, 0.08);
-            --text-color: #f1f5f9;
-            --text-secondary: #94a3b8;
-            --accent-color: #3b82f6;
-            --accent-glow: rgba(59, 130, 246, 0.4);
+            --bg-gradient: linear-gradient(180deg, #38bdf8 0%, #10b981 100%);
+            --panel-bg: rgba(255, 255, 255, 0.88);
+            --border-color: rgba(255, 255, 255, 0.5);
+            --text-color: #081d2a;
+            --text-secondary: #3a5466;
+            --accent-color: #0284c7;
+            --accent-glow: rgba(2, 132, 199, 0.2);
             --font-main: 'Outfit', sans-serif;
-            --font-title: 'Space Grotesk', sans-serif;
+            --font-title: 'Anton', sans-serif;
         }
 
         * {
@@ -40,7 +40,8 @@
 
         body {
             font-family: var(--font-main);
-            background-color: var(--bg-color);
+            background: var(--bg-gradient) no-repeat fixed;
+            background-size: cover;
             color: var(--text-color);
             overflow: hidden;
             width: 100vw;
@@ -54,7 +55,7 @@
             left: -10%;
             width: 50vw;
             height: 50vh;
-            background: radial-gradient(circle, rgba(59, 130, 246, 0.15) 0%, rgba(0,0,0,0) 70%);
+            background: radial-gradient(circle, rgba(2, 132, 199, 0.15) 0%, rgba(0,0,0,0) 70%);
             z-index: 0;
             pointer-events: none;
         }
@@ -81,20 +82,19 @@
             border-radius: 16px;
             padding: 24px;
             width: 360px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5),
-                        inset 0 1px 1px rgba(255, 255, 255, 0.1);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15),
+                        inset 0 1px 1px rgba(255, 255, 255, 0.2);
             animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1);
         }
 
         h1 {
             font-family: var(--font-title);
-            font-size: 20px;
-            font-weight: 700;
+            font-size: 26px;
+            font-weight: 400;
             margin-bottom: 8px;
-            letter-spacing: -0.5px;
-            background: linear-gradient(135deg, #fff 0%, #a5b4fc 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            letter-spacing: 0.5px;
+            color: #081d2a;
+            text-transform: uppercase;
         }
 
         .subtitle {
@@ -123,7 +123,7 @@
 
         .meta-value {
             font-family: monospace;
-            color: #60a5fa;
+            color: #0284c7;
             word-break: break-all;
             text-align: right;
             max-width: 60%;
@@ -137,22 +137,22 @@
             border-radius: 9999px;
             font-size: 11px;
             font-weight: 600;
-            background: rgba(59, 130, 246, 0.1);
-            color: #60a5fa;
-            border: 1px solid rgba(59, 130, 246, 0.2);
+            background: rgba(2, 132, 199, 0.1);
+            color: #0284c7;
+            border: 1px solid rgba(2, 132, 199, 0.2);
             margin-top: 12px;
         }
 
         .status-badge.success {
-            background: rgba(34, 197, 94, 0.1);
-            color: #4ade80;
-            border: 1px solid rgba(34, 197, 94, 0.2);
+            background: rgba(22, 163, 74, 0.1);
+            color: #15803d;
+            border: 1px solid rgba(22, 163, 74, 0.2);
         }
 
         .status-badge.loading {
-            background: rgba(234, 179, 8, 0.1);
-            color: #facc15;
-            border: 1px solid rgba(234, 179, 8, 0.2);
+            background: rgba(2, 132, 199, 0.1);
+            color: #0284c7;
+            border: 1px solid rgba(2, 132, 199, 0.2);
             animation: pulse 1.5s infinite;
         }
 
@@ -170,7 +170,7 @@
             padding: 8px 24px;
             font-size: 12px;
             color: var(--text-secondary);
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
             pointer-events: none;
             display: flex;
             gap: 16px;
@@ -195,7 +195,7 @@
             flex-direction: column;
             gap: 10px;
             animation: fadeIn 0.3s ease;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.15);
             min-width: 180px;
         }
         .rotation-panel.visible { display: flex; }
@@ -219,7 +219,7 @@
         }
         .rot-btn {
             flex: 1;
-            background: rgba(255,255,255,0.06);
+            background: rgba(8,29,42,0.06);
             border: 1px solid var(--border-color);
             color: var(--text-color);
             border-radius: 8px;
@@ -229,15 +229,15 @@
             transition: background 0.15s, border-color 0.15s;
         }
         .rot-btn:hover {
-            background: rgba(59,130,246,0.2);
-            border-color: rgba(59,130,246,0.4);
+            background: rgba(2,132,199,0.15);
+            border-color: rgba(2,132,199,0.3);
         }
         .rot-reset-btn {
             width: 100%;
             margin-top: 2px;
             background: rgba(239,68,68,0.1);
             border: 1px solid rgba(239,68,68,0.25);
-            color: #f87171;
+            color: #b91c1c;
             border-radius: 8px;
             padding: 6px 0;
             font-size: 12px;
@@ -264,7 +264,86 @@
             display: none;
         }
         .rot-toggle-btn.visible { display: block; }
-        .rot-toggle-btn:hover { color: var(--text-color); border-color: rgba(255,255,255,0.2); }
+        .rot-toggle-btn:hover { color: var(--text-color); border-color: rgba(8,29,42,0.3); }
+
+        /* Carbon Pills CSS Layout */
+        .carbon-pills-container {
+            position: absolute;
+            right: 40px;
+            top: 100px;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            width: 250px;
+            pointer-events: none;
+            display: none; /* hidden until data is loaded */
+            animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .carbon-pill {
+            background: var(--panel-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 2px solid var(--border-color);
+            border-radius: 12px;
+            padding: 10px 16px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15),
+                        inset 0 1px 0 rgba(255, 255, 255, 0.2);
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            pointer-events: auto;
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+        .carbon-pill:hover {
+            transform: translateX(-4px);
+            border-color: var(--accent-color);
+        }
+        .pill-label {
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-secondary);
+        }
+        .pill-value {
+            font-family: 'Anton', sans-serif;
+            font-size: 24px;
+            color: var(--text-color);
+            line-height: 1.0;
+            display: flex;
+            align-items: baseline;
+            gap: 4px;
+        }
+        .pill-unit {
+            font-family: var(--font-main);
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: lowercase;
+        }
+
+        /* Connecting Lines Layout */
+        .lines-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 5;
+            pointer-events: none;
+            display: none;
+        }
+        .anno-line {
+            stroke: rgba(8, 29, 42, 0.35);
+            stroke-width: 1.5;
+            stroke-dasharray: 4 4;
+        }
+        .anno-target {
+            fill: #0284c7;
+            stroke: #fff;
+            stroke-width: 1.5;
+        }
 
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(10px); }
@@ -282,6 +361,44 @@
 
     <!-- 3D Viewer Container -->
     <div id="splat-container"></div>
+
+    <!-- SVG Annotation Lines Overlay -->
+    <svg id="annotation-lines" class="lines-overlay">
+        <line id="line-dbh" x1="0" y1="0" x2="0" y2="0" class="anno-line" />
+        <line id="line-height" x1="0" y1="0" x2="0" y2="0" class="anno-line" />
+        <line id="line-biomass" x1="0" y1="0" x2="0" y2="0" class="anno-line" />
+        <line id="line-carbon" x1="0" y1="0" x2="0" y2="0" class="anno-line" />
+        <line id="line-co2e" x1="0" y1="0" x2="0" y2="0" class="anno-line" />
+        <circle id="target-dbh" cx="0" cy="0" r="4" class="anno-target" />
+        <circle id="target-height" cx="0" cy="0" r="4" class="anno-target" />
+        <circle id="target-biomass" cx="0" cy="0" r="4" class="anno-target" />
+        <circle id="target-carbon" cx="0" cy="0" r="4" class="anno-target" />
+        <circle id="target-co2e" cx="0" cy="0" r="4" class="anno-target" />
+    </svg>
+
+    <!-- Carbon Metrics Annotation Pills -->
+    <div class="carbon-pills-container">
+        <div class="carbon-pill" id="pill-dbh">
+            <span class="pill-label">Trunk DBH</span>
+            <span class="pill-value"><span id="val-dbh">-</span> <span class="pill-unit">cm</span></span>
+        </div>
+        <div class="carbon-pill" id="pill-height">
+            <span class="pill-label">Tree Height</span>
+            <span class="pill-value"><span id="val-height">-</span> <span class="pill-unit">m</span></span>
+        </div>
+        <div class="carbon-pill" id="pill-biomass">
+            <span class="pill-label">Estimated Biomass</span>
+            <span class="pill-value"><span id="val-biomass">-</span> <span class="pill-unit">kg</span></span>
+        </div>
+        <div class="carbon-pill" id="pill-carbon">
+            <span class="pill-label">Stored Carbon</span>
+            <span class="pill-value"><span id="val-carbon">-</span> <span class="pill-unit">kg</span></span>
+        </div>
+        <div class="carbon-pill" id="pill-co2e">
+            <span class="pill-label">CO2 Equivalent</span>
+            <span class="pill-value"><span id="val-co2e">-</span> <span class="pill-unit">kg</span></span>
+        </div>
+    </div>
 
     <!-- Control Panel -->
     <div class="control-panel">
@@ -421,6 +538,9 @@
                 // Show orientation controls now that the scene is loaded
                 document.getElementById('rot-toggle').classList.add('visible');
 
+                // Fetch and display carbon metrics
+                fetchAndDisplayCarbon(SPLAT_PATH);
+
                 // Wire up rotation buttons — each click rotates the splatMesh by 15°
                 const STEP = Math.PI / 12; // 15 degrees
                 const mesh = () => viewer.splatMesh;
@@ -520,6 +640,109 @@
             statusBadge.textContent = "WebGL Error";
             statusBadge.className = "status-badge";
             statusBadge.style.color = "#f87171";
+        }
+
+        // ── Carbon Annotation & Line Mapping Functions ─────────────────────
+        function updateLines() {
+            const container = document.querySelector('.carbon-pills-container');
+            if (!container || container.style.display === 'none') return;
+            
+            const svg = document.getElementById('annotation-lines');
+            svg.style.display = 'block';
+            
+            const W = window.innerWidth;
+            const H = window.innerHeight;
+            
+            // Define targets on the 3D canvas (approximate tree parts)
+            const targets = {
+                dbh: { x: W * 0.46, y: H * 0.70 },
+                height: { x: W * 0.48, y: H * 0.28 },
+                biomass: { x: W * 0.51, y: H * 0.40 },
+                carbon: { x: W * 0.47, y: H * 0.52 },
+                co2e: { x: W * 0.49, y: H * 0.80 }
+            };
+            
+            const ids = ['dbh', 'height', 'biomass', 'carbon', 'co2e'];
+            ids.forEach(id => {
+                const pill = document.getElementById(`pill-${id}`);
+                const line = document.getElementById(`line-${id}`);
+                const circ = document.getElementById(`target-${id}`);
+                
+                if (pill && line && circ) {
+                    const rect = pill.getBoundingClientRect();
+                    const startX = rect.left;
+                    const startY = rect.top + rect.height / 2;
+                    
+                    const target = targets[id];
+                    
+                    line.setAttribute('x1', startX);
+                    line.setAttribute('y1', startY);
+                    line.setAttribute('x2', target.x);
+                    line.setAttribute('y2', target.y);
+                    
+                    circ.setAttribute('cx', target.x);
+                    circ.setAttribute('cy', target.y);
+                }
+            });
+        }
+        window.addEventListener('resize', updateLines);
+
+        function fetchAndDisplayCarbon(splatPath) {
+            let treeCode = null;
+            const match = splatPath.match(/\/tree_scans\/([^/]+)\//);
+            if (match) {
+                treeCode = match[1];
+            }
+            
+            if (treeCode) {
+                fetch(`/history/${treeCode}`)
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success && data.history && data.history.length > 0) {
+                            const record = data.history.find(r => r.splat_file_url && r.splat_file_url.includes(splatPath)) || data.history[0];
+                            displayMetrics(record);
+                        } else {
+                            fallbackToStatus();
+                        }
+                    })
+                    .catch(err => {
+                        console.warn("Failed to fetch history:", err);
+                        fallbackToStatus();
+                    });
+            } else {
+                fallbackToStatus();
+            }
+            
+            function fallbackToStatus() {
+                fetch('/status')
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.carbon_estimation && !data.carbon_estimation.error) {
+                            displayMetrics(data.carbon_estimation);
+                        }
+                    })
+                    .catch(err => console.warn("Failed to fetch status:", err));
+            }
+            
+            function displayMetrics(metrics) {
+                const dbhVal = metrics.dbh_cm !== undefined ? metrics.dbh_cm : metrics.dbh;
+                const heightVal = metrics.tinggi_m !== undefined ? metrics.tinggi_m : (metrics.height_m !== undefined ? metrics.height_m : metrics.height);
+                const biomassVal = metrics.biomassa_kg !== undefined ? metrics.biomassa_kg : (metrics.biomass_kg !== undefined ? metrics.biomass_kg : metrics.biomass);
+                const carbonVal = metrics.karbon_kg !== undefined ? metrics.karbon_kg : (metrics.carbon_kg !== undefined ? metrics.carbon_kg : metrics.carbon);
+                const co2eVal = metrics.co2e_kg !== undefined ? metrics.co2e_kg : metrics.co2e;
+                
+                if (dbhVal !== undefined && dbhVal !== null) {
+                    document.getElementById('val-dbh').textContent = Number(dbhVal).toFixed(1);
+                    document.getElementById('val-height').textContent = Number(heightVal).toFixed(1);
+                    document.getElementById('val-biomass').textContent = Number(biomassVal).toFixed(1);
+                    document.getElementById('val-carbon').textContent = Number(carbonVal).toFixed(1);
+                    document.getElementById('val-co2e').textContent = Number(co2eVal).toFixed(1);
+                    
+                    const container = document.querySelector('.carbon-pills-container');
+                    container.style.display = 'flex';
+                    setTimeout(updateLines, 500);
+                }
+            }
         }
     </script>
 </body>
