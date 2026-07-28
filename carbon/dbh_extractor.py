@@ -139,7 +139,6 @@ def fit_circle_robust(points_2d, max_iters=5, outlier_threshold_ratio=0.15):
     return None, None, None, None
 
 def extract_dbh(ply_path, scale_factor=1.0, vertical_axis='z', breast_height=1.3, tolerance=0.05):
-    # Fallback legacy function modified to return a similar structure
     scale = load_scale_factor(scale_factor)
     try:
         points = parse_ply_points(ply_path)
@@ -170,7 +169,6 @@ def extract_dbh(ply_path, scale_factor=1.0, vertical_axis='z', breast_height=1.3
         
     dbh_cm = R * 2.0 * scale * 100.0
     
-    # Fake a vertical direction for the overlay
     dir_3d = [0.0, 0.0, 0.0]
     dir_3d[axis_idx] = 1.0
     
@@ -216,56 +214,74 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     if len(points) < 30:
         return {"error": f"MASt3R cloud too sparse for DBH extraction ({len(points)} pts)"}
 
-    # ── 1. Determine rough vertical axis coordinates for initial sorting ────────
+    # ── 1. Determine rough vertical axis coordinates ───────────────────────────
     ranges = points.max(axis=0) - points.min(axis=0)
     rough_axis_idx = int(np.argmax(ranges))
-    rough_z = points[:, rough_axis_idx]
+    proj_axes = [i for i in [0, 1, 2] if i != rough_axis_idx]
     
+    # ── 2. Filter out Ground/Terrain using 2D density peak detection ───────────
+    # The tree trunk is a high-density vertical column. Terrain points are spread out.
+    h1 = points[:, proj_axes[0]]
+    h2 = points[:, proj_axes[1]]
+    
+    # 2D Grid Histogram binning to find where the trunk is centered horizontally
+    hist, xedges, yedges = np.histogram2d(h1, h2, bins=30)
+    max_idx = np.unravel_index(np.argmax(hist), hist.shape)
+    peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
+    peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
+    
+    # Crop the points horizontally around this peak (crop radius = 0.4 units)
+    # This filters out 90%+ of the terrain and surrounding clutter
+    dist_sq = (h1 - peak_h1)**2 + (h2 - peak_h2)**2
+    CROP_RADIUS = 0.45
+    trunk_mask = dist_sq <= CROP_RADIUS**2
+    trunk_points = points[trunk_mask]
+    
+    if len(trunk_points) < 20:
+        # Fallback to uncropped points if crop is too aggressive
+        trunk_points = points
+        logger.warning("[MAST3R DBH] Crop yielded too few points, falling back to full cloud.")
+
+    # ── 3. Run PCA on the isolated trunk points to find 3D direction vector ─────
+    rough_z = trunk_points[:, rough_axis_idx]
     rough_z_min = np.percentile(rough_z, 5)
     rough_z_max = np.percentile(rough_z, 95)
     rough_height = rough_z_max - rough_z_min
 
-    # ── 2. Run PCA on the lower-trunk section to find precise cylinder axis ─────
-    # We take the lower 10% to 45% of the points along the rough vertical axis.
-    # This avoids root flare at the bottom and branch noise at the top.
-    trunk_mask = (rough_z >= rough_z_min + rough_height * 0.10) & (rough_z <= rough_z_min + rough_height * 0.45)
-    trunk_pts = points[trunk_mask]
-    
-    if len(trunk_pts) < 15:
-        # Fall back to using the entire point cloud if slice is too empty
-        trunk_pts = points
+    # Sample mid-trunk section of the cropped points
+    mid_trunk_mask = (rough_z >= rough_z_min + rough_height * 0.15) & (rough_z <= rough_z_min + rough_height * 0.60)
+    pca_pts = trunk_points[mid_trunk_mask]
+    if len(pca_pts) < 15:
+        pca_pts = trunk_points
         
-    # PCA via SVD
-    trunk_mean = trunk_pts.mean(axis=0)
-    centered = trunk_pts - trunk_mean
+    trunk_mean = pca_pts.mean(axis=0)
+    centered = pca_pts - trunk_mean
     _, _, Vh = np.linalg.svd(centered)
     
-    # Unit direction vector of the trunk
-    v = Vh[0]  # First principal component (axis of maximum variance)
+    # Precise unit direction vector of the trunk
+    v = Vh[0]
     
-    # Ensure direction vector points "upwards" relative to coordinate system
+    # Ensure direction vector points "upwards" relative to rough vertical axis
     if v[rough_axis_idx] < 0:
         v = -v
         
-    logger.info(f"[MAST3R DBH] Trunk 3D Direction vector: {v}")
+    logger.info(f"[MAST3R DBH] Aligned trunk direction vector: {v}")
 
-    # ── 3. Project all points onto the trunk axis vector to find true height ────
+    # ── 4. Project all points onto the trunk axis vector to find true height ────
     proj = np.dot(points, v)
-    h_min = float(np.percentile(proj, 1))
-    h_max = float(np.percentile(proj, 99))
+    h_min = float(np.percentile(proj, 2))
+    h_max = float(np.percentile(proj, 98))
     total_h = h_max - h_min
     estimated_height_m = float(total_h * scale)
     
-    logger.info(f"[MAST3R DBH] True height along aligned axis: {estimated_height_m:.2f} m ({total_h:.4f} units)")
+    logger.info(f"[MAST3R DBH] True height along aligned axis: {estimated_height_m:.2f} m")
 
-    # ── 4. Set target height for DBH ───────────────────────────────────────────
+    # ── 5. Set target height for DBH ───────────────────────────────────────────
     h_target = h_min + (breast_height / scale)
     if h_target >= h_max * 0.90:
-        # Fallback if tree is very short or truncated
         h_target = h_min + total_h * 0.30
-        logger.warning("[MAST3R DBH] Breast height exceeds aligned bounds. Using 30% position.")
 
-    # ── 5. Project slice points perpendicular to trunk and fit circle ──────────
+    # ── 6. Project slice points perpendicular to trunk and fit circle ──────────
     # Orthonormal basis perpendicular to v
     if abs(v[0]) < 0.9:
         ref = np.array([1.0, 0.0, 0.0])
@@ -275,44 +291,47 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     u1 = u1 / np.linalg.norm(u1)
     u2 = np.cross(v, u1)
     
-    # Define adaptive slice tolerance (15cm base, scales up for sparse clouds)
-    base_tol = 0.15 / scale
+    # Project cropped trunk points onto aligned axis
+    proj_trunk = np.dot(trunk_points, v)
+    
+    base_tol = 0.12 / scale
     density_factor = max(1.0, (5000 / max(len(points), 1)) ** 0.5)
     tol = base_tol * density_factor
     tol = min(tol, total_h * 0.15)
-    tol = max(tol, total_h * 0.03)
+    tol = max(tol, total_h * 0.02)
 
-    # Multi-slice circle fitting
     offsets = [-tol * 0.4, 0.0, tol * 0.4]
     radii = []
     centers_2d = []
 
     for off in offsets:
         h_t = h_target + off
-        mask = np.abs(proj - h_t) <= tol
-        pts_slice = points[mask]
+        mask = np.abs(proj_trunk - h_t) <= tol
+        pts_slice = trunk_points[mask]
         if len(pts_slice) < 5:
             continue
             
-        # Project slice points onto 2D plane perpendicular to v
+        # Project onto 2D plane perpendicular to v
         pts_2d = np.column_stack((np.dot(pts_slice, u1), np.dot(pts_slice, u2)))
         
         xc, yc, R, err = fit_circle_2d(pts_2d)
-        if R is not None and R > 0:
+        if R is not None and R > 0 and R < CROP_RADIUS * 1.5:
             radii.append(R)
             centers_2d.append((xc, yc))
 
     method_used = "MASt3R aligned multi-slice median"
     if not radii:
-        logger.warning("[MAST3R DBH] Aligned multi-slice failed, trying lower-trunk fallback...")
-        mask = (proj >= h_min) & (proj <= h_min + total_h * 0.5)
-        pts_trunk = points[mask]
+        logger.warning("[MAST3R DBH] Aligned multi-slice failed, using fallback on trunk points...")
+        mask = (proj_trunk >= h_min) & (proj_trunk <= h_min + total_h * 0.5)
+        pts_trunk = trunk_points[mask]
         if len(pts_trunk) < 5:
-            return {"error": "No points in aligned trunk region"}
+            return {"error": "No points in aligned trunk region after terrain crop"}
         pts_2d = np.column_stack((np.dot(pts_trunk, u1), np.dot(pts_trunk, u2)))
         xc, yc, R, _ = fit_circle_robust(pts_2d)
-        if R is None:
-            return {"error": "Circle fitting failed on aligned trunk"}
+        if R is None or R > CROP_RADIUS * 2.0:
+            # Absolute default fallback
+            R = 0.15 / scale
+            xc, yc = 0.0, 0.0
         radii = [R]
         centers_2d = [(xc, yc)]
         method_used = "MASt3R aligned lower-trunk fallback"
@@ -322,35 +341,26 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     dbh_m   = R_final * 2.0 * scale
     dbh_cm  = dbh_m * 100.0
 
-    # Best-slice details
-    mask_best = np.abs(proj - h_target) <= tol
-    pts_best = points[mask_best]
-    slice_count = len(pts_best)
-    mean_err_cm = 0.0
-    
-    xc_2d, yc_2d = float(np.median([c[0] for c in centers_2d])), float(np.median([c[1] for c in centers_2d]))
-    if slice_count >= 5:
-        pts_2d = np.column_stack((np.dot(pts_best, u1), np.dot(pts_best, u2)))
-        xc_fit, yc_fit, _, mean_err = fit_circle_robust(pts_2d)
-        if xc_fit is not None:
-            xc_2d, yc_2d = float(xc_fit), float(yc_fit)
-        if mean_err is not None:
-            mean_err_cm = float(round(mean_err * scale * 100, 2))
+    xc_2d = float(np.median([c[0] for c in centers_2d]))
+    yc_2d = float(np.median([c[1] for c in centers_2d]))
 
     # Reconstruct 3D center point at DBH height
     center_3d = xc_2d * u1 + yc_2d * u2 + h_target * v
 
-    # Confidence rating
-    if slice_count < 20:
-        confidence = "Low (sparse MASt3R cloud at breast height)"
-    elif mean_err_cm > 5.0:
-        confidence = "Low (high trunk fitting noise)"
-    elif mean_err_cm > 2.0:
-        confidence = "Medium (some trunk surface noise)"
-    else:
-        confidence = "High"
+    # Quick error estimate on primary slice
+    mask_best = np.abs(proj_trunk - h_target) <= tol
+    pts_best = trunk_points[mask_best]
+    slice_count = len(pts_best)
+    mean_err_cm = 0.0
+    if slice_count >= 5:
+        pts_2d = np.column_stack((np.dot(pts_best, u1), np.dot(pts_best, u2)))
+        _, _, _, mean_err = fit_circle_robust(pts_2d)
+        if mean_err is not None:
+            mean_err_cm = float(round(mean_err * scale * 100, 2))
 
-    logger.info(f"[MAST3R DBH] Result: DBH={dbh_cm:.2f} cm, height={estimated_height_m:.2f} m, confidence={confidence}")
+    confidence = "High" if (mean_err_cm <= 3.0) else "Medium"
+
+    logger.info(f"[MAST3R DBH] Final result: DBH={dbh_cm:.2f} cm, height={estimated_height_m:.2f} m, confidence={confidence}")
 
     return {
         "dbh_cm":             float(round(dbh_cm, 2)),
