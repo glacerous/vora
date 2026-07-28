@@ -5,10 +5,7 @@ __pycache__/
 
 # Large outputs, uploads, and test data
 output/
-uploads/*.mp4
-uploads/*.jpg
-uploads/*.jpeg
-uploads/*.png
+uploads/
 test_images/
 
 # Model files & checkpoints
