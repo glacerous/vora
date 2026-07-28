@@ -815,12 +815,30 @@
                             cadGroup.name = 'cad_measurement_overlay';
 
                             const radius = g3d.radius_units || 0.2;
-                            const zMin = g3d.z_min || -1;
-                            const zMax = g3d.z_max || 1;
-                            const height = Math.abs(zMax - zMin);
-                            const zCenter = (zMin + zMax) / 2;
+                            const hMin = g3d.h_min !== undefined ? g3d.h_min : -1;
+                            const hMax = g3d.h_max !== undefined ? g3d.h_max : 1;
+                            const hTarget = g3d.h_target !== undefined ? g3d.h_target : 0;
+                            const height = Math.abs(hMax - hMin);
+
+                            // Parse 3D coordinates & direction vector from RANSAC/PCA
                             const cx = g3d.center_x || 0;
                             const cy = g3d.center_y || 0;
+                            const cz = g3d.center_z || 0;
+                            const dx = g3d.dir_x !== undefined ? g3d.dir_x : 0;
+                            const dy = g3d.dir_y !== undefined ? g3d.dir_y : 0;
+                            const dz = g3d.dir_z !== undefined ? g3d.dir_z : 1;
+
+                            const center_3d = new THREE.Vector3(cx, cy, cz);
+                            const dir_3d = new THREE.Vector3(dx, dy, dz).normalize();
+
+                            // Calculate base, top, and center coordinates of trunk cylinder
+                            const base_3d = center_3d.clone().addScaledVector(dir_3d, hMin - hTarget);
+                            const top_3d = center_3d.clone().addScaledVector(dir_3d, hMax - hTarget);
+                            const center_cyl = base_3d.clone().add(top_3d).multiplyScalar(0.5);
+
+                            // Calculate quaternion rotation to align with trunk direction
+                            const up = new THREE.Vector3(0, 1, 0); // cylinder defaults upright along Y
+                            const qAlign = new THREE.Quaternion().setFromUnitVectors(up, dir_3d);
 
                             // 1. Trunk Wireframe Cylinder
                             const cylGeo = new THREE.CylinderGeometry(radius, radius, height, 16, 8, true);
@@ -831,26 +849,27 @@
                                 opacity: 0.55
                             });
                             const cylinder = new THREE.Mesh(cylGeo, cylMat);
-                            cylinder.position.set(cx, zCenter, cy);
+                            cylinder.quaternion.copy(qAlign);
+                            cylinder.position.copy(center_cyl);
                             cadGroup.add(cylinder);
 
-                            // 2. Glowing DBH Measurement Ring at 1.3m (z_target)
-                            const zTarget = g3d.z_target || (zMin + 0.3 * height);
+                            // 2. Glowing DBH Measurement Ring at 1.3m (breast height)
                             const ringGeo = new THREE.TorusGeometry(radius * 1.05, radius * 0.04, 16, 32);
                             const ringMat = new THREE.MeshBasicMaterial({
                                 color: 0x10b981, // emerald green
                                 wireframe: true
                             });
                             const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-                            ringMesh.rotation.x = Math.PI / 2;
-                            ringMesh.position.set(cx, zTarget, cy);
+                            
+                            // Align torus plane to be perpendicular to the cylinder direction vector
+                            ringMesh.quaternion.copy(qAlign);
+                            const qTorus = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+                            ringMesh.quaternion.multiply(qTorus);
+                            ringMesh.position.copy(center_3d);
                             cadGroup.add(ringMesh);
 
                             // 3. Vertical Height Axis Line
-                            const points = [
-                                new THREE.Vector3(cx, zMin, cy),
-                                new THREE.Vector3(cx, zMax, cy)
-                            ];
+                            const points = [base_3d, top_3d];
                             const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
                             const lineMat = new THREE.LineDashedMaterial({
                                 color: 0x38bdf8,
