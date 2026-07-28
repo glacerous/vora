@@ -210,9 +210,9 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
         else:
             frame_b = cv2.imdecode(raw_b, cv2.IMREAD_COLOR)
 
-        # Convert to grayscale
-        gray_a = cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY)
-        gray_b = cv2.cvtColor(frame_b, cv2.COLOR_BGR2GRAY)
+        # Convert to grayscale safely
+        gray_a = frame_a if (len(frame_a.shape) == 2 or frame_a.shape[2] == 1) else cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY)
+        gray_b = frame_b if (len(frame_b.shape) == 2 or frame_b.shape[2] == 1) else cv2.cvtColor(frame_b, cv2.COLOR_BGR2GRAY)
 
         # Downscale for performance during overlap matching
         h_a, w_a = gray_a.shape
@@ -281,7 +281,8 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
             h, w = frame.shape[:2]
             if w > 960:
                 frame = cv2.resize(frame, (960, int(h * 960 / w)))
-            return cv2.Laplacian(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var()
+            gray = frame if (len(frame.shape) == 2 or frame.shape[2] == 1) else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            return cv2.Laplacian(gray, cv2.CV_64F).var()
 
         candidates, fi = [], 0
         while True:
