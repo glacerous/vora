@@ -267,6 +267,9 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         upd("extracting", f"Scanning {total_frames} frames ({duration:.1f}s at {fps:.0f}fps)…")
 
         def _blur(frame):
+            h, w = frame.shape[:2]
+            if w > 960:
+                frame = cv2.resize(frame, (960, int(h * 960 / w)))
             return cv2.Laplacian(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var()
 
         candidates, fi = [], 0
