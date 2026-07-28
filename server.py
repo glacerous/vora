@@ -107,7 +107,7 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         upd("extracting", "Opening video file…")
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            raise ValueError("Cannot open video — try MP4 / MOV / AVI format")
+            raise ValueError("Cannot open video — try MP4 / MOV / AVI / WEBM / MKV format")
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -309,7 +309,7 @@ async def status():
 @app.post("/upload_video", summary="Upload a video and start frame extraction")
 async def upload_video(
     background_tasks: BackgroundTasks,
-    video: UploadFile = File(..., description="Video file (MP4/MOV/AVI, up to 4 GB)"),
+    video: UploadFile = File(..., description="Video file (MP4/MOV/AVI/WEBM/MKV, up to 4 GB)"),
     frames: int = Form(default=25, description="Target number of frames to extract"),
     blur_thresh: int = Form(default=80, description="Minimum Laplacian blur score to keep a frame"),
 ):
@@ -317,7 +317,13 @@ async def upload_video(
     Accepts a video upload, saves it to disk, then starts smart frame extraction
     asynchronously. Poll `/status` for progress.
     """
-    ext  = os.path.splitext(video.filename or ".mp4")[1].lower() or ".mp4"
+    allowed_extensions = {".mp4", ".mov", ".avi", ".webm", ".mkv"}
+    ext = os.path.splitext(video.filename or "")[1].lower()
+    if ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported video format. Allowed formats: {', '.join(allowed_extensions)}"
+        )
     path = os.path.join(UPLOAD_DIR, f"input{ext}")
 
     # Stream to disk in 1 MB chunks — safe for very large (4 GB) files
