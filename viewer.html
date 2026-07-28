@@ -21,7 +21,7 @@
 
     <style>
         :root {
-            --bg-gradient: linear-gradient(180deg, #38bdf8 0%, #10b981 100%);
+            --bg-gradient: #ffffff;
             --panel-bg: rgba(255, 255, 255, 0.88);
             --border-color: rgba(255, 255, 255, 0.5);
             --text-color: #081d2a;
@@ -40,25 +40,15 @@
 
         body {
             font-family: var(--font-main);
-            background: var(--bg-gradient) no-repeat fixed;
-            background-size: cover;
+            background: #ffffff;
             color: var(--text-color);
             overflow: hidden;
             width: 100vw;
             height: 100vh;
         }
 
-        /* Ambient background glow */
-        .bg-glow {
-            position: absolute;
-            top: -10%;
-            left: -10%;
-            width: 50vw;
-            height: 50vh;
-            background: radial-gradient(circle, rgba(2, 132, 199, 0.15) 0%, rgba(0,0,0,0) 70%);
-            z-index: 0;
-            pointer-events: none;
-        }
+        /* bg-glow hidden — white bg now used */
+        .bg-glow { display: none; }
 
         #splat-container {
             width: 100%;
@@ -69,23 +59,8 @@
             z-index: 1;
         }
 
-        /* Glassmorphism Control Panel */
-        .control-panel {
-            position: absolute;
-            top: 24px;
-            left: 24px;
-            z-index: 10;
-            background: var(--panel-bg);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            padding: 24px;
-            width: 360px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15),
-                        inset 0 1px 1px rgba(255, 255, 255, 0.2);
-            animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1);
-        }
+        /* Control panel hidden — parent Next.js page owns UI */
+        .control-panel { display: none !important; }
 
         h1 {
             font-family: var(--font-title);
@@ -156,25 +131,8 @@
             animation: pulse 1.5s infinite;
         }
 
-        /* UI instructions overlay */
-        .instructions {
-            position: absolute;
-            bottom: 24px;
-            left: 50%;
-            transform: translateX(-50%);
-            z-index: 10;
-            background: var(--panel-bg);
-            backdrop-filter: blur(12px);
-            border: 1px solid var(--border-color);
-            border-radius: 999px;
-            padding: 8px 24px;
-            font-size: 12px;
-            color: var(--text-secondary);
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
-            pointer-events: none;
-            display: flex;
-            gap: 16px;
-        }
+        /* Instructions hidden — parent page owns UI */
+        .instructions { display: none !important; }
 
         .instruction-item strong {
             color: var(--text-color);
@@ -246,40 +204,12 @@
             transition: background 0.15s;
         }
         .rot-reset-btn:hover { background: rgba(239,68,68,0.2); }
-        .rot-toggle-btn {
-            position: absolute;
-            top: 16px;
-            right: 16px;
-            z-index: 11;
-            background: var(--panel-bg);
-            backdrop-filter: blur(12px);
-            border: 1px solid var(--border-color);
-            border-radius: 10px;
-            padding: 8px 14px;
-            color: var(--text-secondary);
-            font-size: 12px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: color 0.15s, border-color 0.15s;
-            display: none;
-        }
-        .rot-toggle-btn.visible { display: block; }
+        /* Orientation toggle hidden — parent page owns UI */
+        .rot-toggle-btn { display: none !important; }
         .rot-toggle-btn:hover { color: var(--text-color); border-color: rgba(8,29,42,0.3); }
 
-        /* Carbon Pills CSS Layout */
-        .carbon-pills-container {
-            position: absolute;
-            right: 40px;
-            top: 100px;
-            z-index: 10;
-            display: flex;
-            flex-direction: column;
-            gap: 24px;
-            width: 250px;
-            pointer-events: none;
-            display: none; /* hidden until data is loaded */
-            animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1);
-        }
+        /* Carbon pills hidden — parent Next.js page renders them */
+        .carbon-pills-container { display: none !important; }
         .carbon-pill {
             background: var(--panel-bg);
             backdrop-filter: blur(16px);
