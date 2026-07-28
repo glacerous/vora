@@ -14,6 +14,7 @@
     {
         "imports": {
             "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
             "gaussian-splats-3d": "https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.0/build/gaussian-splats-3d.module.js"
         }
     }
@@ -208,6 +209,54 @@
         .rot-toggle-btn { display: none !important; }
         .rot-toggle-btn:hover { color: var(--text-color); border-color: rgba(8,29,42,0.3); }
 
+        /* Render Controls Panel - Floating Top-Left */
+        .viewer-controls {
+            position: absolute;
+            top: 16px;
+            left: 16px;
+            z-index: 10;
+            background: var(--panel-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 14px 16px;
+            display: none; /* shown after load */
+            flex-direction: column;
+            gap: 10px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+            min-width: 220px;
+            animation: fadeIn 0.3s ease;
+        }
+        .viewer-controls.visible { display: flex; }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .control-label {
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-secondary);
+        }
+        .control-select {
+            background: rgba(8,29,42,0.06);
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            border-radius: 8px;
+            padding: 6px 8px;
+            font-size: 12px;
+            font-family: var(--font-main);
+            outline: none;
+            cursor: pointer;
+            width: 100%;
+        }
+        .control-select:hover {
+            background: rgba(2,132,199,0.1);
+            border-color: rgba(2,132,199,0.25);
+        }
+
         /* Carbon pills — right-side overlay, shown after data loads */
         .carbon-pills-container {
             position: absolute;
@@ -340,6 +389,25 @@
         </div>
     </div>
 
+    <!-- Render Mode & Overlay Controls Panel -->
+    <div class="viewer-controls" id="viewer-controls">
+        <div class="control-group">
+            <span class="control-label">View Mode</span>
+            <select class="control-select" id="view-mode-select">
+                <option value="splat" selected>3DGS Splat</option>
+                <option value="laser">Laser Scan (Point Cloud)</option>
+                <option value="hybrid">Hybrid (Both)</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <span class="control-label">CAD Overlay</span>
+            <select class="control-select" id="cad-overlay-select">
+                <option value="enabled" selected>Enabled</option>
+                <option value="disabled">Disabled</option>
+            </select>
+        </div>
+    </div>
+
     <!-- Control Panel -->
     <div class="control-panel">
         <h1>InstantSplat 3D Viewer</h1>
@@ -416,7 +484,12 @@
         // =========================================================================
 
         import * as THREE from 'three';
+        import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
         import * as GaussianSplats3D from 'gaussian-splats-3d';
+
+        let currentRenderMode = 'splat'; // splat | laser | hybrid
+        let cadOverlayVisible = true;
+        let pointCloudObj = null;
 
         // Update UI info
         document.getElementById('path-val').textContent = SPLAT_PATH;
@@ -475,23 +548,69 @@
                 window.viewer = viewer;
                 viewer.start();
 
-                // Show orientation controls now that the scene is loaded
+                // Show orientation & render controls now that the scene is loaded
                 document.getElementById('rot-toggle').classList.add('visible');
+                document.getElementById('viewer-controls').classList.add('visible');
+
+                // Toggle view modes (Splat, Laser Scan, Hybrid)
+                const viewModeSelect = document.getElementById('view-mode-select');
+                const cadOverlaySelect = document.getElementById('cad-overlay-select');
+
+                function updateRenderStates() {
+                    const scene = viewer.threeScene;
+                    const splatMesh = viewer.splatMesh;
+                    
+                    if (splatMesh) {
+                        splatMesh.visible = (currentRenderMode === 'splat' || currentRenderMode === 'hybrid');
+                    }
+                    
+                    if (pointCloudObj) {
+                        pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
+                    }
+                    
+                    const cadOverlay = scene.getObjectByName('cad_measurement_overlay');
+                    if (cadOverlay) {
+                        cadOverlay.visible = cadOverlayVisible;
+                    }
+                }
+
+                viewModeSelect.onchange = (e) => {
+                    currentRenderMode = e.target.value;
+                    updateRenderStates();
+                };
+
+                cadOverlaySelect.onchange = (e) => {
+                    cadOverlayVisible = (e.target.value === 'enabled');
+                    updateRenderStates();
+                };
 
                 // Fetch and display carbon metrics
                 fetchAndDisplayCarbon(SPLAT_PATH);
 
-                // Wire up rotation buttons — each click rotates the splatMesh by 15°
+                // Wire up rotation buttons — each click rotates the splatMesh & pointCloudObj by 15°
                 const STEP = Math.PI / 12; // 15 degrees
                 const mesh = () => viewer.splatMesh;
-                document.getElementById('rx-neg').onclick = () => { if(mesh()) mesh().rotation.x -= STEP; };
-                document.getElementById('rx-pos').onclick = () => { if(mesh()) mesh().rotation.x += STEP; };
-                document.getElementById('ry-neg').onclick = () => { if(mesh()) mesh().rotation.y -= STEP; };
-                document.getElementById('ry-pos').onclick = () => { if(mesh()) mesh().rotation.y += STEP; };
-                document.getElementById('rz-neg').onclick = () => { if(mesh()) mesh().rotation.z -= STEP; };
-                document.getElementById('rz-pos').onclick = () => { if(mesh()) mesh().rotation.z += STEP; };
+                
+                function rotateScene(axis, delta) {
+                    if (mesh()) mesh().rotation[axis] += delta;
+                    if (pointCloudObj) pointCloudObj.rotation[axis] += delta;
+                    
+                    // Also rotate CAD overlay group if present
+                    const cadOverlay = viewer.threeScene.getObjectByName('cad_measurement_overlay');
+                    if (cadOverlay) cadOverlay.rotation[axis] += delta;
+                }
+
+                document.getElementById('rx-neg').onclick = () => rotateScene('x', -STEP);
+                document.getElementById('rx-pos').onclick = () => rotateScene('x', STEP);
+                document.getElementById('ry-neg').onclick = () => rotateScene('y', -STEP);
+                document.getElementById('ry-pos').onclick = () => rotateScene('y', STEP);
+                document.getElementById('rz-neg').onclick = () => rotateScene('z', -STEP);
+                document.getElementById('rz-pos').onclick = () => rotateScene('z', STEP);
                 document.getElementById('rot-reset').onclick = () => {
-                    if(mesh()) { mesh().rotation.set(0, 0, 0); }
+                    if (mesh()) mesh().rotation.set(0, 0, 0);
+                    if (pointCloudObj) pointCloudObj.rotation.set(0, 0, 0);
+                    const cadOverlay = viewer.threeScene.getObjectByName('cad_measurement_overlay');
+                    if (cadOverlay) cadOverlay.rotation.set(0, 0, 0);
                 };
 
                 // ── Custom WASD + QE Flying Controls ─────────────────────────────
@@ -744,12 +863,72 @@
 
                             scene.add(cadGroup);
                             console.log('Successfully rendered 3D CAD Wireframe Overlay:', g3d);
+
+                            // Load the styled point cloud if not loaded yet
+                            if (!pointCloudObj) {
+                                loadPointCloud(splatPath);
+                            } else {
+                                updateRenderStates();
+                            }
                         } catch (overlayErr) {
                             console.warn('CAD Overlay render error:', overlayErr);
                         }
                     }
                 }
             }
+        }
+
+        function loadPointCloud(splatPath) {
+            // points3d.ply lies in the same folder as result.ply
+            const pointsPath = splatPath.replace('result.ply', 'points3d.ply');
+            console.log('Loading styled point cloud from:', pointsPath);
+            
+            const loader = new PLYLoader();
+            loader.load(pointsPath, function (geometry) {
+                // Material with circular particles using vertex colors
+                const material = new THREE.PointsMaterial({
+                    size: 0.025,
+                    vertexColors: true,
+                    transparent: true,
+                    opacity: 0.85
+                });
+                
+                pointCloudObj = new THREE.Points(geometry, material);
+                pointCloudObj.name = 'laser_scan_points';
+                
+                // Align rotation with splatMesh
+                if (window.viewer && window.viewer.splatMesh) {
+                    pointCloudObj.rotation.copy(window.viewer.splatMesh.rotation);
+                    // Match translation/position if any
+                    pointCloudObj.position.copy(window.viewer.splatMesh.position);
+                    pointCloudObj.scale.copy(window.viewer.splatMesh.scale);
+                }
+                
+                window.viewer.threeScene.add(pointCloudObj);
+                
+                // Wire up rotation sync
+                const originalReset = document.getElementById('rot-reset').onclick;
+                document.getElementById('rot-reset').onclick = () => {
+                    if (originalReset) originalReset();
+                    if (pointCloudObj) pointCloudObj.rotation.set(0, 0, 0);
+                };
+                
+                // Trigger initial visibility sync
+                const selectEl = document.getElementById('view-mode-select');
+                if (selectEl) {
+                    currentRenderMode = selectEl.value;
+                }
+                
+                const splatMesh = window.viewer.splatMesh;
+                if (splatMesh) {
+                    splatMesh.visible = (currentRenderMode === 'splat' || currentRenderMode === 'hybrid');
+                }
+                pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
+                
+                console.log('Styled point cloud loaded successfully!');
+            }, undefined, function (error) {
+                console.warn('Failed to load points3d.ply:', error);
+            });
         }
     </script>
 </body>

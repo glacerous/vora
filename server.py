@@ -506,9 +506,18 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False) -> None
 
         if carbon_est and "error" not in carbon_est:
             try:
-                upd("reconstructing", "Uploading splat file to Cloudflare R2...")
+                upd("reconstructing", "Uploading reconstruction files to Cloudflare R2...")
                 from storage.r2_client import upload_splat, upload_thumbnail
-                splat_url = upload_splat(out, tree_code)
+                ts = int(time.time())
+                splat_url = upload_splat(out, tree_code, custom_timestamp=ts)
+                
+                # If MASt3R points3d.ply was computed, upload it too
+                if points3d_path and os.path.exists(points3d_path):
+                    try:
+                        upload_splat(points3d_path, tree_code, custom_timestamp=ts)
+                        print(f"[RECONSTRUCT] Uploaded MASt3R points3d.ply with timestamp {ts}")
+                    except Exception as upload_err:
+                        print(f"Failed to upload points3d.ply to R2: {upload_err}")
 
                 # Select middle representative frame as thumbnail
                 thumbnail_url = None

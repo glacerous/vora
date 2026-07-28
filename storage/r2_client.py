@@ -3,7 +3,7 @@ import time
 import boto3
 from botocore.config import Config
 
-def upload_splat(file_path: str, tree_code: str) -> str:
+def upload_splat(file_path: str, tree_code: str, custom_timestamp: int = None) -> str:
     """
     Uploads a tree scan file (.ply or .splat) to Cloudflare R2 bucket.
     Reads credentials from environment variables.
@@ -34,7 +34,8 @@ def upload_splat(file_path: str, tree_code: str) -> str:
     
     file_name = os.path.basename(file_path)
     # Store scans in a unique tree-specific prefix with timestamp to avoid name collisions
-    object_key = f"tree_scans/{tree_code}/{int(time.time())}_{file_name}"
+    ts = custom_timestamp if custom_timestamp is not None else int(time.time())
+    object_key = f"tree_scans/{tree_code}/{ts}_{file_name}"
     
     content_type = "application/octet-stream"
     if file_name.endswith(".ply"):
