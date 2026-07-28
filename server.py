@@ -183,6 +183,7 @@ def run_carbon_analysis(ply_path: str, points3d_path: str = None, scan_id: str =
             "carbon_kg":               carbon_result["carbon_kg"],
             "co2e_kg":                 carbon_result["co2e_kg"],
             "disclaimer":              carbon_result["disclaimer"],
+            "geometry_3d":             dbh_result.get("geometry_3d"),
         }
     except Exception as exc:
         return {"error": f"Failed to compute carbon metrics: {exc}"}

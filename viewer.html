@@ -681,6 +681,73 @@
                     const container = document.querySelector('.carbon-pills-container');
                     container.style.display = 'flex';
                     setTimeout(updateLines, 500);
+
+                    // ── 3D CAD Wireframe & Measurement Overlay Generator ────────
+                    if (metrics.geometry_3d && window.viewer && window.viewer.threeScene) {
+                        try {
+                            const g3d = metrics.geometry_3d;
+                            const scene = window.viewer.threeScene;
+                            
+                            // Remove existing overlay if present
+                            const prevOverlay = scene.getObjectByName('cad_measurement_overlay');
+                            if (prevOverlay) scene.remove(prevOverlay);
+
+                            const cadGroup = new THREE.Group();
+                            cadGroup.name = 'cad_measurement_overlay';
+
+                            const radius = g3d.radius_units || 0.2;
+                            const zMin = g3d.z_min || -1;
+                            const zMax = g3d.z_max || 1;
+                            const height = Math.abs(zMax - zMin);
+                            const zCenter = (zMin + zMax) / 2;
+                            const cx = g3d.center_x || 0;
+                            const cy = g3d.center_y || 0;
+
+                            // 1. Trunk Wireframe Cylinder
+                            const cylGeo = new THREE.CylinderGeometry(radius, radius, height, 16, 8, true);
+                            const cylMat = new THREE.MeshBasicMaterial({
+                                color: 0x06b6d4, // cyan
+                                wireframe: true,
+                                transparent: true,
+                                opacity: 0.55
+                            });
+                            const cylinder = new THREE.Mesh(cylGeo, cylMat);
+                            cylinder.position.set(cx, zCenter, cy);
+                            cadGroup.add(cylinder);
+
+                            // 2. Glowing DBH Measurement Ring at 1.3m (z_target)
+                            const zTarget = g3d.z_target || (zMin + 0.3 * height);
+                            const ringGeo = new THREE.TorusGeometry(radius * 1.05, radius * 0.04, 16, 32);
+                            const ringMat = new THREE.MeshBasicMaterial({
+                                color: 0x10b981, // emerald green
+                                wireframe: true
+                            });
+                            const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+                            ringMesh.rotation.x = Math.PI / 2;
+                            ringMesh.position.set(cx, zTarget, cy);
+                            cadGroup.add(ringMesh);
+
+                            // 3. Vertical Height Axis Line
+                            const points = [
+                                new THREE.Vector3(cx, zMin, cy),
+                                new THREE.Vector3(cx, zMax, cy)
+                            ];
+                            const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+                            const lineMat = new THREE.LineDashedMaterial({
+                                color: 0x38bdf8,
+                                dashSize: 0.05,
+                                gapSize: 0.02
+                            });
+                            const heightLine = new THREE.Line(lineGeo, lineMat);
+                            heightLine.computeLineDistances();
+                            cadGroup.add(heightLine);
+
+                            scene.add(cadGroup);
+                            console.log('Successfully rendered 3D CAD Wireframe Overlay:', g3d);
+                        } catch (overlayErr) {
+                            console.warn('CAD Overlay render error:', overlayErr);
+                        }
+                    }
                 }
             }
         }
