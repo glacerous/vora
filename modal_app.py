@@ -157,7 +157,7 @@ def run_reconstruction(images_bytes: list[bytes]) -> dict:
         "python3", "init_geo.py",
         "--source_path", os.path.join(repo_path, "assets", "examples", scene_name),
         "--model_path", output_dir,
-        "--niter", "600"
+        "--niter", "300"
     ]
     run_command(init_cmd, "Geometric Initialization (init_geo.py)")
 
@@ -182,10 +182,10 @@ def run_reconstruction(images_bytes: list[bytes]) -> dict:
         "python3", "train.py",
         "--source_path", source_path,
         "--model_path", output_dir,
-        "--iterations", "20000",
+        "--iterations", "7000",
         "--n_views", str(detected_n_views),
         "--optim_pose",
-        "--test_iterations", "20000"
+        "--test_iterations", "7000"
     ]
     run_command(train_cmd, "Fast 3D-Gaussian Optimization (train.py)")
     
