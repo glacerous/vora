@@ -248,6 +248,7 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
 
 # ── Background thread: frame extraction (sync, CPU+IO heavy) ─────────────────
 def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
+    cap = None
     try:
         upd("extracting", "Opening video file…")
         cap = cv2.VideoCapture(video_path)
@@ -275,17 +276,29 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         candidates, fi = [], 0
         while True:
             if state.get("cancel_requested", False):
-                raise RuntimeError("Job cancelled by user")
+                break
             ok, frame = cap.read()
             if not ok:
                 break
             if fi % step == 0 and _blur(frame) >= blur_thresh:
                 candidates.append((fi, _blur(frame), frame.copy()))
             fi += 1
-        cap.release()
+            
+    except Exception as exc:
+        print(f"[EXTRACT ERROR] During video read: {exc}")
+        upd("error", str(exc), error=str(exc))
+        return
+    finally:
+        if cap is not None:
+            cap.release()
 
+    # Handle cancellation cleanly outside the cv2.VideoCapture block
+    try:
         if state.get("cancel_requested", False):
-            raise RuntimeError("Job cancelled by user")
+            print("[EXTRACT] Cancel requested by user. Aborting...")
+            upd("idle", "Ready.")
+            state["cancel_requested"] = False
+            return
 
         print(f"[EXTRACT] Found {len(candidates)} sharp candidate frames (blur_thresh={blur_thresh})")
 
@@ -301,7 +314,11 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         # Overlap Check & Dynamic Resampling (Fase 3)
         upd("extracting", f"Checking overlap & resampling frames...")
         if state.get("cancel_requested", False):
-            raise RuntimeError("Job cancelled by user")
+            print("[EXTRACT] Cancel requested by user. Aborting...")
+            upd("idle", "Ready.")
+            state["cancel_requested"] = False
+            return
+            
         resampled_idxs = _check_overlap_and_resample(candidates, idxs, threshold=0.15)
         n = len(resampled_idxs)
         
@@ -312,7 +329,10 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
 
         for j, (_, _score, frame) in enumerate([candidates[i] for i in resampled_idxs]):
             if state.get("cancel_requested", False):
-                raise RuntimeError("Job cancelled by user")
+                print("[EXTRACT] Cancel requested by user. Aborting...")
+                upd("idle", "Ready.")
+                state["cancel_requested"] = False
+                return
             h, w = frame.shape[:2]
             if w > 1920:
                 frame = cv2.resize(frame, (1920, int(h * 1920 / w)))
@@ -328,14 +348,9 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         upd("extracted", f"\u2713 {n} sharp frames ready")
         print(f"[EXTRACT] Completed. {n} frames written to {FRAMES_DIR}")
 
-    except BaseException as exc:
-        if state.get("cancel_requested", False):
-            print("[EXTRACT] Cancel requested by user. Aborting...")
-            upd("idle", "Ready.")
-            state["cancel_requested"] = False
-        else:
-            print(f"[EXTRACT ERROR] {exc}")
-            upd("error", str(exc), error=str(exc))
+    except Exception as exc:
+        print(f"[EXTRACT ERROR] During frame processing: {exc}")
+        upd("error", str(exc), error=str(exc))
 
 # ── Background thread: GPU reconstruction + R2/D1 persistence (sync, IO heavy) ─
 def _reconstruct_thread(tree_code: str, remove_background: bool = False) -> None:
