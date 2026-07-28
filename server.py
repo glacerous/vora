@@ -200,12 +200,12 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
         raw_a = candidates[idx_a][2]
         raw_b = candidates[idx_b][2]
 
-        if isinstance(raw_a, np.ndarray):
+        if isinstance(raw_a, np.ndarray) and raw_a.ndim > 1:
             frame_a = raw_a
         else:
             frame_a = cv2.imdecode(raw_a, cv2.IMREAD_COLOR)
 
-        if isinstance(raw_b, np.ndarray):
+        if isinstance(raw_b, np.ndarray) and raw_b.ndim > 1:
             frame_b = raw_b
         else:
             frame_b = cv2.imdecode(raw_b, cv2.IMREAD_COLOR)
@@ -355,7 +355,7 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
                 state["cancel_requested"] = False
                 return
             
-            if isinstance(raw_frame, np.ndarray):
+            if isinstance(raw_frame, np.ndarray) and raw_frame.ndim > 1:
                 frame = raw_frame
             else:
                 frame = cv2.imdecode(raw_frame, cv2.IMREAD_COLOR)
