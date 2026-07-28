@@ -186,7 +186,8 @@ def run_reconstruction(images_bytes: list[bytes]) -> bytes:
         "--n_views", str(detected_n_views),
         "--optim_pose",
         "--init_scale_from_view_depth",
-        "--scaling_lr", "0.002"
+        "--scaling_lr", "0.002",
+        "--test_iterations", "20000"
     ]
     run_command(train_cmd, "Fast 3D-Gaussian Optimization (train.py)")
     
