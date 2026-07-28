@@ -235,11 +235,102 @@ def run_reconstruction(images_bytes: list[bytes]) -> bytes:
         
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Sending: {output_file_path} ({os.path.getsize(output_file_path):,} bytes)")
     
+    # 6. Post-processing: remove outlier / floater Gaussians before returning
+    # This runs on the Modal GPU machine which has scipy (numpy is always available).
+    # Parameters are deliberately conservative to avoid over-pruning valid splats.
+    try:
+        import numpy as np
+        from scipy.spatial import KDTree
+
+        print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] --- Starting post-processing outlier removal ---")
+
+        # Read full Gaussian PLY as structured numpy array
+        with open(output_file_path, "rb") as pf:
+            raw_props = []
+            num_vertices = 0
+            while True:
+                hline = pf.readline().decode("ascii", errors="ignore").strip()
+                if hline.startswith("element vertex"):
+                    num_vertices = int(hline.split()[-1])
+                elif hline.startswith("property"):
+                    hp = hline.split()
+                    if len(hp) >= 3:
+                        raw_props.append((hp[1], hp[2]))
+                elif hline == "end_header":
+                    break
+            dtype_map = []
+            for p_type, p_name in raw_props:
+                if p_type in ("float", "float32"):   dtype_map.append((p_name, "<f4"))
+                elif p_type in ("int", "int32", "uint"): dtype_map.append((p_name, "<i4"))
+                elif p_type in ("uchar", "uint8"):   dtype_map.append((p_name, "u1"))
+                else:                                 dtype_map.append((p_name, "<f4"))
+            vertex_data = np.fromfile(pf, dtype=np.dtype(dtype_map), count=num_vertices)
+
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Loaded {num_vertices:,} Gaussians for outlier removal")
+
+        # Combined inlier mask — start all True
+        combined_mask = np.ones(num_vertices, dtype=bool)
+
+        # Pass 1: Spatial statistical outlier removal (KNN-based)
+        NB_NEIGHBORS = 20
+        STD_RATIO    = 2.0
+        xyz = np.column_stack((vertex_data["x"], vertex_data["y"], vertex_data["z"])).astype(np.float64)
+        tree = KDTree(xyz)
+        distances, _ = tree.query(xyz, k=NB_NEIGHBORS + 1, workers=-1)
+        mean_dists = distances[:, 1:].mean(axis=1)
+        threshold_spatial = mean_dists.mean() + STD_RATIO * mean_dists.std()
+        spatial_mask = mean_dists <= threshold_spatial
+        combined_mask &= spatial_mask
+        n_spatial = int((~spatial_mask).sum())
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 1 (spatial): removed {n_spatial:,} outliers | remaining {combined_mask.sum():,}")
+
+        # Pass 2: Low-opacity removal (logit threshold — keep sigmoid >= ~0.018)
+        MIN_OPACITY_LOGIT = -4.0
+        if "opacity" in vertex_data.dtype.names:
+            opacity_mask = vertex_data["opacity"] >= MIN_OPACITY_LOGIT
+            combined_mask &= opacity_mask
+            n_opacity = int((~opacity_mask).sum())
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 2 (opacity): removed {n_opacity:,} | remaining {combined_mask.sum():,}")
+
+        # Pass 3: Oversized Gaussian removal (log-scale filter)
+        MAX_LOG_SCALE = -1.0   # exp(-1) ~0.37 units; anything larger is almost certainly a floater
+        scale_names = [n for n in vertex_data.dtype.names if n.startswith("scale_")]
+        if scale_names:
+            scales = np.column_stack([vertex_data[n] for n in scale_names])
+            max_scales = scales.max(axis=1)
+            scale_mask = max_scales <= MAX_LOG_SCALE
+            combined_mask &= scale_mask
+            n_scale = int((~scale_mask).sum())
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 3 (scale):   removed {n_scale:,} | remaining {combined_mask.sum():,}")
+
+        n_kept    = int(combined_mask.sum())
+        n_removed = num_vertices - n_kept
+        pct       = n_removed / num_vertices * 100
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Outlier removal complete: {n_removed:,} removed ({pct:.1f}%) | {n_kept:,} Gaussians kept")
+
+        # Write filtered PLY back to same file
+        filtered = vertex_data[combined_mask]
+        header_lines = ["ply", "format binary_little_endian 1.0", f"element vertex {n_kept}"]
+        for p_type, p_name in raw_props:
+            header_lines.append(f"property {p_type} {p_name}")
+        header_lines.append("end_header")
+        header = "\n".join(header_lines) + "\n"
+        with open(output_file_path, "wb") as wf:
+            wf.write(header.encode("ascii"))
+            filtered.tofile(wf)
+
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] --- Post-processing complete ---\n")
+
+    except Exception as cleanup_err:
+        # Non-fatal: if cleanup fails, we still return the unfiltered PLY
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: outlier removal failed ({cleanup_err}), returning unfiltered PLY")
+
     with open(output_file_path, "rb") as f:
         data = f.read()
         
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] --- Export completed successfully ---")
     return data
+
 
 @app.local_entrypoint()
 def main():
