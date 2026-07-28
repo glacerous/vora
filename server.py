@@ -41,6 +41,7 @@ state: dict = {
     "frame_count":       0,
     "error":             None,
     "carbon_estimation": None,
+    "overlap_warning":   None,
 }
 
 def upd(stage: str, msg: str, **kw: Any) -> None:
@@ -59,6 +60,7 @@ class StatusResponse(BaseModel):
     frame_count: int
     error: Optional[str]
     carbon_estimation: Optional[Any]
+    overlap_warning: Optional[str]
     frames: List[str]
     has_result: bool
 
@@ -163,6 +165,86 @@ def run_carbon_analysis(ply_path: str, scan_id: str = None) -> dict:
     except Exception as exc:
         return {"error": f"Failed to compute carbon metrics: {exc}"}
 
+# ── Helper: check overlap between selected frames and dynamically resample ───
+def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold: float = 0.15) -> list:
+    """
+    Checks overlap between consecutive frames in initial_idxs.
+    If overlap is less than threshold (e.g. 15%), dynamically inserts the middle
+    candidate frame from the candidates list to heal the coverage gap.
+    """
+    import cv2
+    import numpy as np
+
+    orb = cv2.ORB_create(nfeatures=1000)
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+
+    current_idxs = list(initial_idxs)
+    added_count = 0
+    max_added = 10  # Cap the number of additional frames
+    i = 0
+    gaps_detected = []
+
+    print(f"[OVERLAP] Starting overlap validation for {len(current_idxs)} frames...")
+
+    while i < len(current_idxs) - 1 and added_count < max_added:
+        idx_a = current_idxs[i]
+        idx_b = current_idxs[i+1]
+
+        # Cannot insert if they are already adjacent candidates
+        if idx_b - idx_a <= 1:
+            i += 1
+            continue
+
+        # Get frame matrices
+        frame_a = candidates[idx_a][2]
+        frame_b = candidates[idx_b][2]
+
+        # Convert to grayscale
+        gray_a = cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY)
+        gray_b = cv2.cvtColor(frame_b, cv2.COLOR_BGR2GRAY)
+
+        # Downscale for performance during overlap matching
+        h_a, w_a = gray_a.shape
+        if w_a > 640:
+            gray_a = cv2.resize(gray_a, (640, int(h_a * 640 / w_a)))
+        h_b, w_b = gray_b.shape
+        if w_b > 640:
+            gray_b = cv2.resize(gray_b, (640, int(h_b * 640 / w_b)))
+
+        kp1, des1 = orb.detectAndCompute(gray_a, None)
+        kp2, des2 = orb.detectAndCompute(gray_b, None)
+
+        if des1 is None or des2 is None:
+            ratio = 0.0
+        else:
+            matches = bf.match(des1, des2)
+            good_matches = [m for m in matches if m.distance < 50]
+            min_features = min(len(kp1), len(kp2))
+            ratio = len(good_matches) / max(1, min_features)
+
+        print(f"[OVERLAP] Pair {i:02d} (candidate {idx_a} -> {idx_b}): overlap = {ratio*100:.1f}%")
+
+        if ratio < threshold:
+            idx_mid = (idx_a + idx_b) // 2
+            print(f"[OVERLAP] ⚠ Low overlap ({ratio*100:.1f}% < {threshold*100:.1f}%). Inserting candidate {idx_mid} between {idx_a} and {idx_b}")
+            current_idxs.insert(i + 1, idx_mid)
+            added_count += 1
+            gaps_detected.append(f"Gap between frames {i} and {i+1} ({ratio*100:.1f}% overlap)")
+            i += 2  # Skip testing the newly inserted frame in this pass to prevent loops
+        else:
+            i += 1
+
+    if gaps_detected:
+        warning_msg = f"⚠ Low overlap warning: {len(gaps_detected)} gaps detected. Resampled +{added_count} frames. Try slower/steadier capture next time."
+        state["overlap_warning"] = warning_msg
+        print(f"[OVERLAP] {warning_msg}")
+    else:
+        state["overlap_warning"] = None
+        print(f"[OVERLAP] All pairs satisfy overlap threshold of {threshold*100:.0f}%")
+
+    return current_idxs
+
+
 # ── Background thread: frame extraction (sync, CPU+IO heavy) ─────────────────
 def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
     try:
@@ -206,12 +288,18 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
 
         n    = min(target, len(candidates))
         idxs = np.linspace(0, len(candidates) - 1, n, dtype=int)
-        upd("extracting", f"Selecting {n} frames from {len(candidates)} sharp candidates…")
+        
+        # Overlap Check & Dynamic Resampling (Fase 3)
+        upd("extracting", f"Checking overlap & resampling frames...")
+        resampled_idxs = _check_overlap_and_resample(candidates, idxs, threshold=0.15)
+        n = len(resampled_idxs)
+        
+        upd("extracting", f"Selecting {n} frames (including dynamically resampled ones)…")
 
         for f in glob.glob(os.path.join(FRAMES_DIR, "*")):
             os.remove(f)
 
-        for j, (_, _score, frame) in enumerate([candidates[i] for i in idxs]):
+        for j, (_, _score, frame) in enumerate([candidates[i] for i in resampled_idxs]):
             h, w = frame.shape[:2]
             if w > 1920:
                 frame = cv2.resize(frame, (1920, int(h * 1920 / w)))
