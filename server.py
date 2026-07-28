@@ -109,10 +109,16 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         if not cap.isOpened():
             raise ValueError("Cannot open video — try MP4 / MOV / AVI / WEBM / MKV format")
 
+        orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
         duration     = total_frames / fps
         step         = max(1, int(fps / 8))
+        
+        print(f"[EXTRACT] Start extraction from {video_path}")
+        print(f"[EXTRACT] Original Resolution: {orig_w}x{orig_h}, FPS: {fps:.2f}, Duration: {duration:.2f}s, Total Frames: {total_frames}")
+        
         upd("extracting", f"Scanning {total_frames} frames ({duration:.1f}s at {fps:.0f}fps)…")
 
         def _blur(frame):
@@ -127,6 +133,8 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
                 candidates.append((fi, _blur(frame), frame.copy()))
             fi += 1
         cap.release()
+
+        print(f"[EXTRACT] Found {len(candidates)} sharp candidate frames (blur_thresh={blur_thresh})")
 
         if not candidates:
             raise ValueError(
@@ -150,11 +158,15 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
                 frame,
                 [cv2.IMWRITE_JPEG_QUALITY, 95],
             )
+            if j == 0 or j == n - 1 or j == n // 2:
+                print(f"[EXTRACT] Saved frame {j:04d}.jpg - Output resolution: {frame.shape[1]}x{frame.shape[0]}")
 
         state["frame_count"] = n
         upd("extracted", f"\u2713 {n} sharp frames ready")
+        print(f"[EXTRACT] Completed. {n} frames written to {FRAMES_DIR}")
 
     except Exception as exc:
+        print(f"[EXTRACT ERROR] {exc}")
         upd("error", str(exc), error=str(exc))
 
 # ── Background thread: GPU reconstruction + R2/D1 persistence (sync, IO heavy) ─
@@ -173,10 +185,20 @@ def _reconstruct_thread(tree_code: str) -> None:
                 imgs.append(fh.read())
 
         upd("reconstructing", f"Sending {len(imgs)} frames to Modal A10G GPU…")
+        
         t0 = time.time()
-
+        print(f"[RECONSTRUCT] Connecting to Modal pipeline for tree_code '{tree_code}' at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t0))}")
+        print(f"[RECONSTRUCT] Uploading {len(imgs)} frames to GPU cloud...")
+        
         fn     = modal.Function.from_name("instantsplat-app", "run_reconstruction")
+        
+        t_remote_start = time.time()
         result = fn.remote(imgs)
+        t_remote_end = time.time()
+        
+        elapsed_remote = t_remote_end - t_remote_start
+        print(f"[RECONSTRUCT] GPU Reconstruction remote call completed at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t_remote_end))}")
+        print(f"[RECONSTRUCT] Remote duration: {elapsed_remote:.2f} seconds")
 
         out = os.path.join(OUTPUT_DIR, "result.ply")
         with open(out, "wb") as f:
@@ -184,6 +206,8 @@ def _reconstruct_thread(tree_code: str) -> None:
 
         elapsed = time.time() - t0
         mb      = len(result) / 1024 / 1024
+        print(f"[RECONSTRUCT] Saved output PLY: {out} ({mb:.2f} MB)")
+        print(f"[RECONSTRUCT] Total pipeline runtime: {elapsed:.2f} seconds")
 
         upd("reconstructing", "\u2713 Reconstruction done. Estimating DBH and Carbon...")
         carbon_est = run_carbon_analysis(out)

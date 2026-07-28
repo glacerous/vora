@@ -147,16 +147,19 @@ def fit_circle_robust(points_2d, max_iters=5, outlier_threshold_ratio=0.15):
     """
     inliers = points_2d
     xc, yc, R = None, None, None
+    logger.info(f"[DBH_Extractor] Starting robust circle fitting on {len(points_2d)} coordinates.")
     
     for i in range(max_iters):
         if len(inliers) < 3:
-            logger.warning(f"Iteration {i}: Too few inliers ({len(inliers)}) remaining.")
+            logger.warning(f"[DBH_Extractor] Iteration {i}: Too few inliers ({len(inliers)}) remaining.")
             break
             
         xc, yc, R, err = fit_circle_2d(inliers)
         if err is not None:
-            logger.warning(f"Iteration {i}: Fit failed: {err}")
+            logger.warning(f"[DBH_Extractor] Iteration {i}: Fit failed: {err}")
             break
+            
+        logger.info(f"[DBH_Extractor] Iteration {i}: Fitted center=({xc:.4f}, {yc:.4f}), R={R:.4f} units")
             
         # Calculate radial distance for each point to check error
         dists = np.sqrt((inliers[:, 0] - xc)**2 + (inliers[:, 1] - yc)**2)
@@ -167,7 +170,10 @@ def fit_circle_robust(points_2d, max_iters=5, outlier_threshold_ratio=0.15):
         mask = radial_errors < thresh
         
         num_inliers = np.sum(mask)
+        logger.info(f"[DBH_Extractor] Iteration {i}: Inliers count: {num_inliers}/{len(inliers)} using threshold: {thresh:.4f}")
+        
         if num_inliers == len(inliers) or num_inliers < 3:
+            logger.info(f"[DBH_Extractor] Iteration {i}: Converged or reached minimal subset.")
             break # Converged or can't filter further
             
         inliers = inliers[mask]
@@ -176,7 +182,7 @@ def fit_circle_robust(points_2d, max_iters=5, outlier_threshold_ratio=0.15):
     if R is not None:
         dists = np.sqrt((inliers[:, 0] - xc)**2 + (inliers[:, 1] - yc)**2)
         mean_err = np.mean(np.abs(dists - R))
-        logger.info(f"Robust fit complete. R={R:.4f}, Inliers={len(inliers)}/{len(points_2d)}, Mean Error={mean_err:.4f}")
+        logger.info(f"[DBH_Extractor] Robust fit complete. Final center=({xc:.4f}, {yc:.4f}), R={R:.4f}, Inliers={len(inliers)}/{len(points_2d)}, Mean Error={mean_err:.4f}")
         return xc, yc, R, mean_err
     return None, None, None, None
 
@@ -214,6 +220,12 @@ def extract_dbh(ply_path, scale_factor=1.0, vertical_axis='z', breast_height=1.3
     z_max = np.percentile(z_coords, 99)
     estimated_height_m = float((z_max - z_min) * scale)
     
+    logger.info(f"[DBH_Extractor] Ground alignment & bounds check:")
+    logger.info(f"[DBH_Extractor] Estimated base ground Z level (1st percentile): {z_min:.4f} units")
+    logger.info(f"[DBH_Extractor] Estimated tree top Z level (99th percentile): {z_max:.4f} units")
+    logger.info(f"[DBH_Extractor] Calculated coordinate height delta: {z_max - z_min:.4f} units")
+    logger.info(f"[DBH_Extractor] Tree height (meters, scaled): {estimated_height_m:.2f} m")
+    
     # 2. Try Open3D Poisson Reconstruction first
     try:
         import open3d as o3d
@@ -229,9 +241,6 @@ def extract_dbh(ply_path, scale_factor=1.0, vertical_axis='z', breast_height=1.3
         pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
         
         # Poisson surface reconstruction
-        # Parameters:
-        # depth=9: octree depth. Controls detail. Depth 9 gives high-resolution mesh suitable for trunk contour extraction.
-        # linear_fit=False: fits using standard indicator function.
         logger.info("Running TriangleMesh.create_from_point_cloud_poisson (depth=9)...")
         mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
         
@@ -247,30 +256,37 @@ def extract_dbh(ply_path, scale_factor=1.0, vertical_axis='z', breast_height=1.3
         z_target = z_min + (breast_height / scale)
         tol = tolerance / scale
         
+        logger.info(f"[DBH_Extractor] Poisson slice variables: target Z={z_target:.4f}, tolerance={tol:.4f} units")
+        
         slice_mask = np.abs(z_mesh - z_target) <= tol
         slice_points = mesh_points[slice_mask]
         method_used = "Open3D Poisson Mesh"
-        logger.info(f"Sliced Poisson Mesh. Extracted {len(slice_points)} contour vertices.")
+        logger.info(f"[DBH_Extractor] Sliced Poisson Mesh. Extracted {len(slice_points)} contour vertices.")
         
     except ImportError:
-        logger.info("Open3D is not installed/compatible. Falling back to robust Pure-Numpy Point Cloud Slicing...")
+        logger.info("[DBH_Extractor] Open3D is not installed/compatible. Falling back to robust Pure-Numpy Point Cloud Slicing...")
         # Slicing the raw point cloud
         z_target = z_min + (breast_height / scale)
         tol = tolerance / scale
         
+        logger.info(f"[DBH_Extractor] Slicing variables: target Z={z_target:.4f}, tolerance={tol:.4f} units")
+        
         slice_mask = np.abs(z_coords - z_target) <= tol
         slice_points = points[slice_mask]
         method_used = "Numpy Point Cloud Slicing"
-        logger.info(f"Sliced raw point cloud. Extracted {len(slice_points)} points in slice.")
+        logger.info(f"[DBH_Extractor] Sliced raw point cloud. Extracted {len(slice_points)} points in slice.")
         
     except Exception as e:
-        logger.warning(f"Open3D Poisson pipeline failed: {e}. Falling back to Numpy Point Cloud Slicing...")
+        logger.warning(f"[DBH_Extractor] Open3D Poisson pipeline failed: {e}. Falling back to Numpy Point Cloud Slicing...")
         z_target = z_min + (breast_height / scale)
         tol = tolerance / scale
         
+        logger.info(f"[DBH_Extractor] Slicing variables: target Z={z_target:.4f}, tolerance={tol:.4f} units")
+        
         slice_mask = np.abs(z_coords - z_target) <= tol
         slice_points = points[slice_mask]
         method_used = "Numpy Point Cloud Slicing"
+        logger.info(f"[DBH_Extractor] Sliced raw point cloud. Extracted {len(slice_points)} points in slice.")
         
     # 3. Project to 2D and Fit Circle
     proj_axes = [i for i in [0, 1, 2] if i != axis_idx]
