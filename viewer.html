@@ -493,6 +493,8 @@
         let cadOverlayMode = 'all'; // all | cad_only | disabled
         let pointCloudObj = null;
         let viewer = null;
+        let currentSpeed = 0.05;
+        let cameraOriented = false;
 
         // Update UI info
         document.getElementById('path-val').textContent = SPLAT_PATH;
@@ -520,7 +522,7 @@
                 'showLoadingUI': true
             })
             .then(() => {
-                let currentSpeed = 0.05;
+                currentSpeed = 0.05;
                 const speedIndicator = document.getElementById('speed-indicator');
 
                 statusBadge.textContent = "Active";
@@ -529,32 +531,6 @@
 
                 // Start the render loop FIRST so viewer.controls is initialized
                 viewer.start();
-
-                // Auto-fit camera to the loaded splat's bounding sphere (after start so controls exist)
-                try {
-                    const splatMesh = viewer.splatMesh;
-                    if (splatMesh) {
-                        splatMesh.geometry.computeBoundingSphere();
-                        const sphere = splatMesh.geometry.boundingSphere;
-                        if (sphere && sphere.radius > 0) {
-                            const c = sphere.center;
-                            const r = sphere.radius;
-                            const camPos = [c.x, c.y, c.z + r * 3];
-                            viewer.camera.position.set(camPos[0], camPos[1], camPos[2]);
-                            if (viewer.controls) {
-                                viewer.controls.target.set(c.x, c.y, c.z);
-                                viewer.controls.update();
-                            } else {
-                                viewer.camera.lookAt(c.x, c.y, c.z);
-                            }
-                            console.log('Auto-fit camera:', camPos, '→ look at', [c.x, c.y, c.z]);
-                            currentSpeed = Math.max(0.005, r / 100);
-                            speedIndicator.textContent = currentSpeed.toFixed(3);
-                        }
-                    }
-                } catch(fitErr) {
-                    console.warn('Auto-fit failed:', fitErr);
-                }
 
                 // Show orientation & render controls now that the scene is loaded
                 document.getElementById('rot-toggle').classList.add('visible');
@@ -807,6 +783,45 @@
 
                         const center_3d = new THREE.Vector3(cx, cy, cz);
                         const dir_3d = new THREE.Vector3(dx, dy, dz).normalize();
+
+                        // Default Camera Orientation (PCA / trunk direction & center)
+                        if (!cameraOriented) {
+                            try {
+                                let sideDir = new THREE.Vector3(0, 0, 1);
+                                const dot = sideDir.dot(dir_3d);
+                                sideDir.addScaledVector(dir_3d, -dot);
+                                if (sideDir.lengthSq() < 1e-6) {
+                                    sideDir.set(1, 0, 0);
+                                    const dot2 = sideDir.dot(dir_3d);
+                                    sideDir.addScaledVector(dir_3d, -dot2);
+                                }
+                                sideDir.normalize();
+
+                                const fov = window.viewer.camera ? window.viewer.camera.fov : 50;
+                                const fovRad = (fov * Math.PI) / 180;
+                                const h_m = metrics.height_m || height;
+                                const distance = (h_m / 2) / Math.tan(fovRad / 2) * 1.2;
+
+                                const camPos = center_3d.clone().addScaledVector(sideDir, distance);
+                                window.viewer.camera.position.copy(camPos);
+                                if (window.viewer.controls) {
+                                    window.viewer.controls.target.copy(center_3d);
+                                    window.viewer.controls.update();
+                                } else {
+                                    window.viewer.camera.lookAt(center_3d);
+                                }
+                                console.log('Auto-fit camera perpendicular to trunk:', camPos, '→ look at', center_3d);
+                                
+                                currentSpeed = Math.max(0.005, h_m / 100);
+                                const speedIndicator = document.getElementById('speed-indicator');
+                                if (speedIndicator) {
+                                    speedIndicator.textContent = currentSpeed.toFixed(3);
+                                }
+                                cameraOriented = true;
+                            } catch (camErr) {
+                                console.warn('Failed to orient camera to geometry_3d:', camErr);
+                            }
+                        }
 
                         // Calculate base, top, and center coordinates of trunk cylinder
                         const base_3d = center_3d.clone().addScaledVector(dir_3d, hMin - hTarget);
