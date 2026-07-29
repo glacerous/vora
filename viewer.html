@@ -602,6 +602,17 @@
                 // ── Custom WASD + QE Flying Controls ─────────────────────────────
                 const activeKeys = {};
                 window.addEventListener('keydown', (e) => {
+                    // Prevent Ctrl+S / Cmd+S from triggering browser Save Page dialog
+                    if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S' || e.code === 'KeyS')) {
+                        e.preventDefault();
+                    }
+                    
+                    // Prevent page scrolling/navigation behavior for flying keys when focused in iframe
+                    const controlKeys = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+                    if (controlKeys.includes(e.code)) {
+                        e.preventDefault();
+                    }
+
                     activeKeys[e.code] = true;
 
                     // Manual flight speed adjustment using [ and ]
