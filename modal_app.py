@@ -349,22 +349,41 @@ def run_reconstruction(images_bytes: list[bytes]) -> dict:
     # init_geo may save it as "result.ply" in output_dir or source_path,
     # or as "points3d.ply" inside sparse_N folders.
     points3d_data = None
-    mast3r_candidates = (
-        glob.glob(os.path.join(output_dir, "result.ply")) +
-        glob.glob(os.path.join(source_path, "result.ply")) +
-        glob.glob(os.path.join(source_path, "sparse_*", "points3d.ply")) +
-        glob.glob(os.path.join(source_path, "sparse_*", "result.ply")) +
-        glob.glob(os.path.join(output_dir, "**", "points3d.ply"), recursive=True) +
-        glob.glob(os.path.join(output_dir, "**", "result.ply"), recursive=True) +
-        glob.glob(os.path.join(repo_path, "**", "result.ply"), recursive=True)
-    )
-    # Remove duplicates while preserving order
+    
+    # Robust case-insensitive search across relevant directories
+    search_dirs = [output_dir, source_path, repo_path]
+    target_names_lower = {"points3d.ply", "result.ply"}
+    
+    raw_candidates = []
+    for s_dir in search_dirs:
+        if os.path.exists(s_dir):
+            for root, _, files in os.walk(s_dir):
+                for file in files:
+                    if file.lower() in target_names_lower:
+                        raw_candidates.append(os.path.join(root, file))
+                        
+    # Remove duplicates
     seen = set()
-    mast3r_candidates = [c for c in mast3r_candidates if not (c in seen or seen.add(c))]
+    mast3r_candidates = [c for c in raw_candidates if not (c in seen or seen.add(c))]
+    
     # Exclude the gaussian splat PLY we already selected (it's a training artifact, not a plain point cloud)
     if output_file_path:
         mast3r_candidates = [c for c in mast3r_candidates if os.path.abspath(c) != os.path.abspath(output_file_path)]
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Searching for MASt3R point cloud in {len(mast3r_candidates)} candidates...")
+        
+    # Prioritize candidate files: 
+    # 1. contains "sparse_" and filename is case-insensitively "points3d.ply"
+    # 2. filename is case-insensitively "points3d.ply"
+    # 3. filename is case-insensitively "result.ply"
+    def candidate_priority(path):
+        fname = os.path.basename(path).lower()
+        has_sparse = "sparse_" in path
+        if fname == "points3d.ply":
+            return (0 if has_sparse else 1)
+        return 2
+
+    mast3r_candidates.sort(key=candidate_priority)
+    
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Searching for MASt3R point cloud in {len(mast3r_candidates)} case-insensitive candidates...")
     for candidate in mast3r_candidates:
         if os.path.exists(candidate):
             fsize = os.path.getsize(candidate)
@@ -378,7 +397,8 @@ def run_reconstruction(images_bytes: list[bytes]) -> dict:
             break
 
     if points3d_data is None:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: MASt3R points3d.ply not found — measurement will fall back to splat")
+        searched_paths = [os.path.abspath(d) for d in search_dirs]
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: points3D.ply not found in expected paths: {searched_paths}")
 
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] --- Export completed successfully ---")
     return {
