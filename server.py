@@ -574,6 +574,27 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False) -> None
                     except Exception as thumb_err:
                         print(f"Thumbnail upload error: {thumb_err}")
 
+                # Pl@ntNet Species Detection (Task 4)
+                species_preds = None
+                try:
+                    upd("reconstructing", "Detecting tree species using Pl@ntNet API...")
+                    from carbon.species_detection import detect_species
+                    # Get up to 3 image files (start, middle, and end for better coverage)
+                    img_files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
+                    if img_files:
+                        detect_files = []
+                        if len(img_files) >= 1:
+                            detect_files.append(img_files[0])
+                        if len(img_files) >= 3:
+                            detect_files.append(img_files[len(img_files)//2])
+                            detect_files.append(img_files[-1])
+                        elif len(img_files) == 2:
+                            detect_files.append(img_files[1])
+                        
+                        species_preds = detect_species(detect_files)
+                except Exception as sp_err:
+                    print(f"[RECONSTRUCT] Pl@ntNet species detection exception: {sp_err}")
+
                 upd("reconstructing", "Saving scan results to Cloudflare D1...")
                 from storage.d1_client import save_scan_result
                 save_scan_result(
@@ -587,6 +608,7 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False) -> None
                     confidence_note=carbon_est.get("confidence"),
                     thumbnail_url=thumbnail_url,
                     geometry_3d=carbon_est.get("geometry_3d"),
+                    species_predictions=species_preds,
                 )
                 upd("done", f"✓ Done in {elapsed:.0f}s — {mb:.1f} MB Gaussian Splat ready! (Tree code: {tree_code})")
             except Exception as exc:

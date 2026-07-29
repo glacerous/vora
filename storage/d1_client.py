@@ -55,17 +55,18 @@ import json
 
 def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg: float,
                      karbon_kg: float, co2e_kg: float, splat_file_url: str, confidence_note: str,
-                     thumbnail_url: str = None, geometry_3d: dict = None):
+                     thumbnail_url: str = None, geometry_3d: dict = None, species_predictions: list = None):
     """
     Inserts a new scan record into the tree_scans database table on Cloudflare D1.
     """
     sql = """
-    INSERT INTO tree_scans (tree_code, scan_date, dbh_cm, tinggi_m, biomassa_kg, karbon_kg, co2e_kg, splat_file_url, confidence_note, thumbnail_url, geometry_3d)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tree_scans (tree_code, scan_date, dbh_cm, tinggi_m, biomassa_kg, karbon_kg, co2e_kg, splat_file_url, confidence_note, thumbnail_url, geometry_3d, species_predictions)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     # Use ISO 8601 UTC format for scan_date
     scan_date = datetime.now(timezone.utc).isoformat()
     geom_str = json.dumps(geometry_3d) if geometry_3d else None
+    species_str = json.dumps(species_predictions) if species_predictions else None
     execute_d1_query(sql, [
         tree_code, 
         scan_date, 
@@ -77,7 +78,8 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
         splat_file_url, 
         confidence_note,
         thumbnail_url,
-        geom_str
+        geom_str,
+        species_str
     ])
 
 def get_scan_history(tree_code: str):
@@ -90,6 +92,11 @@ def get_scan_history(tree_code: str):
         if r.get("geometry_3d"):
             try:
                 r["geometry_3d"] = json.loads(r["geometry_3d"])
+            except Exception:
+                pass
+        if r.get("species_predictions"):
+            try:
+                r["species_predictions"] = json.loads(r["species_predictions"])
             except Exception:
                 pass
     return rows
@@ -107,6 +114,11 @@ def get_all_scans(limit: int = 20, offset: int = 0, include_invalid: bool = Fals
         if r.get("geometry_3d"):
             try:
                 r["geometry_3d"] = json.loads(r["geometry_3d"])
+            except Exception:
+                pass
+        if r.get("species_predictions"):
+            try:
+                r["species_predictions"] = json.loads(r["species_predictions"])
             except Exception:
                 pass
     return rows

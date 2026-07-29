@@ -10,5 +10,6 @@ CREATE TABLE IF NOT EXISTS tree_scans (
     splat_file_url TEXT,
     confidence_note TEXT,
     thumbnail_url TEXT,
-    geometry_3d TEXT
+    geometry_3d TEXT,
+    species_predictions TEXT
 );
