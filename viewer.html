@@ -227,6 +227,9 @@
             min-width: 220px;
             animation: fadeIn 0.3s ease;
         }
+        .embed-mode .viewer-controls {
+            top: 85px;
+        }
         .viewer-controls.visible { display: flex; }
         .control-group {
             display: flex;
@@ -461,6 +464,11 @@
     </div>
 
     <script type="module">
+        // Detect if running inside iframe and apply body class
+        if (window.self !== window.top) {
+            document.body.classList.add('embed-mode');
+        }
+
         // =========================================================================
         // CONFIGURATION: CHANGE YOUR SPLAT / PLY FILE PATH HERE
         // =========================================================================
