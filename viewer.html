@@ -896,6 +896,15 @@
                         // Add CAD Group to scene root (not splatMesh) so splatMesh.visible can be toggled cleanly
                         // Transforms are synced every frame in the updateMovement rAF loop
                         scene.add(cadGroup);
+                        
+                        // Immediately sync transform from splatMesh if available to avoid race condition/timing issues
+                        const sm = window.viewer ? window.viewer.splatMesh : null;
+                        if (sm) {
+                            cadGroup.position.copy(sm.position);
+                            cadGroup.quaternion.copy(sm.quaternion);
+                            cadGroup.scale.copy(sm.scale);
+                            cadGroup.updateMatrix();
+                        }
                         console.log('Successfully rendered 3D CAD Wireframe Overlay:', g3d);
 
                     } catch (overlayErr) {
@@ -957,6 +966,15 @@
                     // Add Point Cloud to scene root (not splatMesh) so splatMesh.visible can be toggled cleanly
                     // Transforms are synced every frame in the updateMovement rAF loop
                     window.viewer.threeScene.add(pointCloudObj);
+
+                    // Sync initial transform from splatMesh immediately if available to avoid race condition/timing issues
+                    const sm = window.viewer ? window.viewer.splatMesh : null;
+                    if (sm) {
+                        pointCloudObj.position.copy(sm.position);
+                        pointCloudObj.quaternion.copy(sm.quaternion);
+                        pointCloudObj.scale.copy(sm.scale);
+                        pointCloudObj.updateMatrix();
+                    }
 
                     // Enable Laser Scan / Hybrid options now that point cloud is available
                     const sel = document.getElementById('view-mode-select');
