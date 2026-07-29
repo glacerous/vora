@@ -534,15 +534,22 @@
                     const scene = viewer.threeScene;
                     const splatMesh = viewer.splatMesh;
                     
+                    const showSplat = (currentRenderMode === 'splat' || currentRenderMode === 'hybrid');
+                    
                     if (splatMesh) {
-                        splatMesh.visible = (currentRenderMode === 'splat' || currentRenderMode === 'hybrid');
+                        // Keep parent node visible so that children (point cloud / CAD) are rendered,
+                        // but toggle the material visibility to hide/show the actual Gaussian Splats.
+                        splatMesh.visible = true;
+                        if (splatMesh.material) {
+                            splatMesh.material.visible = showSplat;
+                        }
                     }
                     
                     if (pointCloudObj) {
                         pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
                     }
                     
-                    const cadOverlay = scene.getObjectByName('cad_measurement_overlay');
+                    const cadOverlay = splatMesh ? splatMesh.getObjectByName('cad_measurement_overlay') : null;
                     if (cadOverlay) {
                         if (cadOverlayMode === 'disabled') {
                             cadOverlay.visible = false;
@@ -915,9 +922,7 @@
 
                 // Sync initial visibility state
                 currentRenderMode = sel?.value || 'splat';
-                const splatMesh = window.viewer.splatMesh;
-                if (splatMesh) splatMesh.visible = (currentRenderMode === 'splat' || currentRenderMode === 'hybrid');
-                pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
+                updateRenderStates();
 
                 console.log('Point cloud loaded — ' + geometry.attributes.position.count + ' points');
             }, undefined, function (error) {
