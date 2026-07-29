@@ -527,6 +527,13 @@
                 document.getElementById('rot-toggle').classList.add('visible');
                 document.getElementById('viewer-controls').classList.add('visible');
 
+                // Load point cloud immediately, independent of carbon data fetch
+                // This ensures Laser Scan / Hybrid modes are always enabled when points3d.ply exists
+                loadPointCloud(SPLAT_PATH);
+
+                // Fetch carbon metrics + CAD overlay (separate from point cloud loading)
+                fetchAndDisplayCarbon(SPLAT_PATH);
+
                 // Toggle view modes (Splat, Laser Scan, Hybrid)
                 const viewModeSelect = document.getElementById('view-mode-select');
                 const cadOverlaySelect = document.getElementById('cad-overlay-select');
@@ -568,9 +575,6 @@
                     cadOverlayMode = e.target.value;
                     updateRenderStates();
                 };
-
-                // Fetch and display carbon metrics
-                fetchAndDisplayCarbon(SPLAT_PATH);
 
                 const STEP = Math.PI / 12; // 15 degrees
                 const mesh = () => viewer.splatMesh;
@@ -849,12 +853,6 @@
                     }
                 }
 
-                // Always attempt to load point cloud (passes SPLAT_PATH so proxy rewrite works correctly)
-                if (!pointCloudObj) {
-                    loadPointCloud(SPLAT_PATH);
-                } else {
-                    updateRenderStates();
-                }
             }
         }
 
