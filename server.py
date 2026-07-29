@@ -152,9 +152,27 @@ def run_carbon_analysis(ply_path: str, points3d_path: str = None, scan_id: str =
                 print(f"[CARBON] MASt3R extraction exception: {mast3r_err} — falling back to splat")
                 dbh_result = None
 
-        # ── Fallback: extract from Gaussian splat (legacy method) ─────────────
+        # ── Fallback: run PCA-based extractor directly on the Gaussian splat ────
+        # extract_dbh_from_mast3r works on any PLY with x,y,z — splat centers are valid.
+        # This gives proper 3D axis alignment (not a fixed vertical assumption).
         if dbh_result is None:
-            print(f"[CARBON] Using splat-based extraction (legacy): {ply_path}")
+            print(f"[CARBON] No points3d.ply — running PCA extractor on splat: {ply_path}")
+            try:
+                dbh_result = extract_dbh_from_mast3r(
+                    ply_path=ply_path, scale_factor=scale_factor
+                )
+                if "error" in dbh_result:
+                    print(f"[CARBON] PCA extractor on splat failed: {dbh_result['error']} — falling back to legacy")
+                    dbh_result = None
+                else:
+                    print(f"[CARBON] PCA extractor on splat succeeded: DBH={dbh_result['dbh_cm']} cm")
+            except Exception as pca_err:
+                print(f"[CARBON] PCA extractor exception: {pca_err} — falling back to legacy")
+                dbh_result = None
+
+        # ── Last resort: legacy fixed-axis extraction ─────────────────────────
+        if dbh_result is None:
+            print(f"[CARBON] Using legacy fixed-axis extraction: {ply_path}")
             dbh_result = extract_dbh(
                 ply_path=ply_path, scale_factor=scale_factor,
                 vertical_axis="z", breast_height=1.3,

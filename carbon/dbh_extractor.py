@@ -254,12 +254,19 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     if len(pca_pts) < 15:
         pca_pts = trunk_points
         
+    # Use at most 10,000 points for PCA to keep memory usage bounded
+    if len(pca_pts) > 10000:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(pca_pts), size=10000, replace=False)
+        pca_pts = pca_pts[idx]
+
     trunk_mean = pca_pts.mean(axis=0)
     centered = pca_pts - trunk_mean
-    _, _, Vh = np.linalg.svd(centered)
-    
-    # Precise unit direction vector of the trunk
-    v = Vh[0]
+    # Use covariance eigendecomposition (3×3 matrix) — memory-safe for any N
+    cov = (centered.T @ centered) / max(len(centered) - 1, 1)
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+    # eigh returns ascending order — largest eigenvalue (principal axis) is last
+    v = eigenvectors[:, -1]
     
     # Ensure direction vector points "upwards" relative to rough vertical axis
     if v[rough_axis_idx] < 0:
