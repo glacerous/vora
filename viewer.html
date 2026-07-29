@@ -441,14 +441,14 @@
         const urlParams = new URLSearchParams(window.location.search);
         let splatPath = urlParams.get('url') || urlParams.get('file') || 'output/result.ply';
 
-        // Rewrite R2 URLs containing r2.dev to use the local server streaming proxy (bypasses ISP blocks)
-        if (splatPath.includes('r2.dev') && splatPath.includes('/tree_scans/')) {
+        // Rewrite R2 URLs to use the local server streaming proxy (bypasses ISP blocks and CORS policies)
+        if (splatPath.includes('/tree_scans/') && (splatPath.startsWith('http://') || splatPath.startsWith('https://')) && !splatPath.includes('localhost') && !splatPath.includes('127.0.0.1')) {
             const parts = splatPath.split('/tree_scans/');
             if (parts.length === 2) {
                 const subParts = parts[1].split('/');
                 if (subParts.length === 2) {
                     const treeCode = subParts[0];
-                    const filename = subParts[1];
+                    const filename = subParts[1].split('?')[0]; // strip query parameters
                     splatPath = `/splat-proxy/${treeCode}/${filename}`;
                     console.log('Routing R2 URL through local streaming proxy:', splatPath);
                 }
@@ -493,23 +493,31 @@
                 let currentSpeed = 0.05;
                 const speedIndicator = document.getElementById('speed-indicator');
 
-                // Auto-fit camera to the loaded splat's bounding sphere
+                statusBadge.textContent = "Active";
+                statusBadge.className = "status-badge success";
+                window.viewer = viewer;
+
+                // Start the render loop FIRST so viewer.controls is initialized
+                viewer.start();
+
+                // Auto-fit camera to the loaded splat's bounding sphere (after start so controls exist)
                 try {
                     const splatMesh = viewer.splatMesh;
                     if (splatMesh) {
-                        // Compute bounding sphere of the loaded scene
                         splatMesh.geometry.computeBoundingSphere();
                         const sphere = splatMesh.geometry.boundingSphere;
                         if (sphere && sphere.radius > 0) {
                             const c = sphere.center;
                             const r = sphere.radius;
-                            // Place camera at 3x radius along +Z from center
                             const camPos = [c.x, c.y, c.z + r * 3];
                             viewer.camera.position.set(camPos[0], camPos[1], camPos[2]);
-                            viewer.camera.lookAt(c.x, c.y, c.z);
+                            if (viewer.controls) {
+                                viewer.controls.target.set(c.x, c.y, c.z);
+                                viewer.controls.update();
+                            } else {
+                                viewer.camera.lookAt(c.x, c.y, c.z);
+                            }
                             console.log('Auto-fit camera:', camPos, '→ look at', [c.x, c.y, c.z]);
-
-                            // Base flight speed dynamically on the scene's radius
                             currentSpeed = Math.max(0.005, r / 100);
                             speedIndicator.textContent = currentSpeed.toFixed(3);
                         }
@@ -517,10 +525,6 @@
                 } catch(fitErr) {
                     console.warn('Auto-fit failed:', fitErr);
                 }
-                statusBadge.textContent = "Active";
-                statusBadge.className = "status-badge success";
-                window.viewer = viewer;
-                viewer.start();
 
                 // Show orientation & render controls now that the scene is loaded
                 document.getElementById('rot-toggle').classList.add('visible');
@@ -632,7 +636,10 @@
                 const tempUp = new THREE.Vector3();
 
                 function updateMovement() {
-                    if (!viewer.camera || !viewer.controls) return;
+                    // Always re-schedule regardless of camera/controls state so loop never stops
+                    requestAnimationFrame(updateMovement);
+
+                    if (!viewer.camera) return;
 
                     let dx = 0; // Left/Right
                     let dy = 0; // Up/Down
@@ -649,33 +656,24 @@
                         const boost = (activeKeys['ShiftLeft'] || activeKeys['ShiftRight']) ? 3.0 : 1.0;
                         const step = currentSpeed * boost;
 
-                        // Local forward direction
                         viewer.camera.getWorldDirection(tempDir);
-
-                        // Local right direction
                         tempSide.crossVectors(tempDir, viewer.camera.up).normalize();
-
-                        // Local up direction
                         tempUp.copy(viewer.camera.up).normalize();
 
-                        // Offset vector calculation
                         const offset = new THREE.Vector3()
-                            .addScaledVector(tempDir, -dz * step) // forward
-                            .addScaledVector(tempSide, dx * step)  // side
-                            .addScaledVector(tempUp, -dy * step);  // up/down (correct Y-down axis)
+                            .addScaledVector(tempDir, -dz * step)
+                            .addScaledVector(tempSide, dx * step)
+                            .addScaledVector(tempUp, -dy * step);
 
-                        // Translate both camera position and OrbitControls look-at target
                         viewer.camera.position.add(offset);
-                        viewer.controls.target.add(offset);
-
-                        // Signal changes to the camera system
-                        viewer.controls.update();
+                        if (viewer.controls) {
+                            viewer.controls.target.add(offset);
+                            viewer.controls.update();
+                        }
                     }
-
-                    requestAnimationFrame(updateMovement);
                 }
 
-                // Launch updates
+                // Launch movement loop (viewer.start() already called above, controls are ready)
                 requestAnimationFrame(updateMovement);
 
             })
@@ -847,15 +845,16 @@
                         }
                         console.log('Successfully rendered 3D CAD Wireframe Overlay:', g3d);
 
-                        // Load the point cloud if not loaded yet
-                        if (!pointCloudObj) {
-                            loadPointCloud(splatPath);
-                        } else {
-                            updateRenderStates();
-                        }
                     } catch (overlayErr) {
                         console.warn('CAD Overlay render error:', overlayErr);
                     }
+                }
+
+                // Always attempt to load point cloud (passes SPLAT_PATH so proxy rewrite works correctly)
+                if (!pointCloudObj) {
+                    loadPointCloud(SPLAT_PATH);
+                } else {
+                    updateRenderStates();
                 }
             }
         }
@@ -877,12 +876,14 @@
             }
 
             // Rewrite R2 URLs through local proxy (same as splat)
-            if (pointsPath.includes('r2.dev') && pointsPath.includes('/tree_scans/')) {
+            if (pointsPath.includes('/tree_scans/') && (pointsPath.startsWith('http://') || pointsPath.startsWith('https://')) && !pointsPath.includes('localhost') && !pointsPath.includes('127.0.0.1')) {
                 const parts = pointsPath.split('/tree_scans/');
                 if (parts.length === 2) {
                     const sub = parts[1].split('/');
                     if (sub.length === 2) {
-                        pointsPath = `/splat-proxy/${sub[0]}/${sub[1]}`;
+                        const treeCode = sub[0];
+                        const filename = sub[1].split('?')[0]; // strip query parameters
+                        pointsPath = `/splat-proxy/${treeCode}/${filename}`;
                     }
                 }
             }
