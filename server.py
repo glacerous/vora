@@ -128,6 +128,126 @@ def _load_scale_factor_for_scan(scan_id: str = None) -> float:
     return 1.0
 
 
+def filter_points3d_ply(ply_path: str) -> None:
+    """
+    Applies the same filtering logic (horizontal crop around trunk cluster peak + statistical outlier removal)
+    to points3d.ply before saving/uploading it, ensuring the point cloud shown in Laser Scan mode is clean.
+    """
+    import numpy as np
+    from scipy.spatial import KDTree
+    
+    if not ply_path or not os.path.exists(ply_path):
+        return
+
+    try:
+        # 1. Read PLY using a structured reader
+        with open(ply_path, "rb") as f:
+            raw_props = []
+            num_vertices = 0
+            is_binary = False
+
+            while True:
+                line = f.readline().decode("ascii", errors="ignore").strip()
+                if line.startswith("format binary_little_endian"):
+                    is_binary = True
+                elif line.startswith("element vertex"):
+                    num_vertices = int(line.split()[-1])
+                elif line.startswith("property"):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        raw_props.append((parts[1], parts[2]))
+                elif line == "end_header":
+                    break
+
+            if num_vertices <= 0 or not is_binary:
+                print(f"[RECONSTRUCT-FILTER] Empty or non-binary PLY: {ply_path}")
+                return
+
+            dtype_map = []
+            for p_type, p_name in raw_props:
+                if p_type in ("float", "float32"):
+                    dtype_map.append((p_name, "<f4"))
+                elif p_type in ("int", "int32", "uint"):
+                    dtype_map.append((p_name, "<i4"))
+                elif p_type in ("uchar", "uint8"):
+                    dtype_map.append((p_name, "u1"))
+                else:
+                    dtype_map.append((p_name, "<f4"))
+
+            vertex_data = np.fromfile(f, dtype=np.dtype(dtype_map), count=num_vertices)
+
+        # 2. Extract XYZ
+        x = vertex_data['x']
+        y = vertex_data['y']
+        z = vertex_data['z']
+        xyz = np.column_stack((x, y, z))
+
+        if len(xyz) < 30:
+            print(f"[RECONSTRUCT-FILTER] Too few points ({len(xyz)}) to filter: {ply_path}")
+            return
+
+        # 3. Determine rough vertical axis
+        ranges = xyz.max(axis=0) - xyz.min(axis=0)
+        rough_axis_idx = int(np.argmax(ranges))
+        proj_axes = [i for i in [0, 1, 2] if i != rough_axis_idx]
+
+        # 4. Crop horizontally around peak (trunk cluster)
+        h1 = xyz[:, proj_axes[0]]
+        h2 = xyz[:, proj_axes[1]]
+
+        hist, xedges, yedges = np.histogram2d(h1, h2, bins=30)
+        max_idx = np.unravel_index(np.argmax(hist), hist.shape)
+        peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
+        peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
+
+        dist_sq = (h1 - peak_h1)**2 + (h2 - peak_h2)**2
+        CROP_RADIUS = 0.45
+        crop_mask = dist_sq <= CROP_RADIUS**2
+        
+        # If crop yields too few points, fallback to all points
+        if np.sum(crop_mask) < 20:
+            crop_mask = np.ones(len(xyz), dtype=bool)
+
+        filtered_vertex_data = vertex_data[crop_mask]
+        filtered_xyz = xyz[crop_mask]
+
+        # 5. Statistical Outlier Removal using KDTree on cropped points
+        if len(filtered_xyz) >= 20:
+            tree = KDTree(filtered_xyz)
+            nb_neighbors = 20
+            std_ratio = 2.0
+            distances, _ = tree.query(filtered_xyz, k=nb_neighbors + 1, workers=-1)
+            mean_dists = distances[:, 1:].mean(axis=1)
+
+            global_mean = mean_dists.mean()
+            global_std  = mean_dists.std()
+            threshold   = global_mean + std_ratio * global_std
+
+            inlier_mask = mean_dists <= threshold
+            filtered_vertex_data = filtered_vertex_data[inlier_mask]
+
+        # 6. Save back to the PLY path
+        n = len(filtered_vertex_data)
+        header_lines = [
+            "ply",
+            "format binary_little_endian 1.0",
+            f"element vertex {n}",
+        ]
+        for p_type, p_name in raw_props:
+            header_lines.append(f"property {p_type} {p_name}")
+        header_lines.append("end_header")
+        header = "\n".join(header_lines) + "\n"
+
+        with open(ply_path, "wb") as f:
+            f.write(header.encode("ascii"))
+            filtered_vertex_data.tofile(f)
+
+        print(f"[RECONSTRUCT-FILTER] Successfully cleaned point cloud: {num_vertices} -> {n} points")
+
+    except Exception as exc:
+        print(f"[RECONSTRUCT-FILTER] Error filtering points3d.ply: {exc}")
+
+
 # ── Helper: carbon analysis (sync, CPU-bound — always called inside thread) ──
 def run_carbon_analysis(ply_path: str, points3d_path: str = None, scan_id: str = None) -> dict:
     try:
@@ -514,7 +634,10 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False) -> None
             points3d_path = os.path.join(OUTPUT_DIR, "points3d.ply")
             with open(points3d_path, "wb") as f:
                 f.write(points3d_bytes)
-            print(f"[RECONSTRUCT] Saved MASt3R point cloud: {points3d_path} ({len(points3d_bytes)/1024:.1f} KB)")
+            print(f"[RECONSTRUCT] Saved raw MASt3R point cloud: {points3d_path} ({len(points3d_bytes)/1024:.1f} KB)")
+            
+            # Apply trunk cluster filtering & statistical outlier removal before analysis & upload
+            filter_points3d_ply(points3d_path)
         else:
             print("[RECONSTRUCT] No MASt3R point cloud returned — measurement will use splat")
 
