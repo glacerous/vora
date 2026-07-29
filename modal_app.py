@@ -346,15 +346,31 @@ def run_reconstruction(images_bytes: list[bytes]) -> dict:
         splat_data = f.read()
 
     # Locate the MASt3R plain xyz+rgb point cloud produced by init_geo.py.
-    # init_geo saves it as "result.ply" directly inside output_dir (not a splat).
+    # init_geo may save it as "result.ply" in output_dir or source_path,
+    # or as "points3d.ply" inside sparse_N folders.
     points3d_data = None
     mast3r_candidates = (
         glob.glob(os.path.join(output_dir, "result.ply")) +
+        glob.glob(os.path.join(source_path, "result.ply")) +
         glob.glob(os.path.join(source_path, "sparse_*", "points3d.ply")) +
-        glob.glob(os.path.join(output_dir, "**", "points3d.ply"), recursive=True)
+        glob.glob(os.path.join(source_path, "sparse_*", "result.ply")) +
+        glob.glob(os.path.join(output_dir, "**", "points3d.ply"), recursive=True) +
+        glob.glob(os.path.join(output_dir, "**", "result.ply"), recursive=True) +
+        glob.glob(os.path.join(repo_path, "**", "result.ply"), recursive=True)
     )
+    # Remove duplicates while preserving order
+    seen = set()
+    mast3r_candidates = [c for c in mast3r_candidates if not (c in seen or seen.add(c))]
+    # Exclude the gaussian splat PLY we already selected (it's a training artifact, not a plain point cloud)
+    if output_file_path:
+        mast3r_candidates = [c for c in mast3r_candidates if os.path.abspath(c) != os.path.abspath(output_file_path)]
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Searching for MASt3R point cloud in {len(mast3r_candidates)} candidates...")
     for candidate in mast3r_candidates:
         if os.path.exists(candidate):
+            fsize = os.path.getsize(candidate)
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Checking candidate: {candidate} ({fsize:,} bytes)")
+            if fsize < 1024:  # skip empty/tiny files
+                continue
             with open(candidate, "rb") as f:
                 points3d_data = f.read()
             size_kb = len(points3d_data) / 1024
