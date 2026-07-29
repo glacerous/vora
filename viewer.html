@@ -347,6 +347,14 @@
             50% { opacity: 0.6; }
         }
 
+        /* Completely hide default spinner and progress bar elements from the library */
+        [class*="spinnerOuterContainer"] {
+            display: none !important;
+        }
+        .progressBarOuterContainer {
+            display: none !important;
+        }
+
         /* Custom Loader Styles */
         .custom-loader-container {
             position: fixed;
