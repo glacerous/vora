@@ -9,5 +9,6 @@ CREATE TABLE IF NOT EXISTS tree_scans (
     co2e_kg REAL,
     splat_file_url TEXT,
     confidence_note TEXT,
-    thumbnail_url TEXT
+    thumbnail_url TEXT,
+    geometry_3d TEXT
 );
