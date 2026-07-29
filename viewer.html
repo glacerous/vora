@@ -394,7 +394,7 @@
 
     <!-- Render Mode & Overlay Controls Panel -->
     <div class="viewer-controls" id="viewer-controls">
-        <div class="control-group">
+        <div class="control-group" id="view-mode-group" style="display:none">
             <span class="control-label">View Mode</span>
             <select class="control-select" id="view-mode-select">
                 <option value="splat" selected>3DGS Splat</option>
@@ -906,55 +906,85 @@
         }
 
         function loadPointCloud(splatPath) {
-            // points3d.ply lies in the same folder as result.ply
-            const pointsPath = splatPath.replace('result.ply', 'points3d.ply');
-            console.log('Loading styled point cloud from:', pointsPath);
-            
+            // Derive the points3d URL from the splat URL.
+            // The splat is stored as: .../tree_scans/{tree_code}/{timestamp}_point_cloud.ply
+            // The points3d is stored as: .../tree_scans/{tree_code}/{timestamp}_points3d.ply
+            // Strategy: replace the last path segment filename with {ts}_points3d.ply
+            let pointsPath;
+            try {
+                // Extract base URL (everything before the last /)
+                const lastSlash = splatPath.lastIndexOf('/');
+                const baseDir = splatPath.substring(0, lastSlash + 1);
+                const filename = splatPath.substring(lastSlash + 1);
+                // Extract timestamp prefix (everything before the first underscore in filename)
+                const underscoreIdx = filename.indexOf('_');
+                const tsPart = underscoreIdx > 0 ? filename.substring(0, underscoreIdx + 1) : '';
+                pointsPath = baseDir + tsPart + 'points3d.ply';
+            } catch (e) {
+                // Fallback: simple replace
+                pointsPath = splatPath.replace('result.ply', 'points3d.ply');
+            }
+
+            // Rewrite R2 URLs through local proxy (same as splat)
+            if (pointsPath.includes('r2.dev') && pointsPath.includes('/tree_scans/')) {
+                const parts = pointsPath.split('/tree_scans/');
+                if (parts.length === 2) {
+                    const sub = parts[1].split('/');
+                    if (sub.length === 2) {
+                        pointsPath = `/splat-proxy/${sub[0]}/${sub[1]}`;
+                    }
+                }
+            }
+
+            console.log('Loading point cloud from:', pointsPath);
+
             const loader = new PLYLoader();
             loader.load(pointsPath, function (geometry) {
-                // Material with circular particles using vertex colors
+                // Material with vertex colors (falls back to white if no color attribute)
+                const hasColors = geometry.attributes.color !== undefined;
                 const material = new THREE.PointsMaterial({
-                    size: 0.025,
-                    vertexColors: true,
+                    size: 0.02,
+                    vertexColors: hasColors,
+                    color: hasColors ? undefined : 0x38bdf8,
                     transparent: true,
                     opacity: 0.85
                 });
-                
+
                 pointCloudObj = new THREE.Points(geometry, material);
                 pointCloudObj.name = 'laser_scan_points';
-                
-                // Align rotation with splatMesh
+
+                // Align with splatMesh transform
                 if (window.viewer && window.viewer.splatMesh) {
                     pointCloudObj.rotation.copy(window.viewer.splatMesh.rotation);
-                    // Match translation/position if any
                     pointCloudObj.position.copy(window.viewer.splatMesh.position);
                     pointCloudObj.scale.copy(window.viewer.splatMesh.scale);
                 }
-                
+
                 window.viewer.threeScene.add(pointCloudObj);
-                
-                // Wire up rotation sync
-                const originalReset = document.getElementById('rot-reset').onclick;
+
+                // Show View Mode dropdown now that point cloud is available
+                const viewModeGroup = document.getElementById('view-mode-group');
+                if (viewModeGroup) viewModeGroup.style.display = '';
+
+                // Wire up rotation sync with reset button
+                const prevReset = document.getElementById('rot-reset').onclick;
                 document.getElementById('rot-reset').onclick = () => {
-                    if (originalReset) originalReset();
+                    if (prevReset) prevReset();
                     if (pointCloudObj) pointCloudObj.rotation.set(0, 0, 0);
                 };
-                
-                // Trigger initial visibility sync
-                const selectEl = document.getElementById('view-mode-select');
-                if (selectEl) {
-                    currentRenderMode = selectEl.value;
-                }
-                
+
+                // Sync initial visibility state
+                currentRenderMode = document.getElementById('view-mode-select')?.value || 'splat';
                 const splatMesh = window.viewer.splatMesh;
-                if (splatMesh) {
-                    splatMesh.visible = (currentRenderMode === 'splat' || currentRenderMode === 'hybrid');
-                }
+                if (splatMesh) splatMesh.visible = (currentRenderMode === 'splat' || currentRenderMode === 'hybrid');
                 pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
-                
-                console.log('Styled point cloud loaded successfully!');
+
+                console.log('Point cloud loaded successfully — ' + geometry.attributes.position.count + ' points');
             }, undefined, function (error) {
-                console.warn('Failed to load points3d.ply:', error);
+                // Points3d not available for this scan — hide View Mode dropdown gracefully
+                console.info('No points3d.ply for this scan (normal for older scans). View Mode hidden.');
+                const viewModeGroup = document.getElementById('view-mode-group');
+                if (viewModeGroup) viewModeGroup.style.display = 'none';
             });
         }
     </script>
