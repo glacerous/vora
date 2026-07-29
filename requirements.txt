@@ -9,4 +9,5 @@ numpy
 modal
 rembg
 onnxruntime
+mediapipe
 
