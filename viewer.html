@@ -354,43 +354,8 @@
     <!-- 3D Viewer Container -->
     <div id="splat-container"></div>
 
-    <!-- SVG Annotation Lines Overlay -->
-    <svg id="annotation-lines" class="lines-overlay">
-        <line id="line-dbh" x1="0" y1="0" x2="0" y2="0" class="anno-line" />
-        <line id="line-height" x1="0" y1="0" x2="0" y2="0" class="anno-line" />
-        <line id="line-biomass" x1="0" y1="0" x2="0" y2="0" class="anno-line" />
-        <line id="line-carbon" x1="0" y1="0" x2="0" y2="0" class="anno-line" />
-        <line id="line-co2e" x1="0" y1="0" x2="0" y2="0" class="anno-line" />
-        <circle id="target-dbh" cx="0" cy="0" r="4" class="anno-target" />
-        <circle id="target-height" cx="0" cy="0" r="4" class="anno-target" />
-        <circle id="target-biomass" cx="0" cy="0" r="4" class="anno-target" />
-        <circle id="target-carbon" cx="0" cy="0" r="4" class="anno-target" />
-        <circle id="target-co2e" cx="0" cy="0" r="4" class="anno-target" />
-    </svg>
-
-    <!-- Carbon Metrics Annotation Pills -->
-    <div class="carbon-pills-container">
-        <div class="carbon-pill" id="pill-dbh">
-            <span class="pill-label">Trunk DBH</span>
-            <span class="pill-value"><span id="val-dbh">-</span> <span class="pill-unit">cm</span></span>
-        </div>
-        <div class="carbon-pill" id="pill-height">
-            <span class="pill-label">Tree Height</span>
-            <span class="pill-value"><span id="val-height">-</span> <span class="pill-unit">m</span></span>
-        </div>
-        <div class="carbon-pill" id="pill-biomass">
-            <span class="pill-label">Estimated Biomass</span>
-            <span class="pill-value"><span id="val-biomass">-</span> <span class="pill-unit">kg</span></span>
-        </div>
-        <div class="carbon-pill" id="pill-carbon">
-            <span class="pill-label">Stored Carbon</span>
-            <span class="pill-value"><span id="val-carbon">-</span> <span class="pill-unit">kg</span></span>
-        </div>
-        <div class="carbon-pill" id="pill-co2e">
-            <span class="pill-label">CO2 Equivalent</span>
-            <span class="pill-value"><span id="val-co2e">-</span> <span class="pill-unit">kg</span></span>
-        </div>
-    </div>
+    <!-- 3D Viewer Container -->
+    <div id="splat-container"></div>
 
     <!-- Render Mode & Overlay Controls Panel -->
     <div class="viewer-controls" id="viewer-controls">
@@ -405,7 +370,8 @@
         <div class="control-group">
             <span class="control-label">CAD Overlay</span>
             <select class="control-select" id="cad-overlay-select">
-                <option value="enabled" selected>Enabled</option>
+                <option value="all" selected>CAD + Highlights</option>
+                <option value="cad_only">CAD Only</option>
                 <option value="disabled">Disabled</option>
             </select>
         </div>
@@ -496,7 +462,7 @@
         import * as GaussianSplats3D from 'gaussian-splats-3d';
 
         let currentRenderMode = 'splat'; // splat | laser | hybrid
-        let cadOverlayVisible = true;
+        let cadOverlayMode = 'all'; // all | cad_only | disabled
         let pointCloudObj = null;
 
         // Update UI info
@@ -578,7 +544,19 @@
                     
                     const cadOverlay = scene.getObjectByName('cad_measurement_overlay');
                     if (cadOverlay) {
-                        cadOverlay.visible = cadOverlayVisible;
+                        if (cadOverlayMode === 'disabled') {
+                            cadOverlay.visible = false;
+                        } else {
+                            cadOverlay.visible = true;
+                            
+                            const cadGeom = cadOverlay.getObjectByName('cad_geometry');
+                            const highlights = cadOverlay.getObjectByName('fitting_highlights');
+                            
+                            if (cadGeom) cadGeom.visible = true;
+                            if (highlights) {
+                                highlights.visible = (cadOverlayMode === 'all');
+                            }
+                        }
                     }
                 }
 
@@ -588,7 +566,7 @@
                 };
 
                 cadOverlaySelect.onchange = (e) => {
-                    cadOverlayVisible = (e.target.value === 'enabled');
+                    cadOverlayMode = e.target.value;
                     updateRenderStates();
                 };
 
@@ -709,51 +687,6 @@
             statusBadge.style.color = "#f87171";
         }
 
-        // ── Carbon Annotation & Line Mapping Functions ─────────────────────
-        function updateLines() {
-            const container = document.querySelector('.carbon-pills-container');
-            if (!container || container.style.display === 'none') return;
-            
-            const svg = document.getElementById('annotation-lines');
-            svg.style.display = 'block';
-            
-            const W = window.innerWidth;
-            const H = window.innerHeight;
-            
-            // Define targets on the 3D canvas (approximate tree parts)
-            const targets = {
-                dbh: { x: W * 0.46, y: H * 0.70 },
-                height: { x: W * 0.48, y: H * 0.28 },
-                biomass: { x: W * 0.51, y: H * 0.40 },
-                carbon: { x: W * 0.47, y: H * 0.52 },
-                co2e: { x: W * 0.49, y: H * 0.80 }
-            };
-            
-            const ids = ['dbh', 'height', 'biomass', 'carbon', 'co2e'];
-            ids.forEach(id => {
-                const pill = document.getElementById(`pill-${id}`);
-                const line = document.getElementById(`line-${id}`);
-                const circ = document.getElementById(`target-${id}`);
-                
-                if (pill && line && circ) {
-                    const rect = pill.getBoundingClientRect();
-                    const startX = rect.left;
-                    const startY = rect.top + rect.height / 2;
-                    
-                    const target = targets[id];
-                    
-                    line.setAttribute('x1', startX);
-                    line.setAttribute('y1', startY);
-                    line.setAttribute('x2', target.x);
-                    line.setAttribute('y2', target.y);
-                    
-                    circ.setAttribute('cx', target.x);
-                    circ.setAttribute('cy', target.y);
-                }
-            });
-        }
-        window.addEventListener('resize', updateLines);
-
         function fetchAndDisplayCarbon(splatPath) {
             let treeCode = null;
             const match = splatPath.match(/\/tree_scans\/([^/]+)\//);
@@ -792,114 +725,129 @@
             }
             
             function displayMetrics(metrics) {
-                const dbhVal = metrics.dbh_cm !== undefined ? metrics.dbh_cm : metrics.dbh;
-                const heightVal = metrics.tinggi_m !== undefined ? metrics.tinggi_m : (metrics.height_m !== undefined ? metrics.height_m : metrics.height);
-                const biomassVal = metrics.biomassa_kg !== undefined ? metrics.biomassa_kg : (metrics.biomass_kg !== undefined ? metrics.biomass_kg : metrics.biomass);
-                const carbonVal = metrics.karbon_kg !== undefined ? metrics.karbon_kg : (metrics.carbon_kg !== undefined ? metrics.carbon_kg : metrics.carbon);
-                const co2eVal = metrics.co2e_kg !== undefined ? metrics.co2e_kg : metrics.co2e;
-                
-                if (dbhVal !== undefined && dbhVal !== null) {
-                    document.getElementById('val-dbh').textContent = Number(dbhVal).toFixed(1);
-                    document.getElementById('val-height').textContent = Number(heightVal).toFixed(1);
-                    document.getElementById('val-biomass').textContent = Number(biomassVal).toFixed(1);
-                    document.getElementById('val-carbon').textContent = Number(carbonVal).toFixed(1);
-                    document.getElementById('val-co2e').textContent = Number(co2eVal).toFixed(1);
-                    
-                    const container = document.querySelector('.carbon-pills-container');
-                    container.style.display = 'flex';
-                    setTimeout(updateLines, 500);
+                // ── 3D CAD Wireframe & Measurement Overlay Generator ────────
+                if (metrics.geometry_3d && window.viewer && window.viewer.threeScene) {
+                    try {
+                        const g3d = metrics.geometry_3d;
+                        const scene = window.viewer.threeScene;
+                        
+                        // Remove existing overlay if present
+                        const prevOverlay = scene.getObjectByName('cad_measurement_overlay');
+                        if (prevOverlay) scene.remove(prevOverlay);
 
-                    // ── 3D CAD Wireframe & Measurement Overlay Generator ────────
-                    if (metrics.geometry_3d && window.viewer && window.viewer.threeScene) {
-                        try {
-                            const g3d = metrics.geometry_3d;
-                            const scene = window.viewer.threeScene;
+                        const cadGroup = new THREE.Group();
+                        cadGroup.name = 'cad_measurement_overlay';
+
+                        // Group specifically for geometric CAD lines
+                        const cadGeomGroup = new THREE.Group();
+                        cadGeomGroup.name = 'cad_geometry';
+                        cadGroup.add(cadGeomGroup);
+
+                        const radius = g3d.radius_units || 0.2;
+                        const hMin = g3d.h_min !== undefined ? g3d.h_min : -1;
+                        const hMax = g3d.h_max !== undefined ? g3d.h_max : 1;
+                        const hTarget = g3d.h_target !== undefined ? g3d.h_target : 0;
+                        const height = Math.abs(hMax - hMin);
+
+                        // Parse 3D coordinates & direction vector from RANSAC/PCA
+                        const cx = g3d.center_x || 0;
+                        const cy = g3d.center_y || 0;
+                        const cz = g3d.center_z || 0;
+                        const dx = g3d.dir_x !== undefined ? g3d.dir_x : 0;
+                        const dy = g3d.dir_y !== undefined ? g3d.dir_y : 0;
+                        const dz = g3d.dir_z !== undefined ? g3d.dir_z : 1;
+
+                        const center_3d = new THREE.Vector3(cx, cy, cz);
+                        const dir_3d = new THREE.Vector3(dx, dy, dz).normalize();
+
+                        // Calculate base, top, and center coordinates of trunk cylinder
+                        const base_3d = center_3d.clone().addScaledVector(dir_3d, hMin - hTarget);
+                        const top_3d = center_3d.clone().addScaledVector(dir_3d, hMax - hTarget);
+                        const center_cyl = base_3d.clone().add(top_3d).multiplyScalar(0.5);
+
+                        // Calculate quaternion rotation to align with trunk direction
+                        const up = new THREE.Vector3(0, 1, 0); // cylinder defaults upright along Y
+                        const qAlign = new THREE.Quaternion().setFromUnitVectors(up, dir_3d);
+
+                        // 1. Trunk Wireframe Cylinder
+                        const cylGeo = new THREE.CylinderGeometry(radius, radius, height, 16, 8, true);
+                        const cylMat = new THREE.MeshBasicMaterial({
+                            color: 0x06b6d4, // cyan
+                            wireframe: true,
+                            transparent: true,
+                            opacity: 0.55
+                        });
+                        const cylinder = new THREE.Mesh(cylGeo, cylMat);
+                        cylinder.quaternion.copy(qAlign);
+                        cylinder.position.copy(center_cyl);
+                        cadGeomGroup.add(cylinder);
+
+                        // 2. Glowing DBH Measurement Ring at 1.3m (breast height)
+                        const ringGeo = new THREE.TorusGeometry(radius * 1.05, radius * 0.04, 16, 32);
+                        const ringMat = new THREE.MeshBasicMaterial({
+                            color: 0x10b981, // emerald green
+                            wireframe: true
+                        });
+                        const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+                        
+                        // Align torus plane to be perpendicular to the cylinder direction vector
+                        ringMesh.quaternion.copy(qAlign);
+                        const qTorus = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+                        ringMesh.quaternion.multiply(qTorus);
+                        ringMesh.position.copy(center_3d);
+                        cadGeomGroup.add(ringMesh);
+
+                        // 3. Vertical Height Axis Line
+                        const points = [base_3d, top_3d];
+                        const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+                        const lineMat = new THREE.LineDashedMaterial({
+                            color: 0x38bdf8,
+                            dashSize: 0.05,
+                            gapSize: 0.02
+                        });
+                        const heightLine = new THREE.Line(lineGeo, lineMat);
+                        heightLine.computeLineDistances();
+                        cadGeomGroup.add(heightLine);
+
+                        // 4. Highlight Fitting Points (Task 3)
+                        if (g3d.slice_points_3d && g3d.slice_points_3d.length > 0) {
+                            const pointsArr = [];
+                            g3d.slice_points_3d.forEach(pt => {
+                                pointsArr.push(new THREE.Vector3(pt[0], pt[1], pt[2]));
+                            });
                             
-                            // Remove existing overlay if present
-                            const prevOverlay = scene.getObjectByName('cad_measurement_overlay');
-                            if (prevOverlay) scene.remove(prevOverlay);
-
-                            const cadGroup = new THREE.Group();
-                            cadGroup.name = 'cad_measurement_overlay';
-
-                            const radius = g3d.radius_units || 0.2;
-                            const hMin = g3d.h_min !== undefined ? g3d.h_min : -1;
-                            const hMax = g3d.h_max !== undefined ? g3d.h_max : 1;
-                            const hTarget = g3d.h_target !== undefined ? g3d.h_target : 0;
-                            const height = Math.abs(hMax - hMin);
-
-                            // Parse 3D coordinates & direction vector from RANSAC/PCA
-                            const cx = g3d.center_x || 0;
-                            const cy = g3d.center_y || 0;
-                            const cz = g3d.center_z || 0;
-                            const dx = g3d.dir_x !== undefined ? g3d.dir_x : 0;
-                            const dy = g3d.dir_y !== undefined ? g3d.dir_y : 0;
-                            const dz = g3d.dir_z !== undefined ? g3d.dir_z : 1;
-
-                            const center_3d = new THREE.Vector3(cx, cy, cz);
-                            const dir_3d = new THREE.Vector3(dx, dy, dz).normalize();
-
-                            // Calculate base, top, and center coordinates of trunk cylinder
-                            const base_3d = center_3d.clone().addScaledVector(dir_3d, hMin - hTarget);
-                            const top_3d = center_3d.clone().addScaledVector(dir_3d, hMax - hTarget);
-                            const center_cyl = base_3d.clone().add(top_3d).multiplyScalar(0.5);
-
-                            // Calculate quaternion rotation to align with trunk direction
-                            const up = new THREE.Vector3(0, 1, 0); // cylinder defaults upright along Y
-                            const qAlign = new THREE.Quaternion().setFromUnitVectors(up, dir_3d);
-
-                            // 1. Trunk Wireframe Cylinder
-                            const cylGeo = new THREE.CylinderGeometry(radius, radius, height, 16, 8, true);
-                            const cylMat = new THREE.MeshBasicMaterial({
-                                color: 0x06b6d4, // cyan
-                                wireframe: true,
+                            const highlightGeo = new THREE.BufferGeometry().setFromPoints(pointsArr);
+                            const highlightMat = new THREE.PointsMaterial({
+                                color: 0xff0000, // bright red
+                                size: 0.03,
                                 transparent: true,
-                                opacity: 0.55
+                                opacity: 0.9,
+                                depthWrite: false
                             });
-                            const cylinder = new THREE.Mesh(cylGeo, cylMat);
-                            cylinder.quaternion.copy(qAlign);
-                            cylinder.position.copy(center_cyl);
-                            cadGroup.add(cylinder);
-
-                            // 2. Glowing DBH Measurement Ring at 1.3m (breast height)
-                            const ringGeo = new THREE.TorusGeometry(radius * 1.05, radius * 0.04, 16, 32);
-                            const ringMat = new THREE.MeshBasicMaterial({
-                                color: 0x10b981, // emerald green
-                                wireframe: true
-                            });
-                            const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-                            
-                            // Align torus plane to be perpendicular to the cylinder direction vector
-                            ringMesh.quaternion.copy(qAlign);
-                            const qTorus = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
-                            ringMesh.quaternion.multiply(qTorus);
-                            ringMesh.position.copy(center_3d);
-                            cadGroup.add(ringMesh);
-
-                            // 3. Vertical Height Axis Line
-                            const points = [base_3d, top_3d];
-                            const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
-                            const lineMat = new THREE.LineDashedMaterial({
-                                color: 0x38bdf8,
-                                dashSize: 0.05,
-                                gapSize: 0.02
-                            });
-                            const heightLine = new THREE.Line(lineGeo, lineMat);
-                            heightLine.computeLineDistances();
-                            cadGroup.add(heightLine);
-
-                            scene.add(cadGroup);
-                            console.log('Successfully rendered 3D CAD Wireframe Overlay:', g3d);
-
-                            // Load the styled point cloud if not loaded yet
-                            if (!pointCloudObj) {
-                                loadPointCloud(splatPath);
-                            } else {
-                                updateRenderStates();
-                            }
-                        } catch (overlayErr) {
-                            console.warn('CAD Overlay render error:', overlayErr);
+                            const highlightPoints = new THREE.Points(highlightGeo, highlightMat);
+                            highlightPoints.name = 'fitting_highlights';
+                            cadGroup.add(highlightPoints);
+                            console.log('Rendered ' + pointsArr.length + ' trunk circle-fitting highlight points.');
                         }
+
+                        // Align CAD Group with splatMesh transform coordinates (Task 2)
+                        if (window.viewer && window.viewer.splatMesh) {
+                            cadGroup.rotation.copy(window.viewer.splatMesh.rotation);
+                            cadGroup.position.copy(window.viewer.splatMesh.position);
+                            cadGroup.scale.copy(window.viewer.splatMesh.scale);
+                        }
+
+                        scene.add(cadGroup);
+                        console.log('Successfully rendered 3D CAD Wireframe Overlay:', g3d);
+
+                        // Load the point cloud if not loaded yet
+                        if (!pointCloudObj) {
+                            loadPointCloud(splatPath);
+                        } else {
+                            updateRenderStates();
+                        }
+                    } catch (overlayErr) {
+                        console.warn('CAD Overlay render error:', overlayErr);
                     }
                 }
             }
