@@ -820,14 +820,14 @@ async def history(tree_code: str):
     response_model=ScansResponse,
     summary="Fetch all scan history with pagination",
 )
-async def get_scans(limit: int = 20, offset: int = 0):
+async def get_scans(limit: int = 20, offset: int = 0, include_invalid: bool = Query(default=False)):
     """
     Returns all scan records from Cloudflare D1 with optional limit and offset,
     ordered by scan_date descending.
     """
     try:
         from storage.d1_client import get_all_scans
-        records = await asyncio.to_thread(get_all_scans, limit, offset)
+        records = await asyncio.to_thread(get_all_scans, limit, offset, include_invalid)
         return {"success": True, "scans": records}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

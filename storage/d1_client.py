@@ -94,11 +94,14 @@ def get_scan_history(tree_code: str):
                 pass
     return rows
 
-def get_all_scans(limit: int = 20, offset: int = 0):
+def get_all_scans(limit: int = 20, offset: int = 0, include_invalid: bool = False):
     """
     Retrieves all scan records from the database sorted by scan_date descending with limit & offset.
     """
-    sql = "SELECT * FROM tree_scans ORDER BY scan_date DESC LIMIT ? OFFSET ?"
+    if include_invalid:
+        sql = "SELECT * FROM tree_scans ORDER BY scan_date DESC LIMIT ? OFFSET ?"
+    else:
+        sql = "SELECT * FROM tree_scans WHERE dbh_cm IS NOT NULL ORDER BY scan_date DESC LIMIT ? OFFSET ?"
     rows = execute_d1_query(sql, [int(limit), int(offset)])
     for r in rows:
         if r.get("geometry_3d"):
