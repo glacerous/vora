@@ -427,10 +427,41 @@
     </div>
 
     <script type="module">
+        // Remote console logger to send logs back to the FastAPI backend terminal
+        const originalLog = console.log;
+        const originalError = console.error;
+        const originalInfo = console.info;
+        const originalWarn = console.warn;
+
+        function sendLog(level, args) {
+            const message = Array.from(args).map(arg => {
+                if (arg instanceof Error) return arg.message + "\n" + arg.stack;
+                if (typeof arg === 'object') {
+                    try { return JSON.stringify(arg); } catch (e) { return String(arg); }
+                }
+                return String(arg);
+            }).join(' ');
+            fetch('/log', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ level, message })
+            }).catch(() => {});
+        }
+
+        console.log = function() { originalLog.apply(console, arguments); sendLog('LOG', arguments); };
+        console.error = function() { originalError.apply(console, arguments); sendLog('ERROR', arguments); };
+        console.info = function() { originalInfo.apply(console, arguments); sendLog('INFO', arguments); };
+        console.warn = function() { originalWarn.apply(console, arguments); sendLog('WARN', arguments); };
+
+        window.addEventListener('error', (event) => {
+            sendLog('UNHANDLED', [event.error || event.message]);
+        });
+
         // Detect if running inside iframe and apply body class
         if (window.self !== window.top) {
             document.body.classList.add('embed-mode');
         }
+
 
         // =========================================================================
         // CONFIGURATION: CHANGE YOUR SPLAT / PLY FILE PATH HERE
@@ -890,38 +921,44 @@
 
             const loader = new PLYLoader();
             loader.load(pointsPath, function (geometry) {
-                // Material with vertex colors (falls back to cyan if no color)
-                const hasColors = geometry.attributes.color !== undefined;
-                const material = new THREE.PointsMaterial({
-                    size: 0.02,
-                    vertexColors: hasColors,
-                    color: hasColors ? undefined : 0x38bdf8,
-                    transparent: true,
-                    opacity: 0.85
-                });
+                try {
+                    // Material with vertex colors (falls back to cyan if no color)
+                    const hasColors = geometry.attributes.color !== undefined;
+                    const material = new THREE.PointsMaterial({
+                        size: 0.02,
+                        vertexColors: hasColors,
+                        color: hasColors ? undefined : 0x38bdf8,
+                        transparent: true,
+                        opacity: 0.85
+                    });
 
-                pointCloudObj = new THREE.Points(geometry, material);
-                pointCloudObj.name = 'laser_scan_points';
+                    pointCloudObj = new THREE.Points(geometry, material);
+                    pointCloudObj.name = 'laser_scan_points';
 
-                // Add Point Cloud to scene root (not splatMesh) so splatMesh.visible can be toggled cleanly
-                // Transforms are synced every frame in the updateMovement rAF loop
-                window.viewer.threeScene.add(pointCloudObj);
+                    // Add Point Cloud to scene root (not splatMesh) so splatMesh.visible can be toggled cleanly
+                    // Transforms are synced every frame in the updateMovement rAF loop
+                    window.viewer.threeScene.add(pointCloudObj);
 
-                // Enable Laser Scan / Hybrid options now that point cloud is available
-                const sel = document.getElementById('view-mode-select');
-                if (sel) {
-                    for (const opt of sel.options) {
-                        if (opt.value === 'laser') { opt.disabled = false; opt.text = 'Laser Scan (Point Cloud)'; }
-                        if (opt.value === 'hybrid') { opt.disabled = false; opt.text = 'Hybrid (Both)'; }
+                    // Enable Laser Scan / Hybrid options now that point cloud is available
+                    const sel = document.getElementById('view-mode-select');
+                    if (sel) {
+                        for (const opt of sel.options) {
+                            if (opt.value === 'laser') { opt.disabled = false; opt.text = 'Laser Scan (Point Cloud)'; }
+                            if (opt.value === 'hybrid') { opt.disabled = false; opt.text = 'Hybrid (Both)'; }
+                        }
                     }
+
+                    // Sync initial visibility state
+                    currentRenderMode = sel?.value || 'splat';
+                    updateRenderStates();
+
+                    console.log('Point cloud loaded — ' + geometry.attributes.position.count + ' points');
+                } catch (callbackErr) {
+                    console.error('Exception thrown in PLYLoader success callback:', callbackErr);
+                    throw callbackErr;
                 }
-
-                // Sync initial visibility state
-                currentRenderMode = sel?.value || 'splat';
-                updateRenderStates();
-
-                console.log('Point cloud loaded — ' + geometry.attributes.position.count + ' points');
             }, undefined, function (error) {
+                console.error('Failed to load PLY point cloud:', error);
                 // No points3d.ply for this scan (older scans) — mark options as unavailable
                 console.info('No points3d.ply for this scan. Laser Scan options disabled.');
                 const sel = document.getElementById('view-mode-select');

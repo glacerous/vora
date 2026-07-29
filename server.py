@@ -896,6 +896,12 @@ async def splat_proxy(tree_code: str, filename: str):
 
     return StreamingResponse(iter_chunks(), media_type=media_type, headers=headers)
 
+@app.post("/log", include_in_schema=False)
+async def client_log(data: dict = Body(...)):
+    print(f"[CLIENT LOG] {data.get('level', 'INFO')}: {data.get('message', '')}")
+    return {"status": "ok"}
+
+
 # ── Dev entry point ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
