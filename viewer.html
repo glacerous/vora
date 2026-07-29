@@ -394,12 +394,12 @@
 
     <!-- Render Mode & Overlay Controls Panel -->
     <div class="viewer-controls" id="viewer-controls">
-        <div class="control-group" id="view-mode-group" style="display:none">
+        <div class="control-group" id="view-mode-group">
             <span class="control-label">View Mode</span>
             <select class="control-select" id="view-mode-select">
                 <option value="splat" selected>3DGS Splat</option>
-                <option value="laser">Laser Scan (Point Cloud)</option>
-                <option value="hybrid">Hybrid (Both)</option>
+                <option value="laser" disabled title="Not available for this scan">Laser Scan (loading…)</option>
+                <option value="hybrid" disabled title="Not available for this scan">Hybrid (loading…)</option>
             </select>
         </div>
         <div class="control-group">
@@ -907,21 +907,17 @@
 
         function loadPointCloud(splatPath) {
             // Derive the points3d URL from the splat URL.
-            // The splat is stored as: .../tree_scans/{tree_code}/{timestamp}_point_cloud.ply
-            // The points3d is stored as: .../tree_scans/{tree_code}/{timestamp}_points3d.ply
-            // Strategy: replace the last path segment filename with {ts}_points3d.ply
+            // Splat URL format: .../tree_scans/{tree_code}/{timestamp}_point_cloud.ply
+            // Points3d format:  .../tree_scans/{tree_code}/{timestamp}_points3d.ply
             let pointsPath;
             try {
-                // Extract base URL (everything before the last /)
                 const lastSlash = splatPath.lastIndexOf('/');
                 const baseDir = splatPath.substring(0, lastSlash + 1);
                 const filename = splatPath.substring(lastSlash + 1);
-                // Extract timestamp prefix (everything before the first underscore in filename)
                 const underscoreIdx = filename.indexOf('_');
                 const tsPart = underscoreIdx > 0 ? filename.substring(0, underscoreIdx + 1) : '';
                 pointsPath = baseDir + tsPart + 'points3d.ply';
             } catch (e) {
-                // Fallback: simple replace
                 pointsPath = splatPath.replace('result.ply', 'points3d.ply');
             }
 
@@ -940,7 +936,7 @@
 
             const loader = new PLYLoader();
             loader.load(pointsPath, function (geometry) {
-                // Material with vertex colors (falls back to white if no color attribute)
+                // Material with vertex colors (falls back to cyan if no color)
                 const hasColors = geometry.attributes.color !== undefined;
                 const material = new THREE.PointsMaterial({
                     size: 0.02,
@@ -962,9 +958,14 @@
 
                 window.viewer.threeScene.add(pointCloudObj);
 
-                // Show View Mode dropdown now that point cloud is available
-                const viewModeGroup = document.getElementById('view-mode-group');
-                if (viewModeGroup) viewModeGroup.style.display = '';
+                // Enable Laser Scan / Hybrid options now that point cloud is available
+                const sel = document.getElementById('view-mode-select');
+                if (sel) {
+                    for (const opt of sel.options) {
+                        if (opt.value === 'laser') { opt.disabled = false; opt.text = 'Laser Scan (Point Cloud)'; }
+                        if (opt.value === 'hybrid') { opt.disabled = false; opt.text = 'Hybrid (Both)'; }
+                    }
+                }
 
                 // Wire up rotation sync with reset button
                 const prevReset = document.getElementById('rot-reset').onclick;
@@ -974,17 +975,22 @@
                 };
 
                 // Sync initial visibility state
-                currentRenderMode = document.getElementById('view-mode-select')?.value || 'splat';
+                currentRenderMode = sel?.value || 'splat';
                 const splatMesh = window.viewer.splatMesh;
                 if (splatMesh) splatMesh.visible = (currentRenderMode === 'splat' || currentRenderMode === 'hybrid');
                 pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
 
-                console.log('Point cloud loaded successfully — ' + geometry.attributes.position.count + ' points');
+                console.log('Point cloud loaded — ' + geometry.attributes.position.count + ' points');
             }, undefined, function (error) {
-                // Points3d not available for this scan — hide View Mode dropdown gracefully
-                console.info('No points3d.ply for this scan (normal for older scans). View Mode hidden.');
-                const viewModeGroup = document.getElementById('view-mode-group');
-                if (viewModeGroup) viewModeGroup.style.display = 'none';
+                // No points3d.ply for this scan (older scans) — mark options as unavailable
+                console.info('No points3d.ply for this scan. Laser Scan options disabled.');
+                const sel = document.getElementById('view-mode-select');
+                if (sel) {
+                    for (const opt of sel.options) {
+                        if (opt.value === 'laser') { opt.disabled = true; opt.text = 'Laser Scan (not available)'; }
+                        if (opt.value === 'hybrid') { opt.disabled = true; opt.text = 'Hybrid (not available)'; }
+                    }
+                }
             });
         }
     </script>
