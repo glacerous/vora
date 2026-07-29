@@ -139,6 +139,7 @@ def run_carbon_analysis(ply_path: str, points3d_path: str = None, scan_id: str =
 
         # ── Primary: extract from MASt3R geometric point cloud ────────────────
         dbh_result = None
+        err_msg = None
         if points3d_path and os.path.exists(points3d_path):
             print(f"[CARBON] Trying MASt3R point cloud for measurement: {points3d_path}")
             try:
@@ -146,42 +147,38 @@ def run_carbon_analysis(ply_path: str, points3d_path: str = None, scan_id: str =
                     ply_path=points3d_path, scale_factor=scale_factor
                 )
                 if "error" in dbh_result:
-                    print(f"[CARBON] MASt3R extraction failed: {dbh_result['error']} — falling back to splat")
+                    print(f"[CARBON] MASt3R extraction failed: {dbh_result['error']}")
+                    err_msg = dbh_result['error']
                     dbh_result = None
                 else:
                     print(f"[CARBON] MASt3R extraction succeeded: DBH={dbh_result['dbh_cm']} cm")
             except Exception as mast3r_err:
-                print(f"[CARBON] MASt3R extraction exception: {mast3r_err} — falling back to splat")
+                print(f"[CARBON] MASt3R extraction exception: {mast3r_err}")
+                err_msg = str(mast3r_err)
                 dbh_result = None
+        else:
+            print("[CARBON] points3d.ply not found or not provided. Extraction cannot proceed.")
+            err_msg = "points3d.ply tidak ditemukan"
 
-        # ── Fallback: run PCA-based extractor directly on the Gaussian splat ────
-        # extract_dbh_from_mast3r works on any PLY with x,y,z — splat centers are valid.
-        # This gives proper 3D axis alignment (not a fixed vertical assumption).
+        # If extraction failed, return null metrics with FAILED confidence note
         if dbh_result is None:
-            print(f"[CARBON] No points3d.ply — running PCA extractor on splat: {ply_path}")
-            try:
-                dbh_result = extract_dbh_from_mast3r(
-                    ply_path=ply_path, scale_factor=scale_factor
-                )
-                if "error" in dbh_result:
-                    print(f"[CARBON] PCA extractor on splat failed: {dbh_result['error']} — falling back to legacy")
-                    dbh_result = None
-                else:
-                    print(f"[CARBON] PCA extractor on splat succeeded: DBH={dbh_result['dbh_cm']} cm")
-            except Exception as pca_err:
-                print(f"[CARBON] PCA extractor exception: {pca_err} — falling back to legacy")
-                dbh_result = None
-
-        # ── Last resort: legacy fixed-axis extraction ─────────────────────────
-        if dbh_result is None:
-            print(f"[CARBON] Using legacy fixed-axis extraction: {ply_path}")
-            dbh_result = extract_dbh(
-                ply_path=ply_path, scale_factor=scale_factor,
-                vertical_axis="z", breast_height=1.3,
-            )
-
-        if "error" in dbh_result:
-            return {"error": dbh_result["error"]}
+            return {
+                "dbh_cm":                  None,
+                "height_m":                None,
+                "confidence":              f"FAILED - points3d.ply tidak tersedia, hasil DBH tidak valid ({err_msg})",
+                "method":                  "None",
+                "slice_points_count":      0,
+                "mean_fit_error_cm":       0.0,
+                "scale_factor_used":       scale_factor,
+                "calibrated":              scale_factor != 1.0,
+                "biomass_kg":              None,
+                "above_ground_biomass_kg": None,
+                "below_ground_biomass_kg": None,
+                "carbon_kg":               None,
+                "co2e_kg":                 None,
+                "disclaimer":              "Reconstruction failed: points3d.ply not available.",
+                "geometry_3d":             None,
+            }
 
         carbon_result = estimate_carbon(
             dbh_cm=dbh_result["dbh_cm"],
