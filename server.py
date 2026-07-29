@@ -412,31 +412,8 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
 
         state["frame_count"] = n
         
-        # Langkah 2: Identifikasi calibration frame
-        from carbon.height_calibration import detect_person_pose
-        best_calibration = None
-        num_check = min(5, n)
-        print(f"[CALIBRATION] Running pose detection on the first {num_check} frames for auto-calibration...")
-        for idx in range(num_check):
-            frame_path = os.path.join(FRAMES_DIR, f"{idx:04d}.jpg")
-            if os.path.exists(frame_path):
-                pose_res = detect_person_pose(frame_path)
-                if pose_res:
-                    if best_calibration is None or pose_res["confidence"] > best_calibration["confidence"]:
-                        best_calibration = {
-                            "frame_idx": idx,
-                            "frame_path": frame_path,
-                            "head": pose_res["head"],
-                            "foot": pose_res["foot"],
-                            "confidence": pose_res["confidence"]
-                        }
-        
-        if best_calibration:
-            state["calibration_frame"] = best_calibration
-            print(f"[CALIBRATION] Selected frame {best_calibration['frame_idx']:04d}.jpg as calibration frame. Head: {best_calibration['head']}, Foot: {best_calibration['foot']}, Confidence: {best_calibration['confidence']:.2f}")
-        else:
-            state["calibration_frame"] = None
-            print("[CALIBRATION] No calibration person pose detected in the first 5 frames.")
+        # Pose detection for calibration has been deprecated as MASt3R native metric scale is correct
+        state["calibration_frame"] = None
 
         upd("extracted", f"\u2713 {n} sharp frames ready")
         print(f"[EXTRACT] Completed. {n} frames written to {FRAMES_DIR}")
