@@ -573,17 +573,11 @@
                 // Fetch and display carbon metrics
                 fetchAndDisplayCarbon(SPLAT_PATH);
 
-                // Wire up rotation buttons — each click rotates the splatMesh & pointCloudObj by 15°
                 const STEP = Math.PI / 12; // 15 degrees
                 const mesh = () => viewer.splatMesh;
-                
+
                 function rotateScene(axis, delta) {
                     if (mesh()) mesh().rotation[axis] += delta;
-                    if (pointCloudObj) pointCloudObj.rotation[axis] += delta;
-                    
-                    // Also rotate CAD overlay group if present
-                    const cadOverlay = viewer.threeScene.getObjectByName('cad_measurement_overlay');
-                    if (cadOverlay) cadOverlay.rotation[axis] += delta;
                 }
 
                 document.getElementById('rx-neg').onclick = () => rotateScene('x', -STEP);
@@ -594,9 +588,6 @@
                 document.getElementById('rz-pos').onclick = () => rotateScene('z', STEP);
                 document.getElementById('rot-reset').onclick = () => {
                     if (mesh()) mesh().rotation.set(0, 0, 0);
-                    if (pointCloudObj) pointCloudObj.rotation.set(0, 0, 0);
-                    const cadOverlay = viewer.threeScene.getObjectByName('cad_measurement_overlay');
-                    if (cadOverlay) cadOverlay.rotation.set(0, 0, 0);
                 };
 
                 // ── Custom WASD + QE Flying Controls ─────────────────────────────
@@ -841,14 +832,12 @@
                             console.log('Rendered ' + pointsArr.length + ' trunk circle-fitting highlight points.');
                         }
 
-                        // Align CAD Group with splatMesh transform coordinates (Task 2)
+                        // Add CAD Group directly as a child of splatMesh to sync coordinates perfectly (Task 2)
                         if (window.viewer && window.viewer.splatMesh) {
-                            cadGroup.rotation.copy(window.viewer.splatMesh.rotation);
-                            cadGroup.position.copy(window.viewer.splatMesh.position);
-                            cadGroup.scale.copy(window.viewer.splatMesh.scale);
+                            window.viewer.splatMesh.add(cadGroup);
+                        } else {
+                            scene.add(cadGroup);
                         }
-
-                        scene.add(cadGroup);
                         console.log('Successfully rendered 3D CAD Wireframe Overlay:', g3d);
 
                         // Load the point cloud if not loaded yet
@@ -908,14 +897,12 @@
                 pointCloudObj = new THREE.Points(geometry, material);
                 pointCloudObj.name = 'laser_scan_points';
 
-                // Align with splatMesh transform
+                // Add Point Cloud directly as a child of splatMesh to sync coordinates perfectly
                 if (window.viewer && window.viewer.splatMesh) {
-                    pointCloudObj.rotation.copy(window.viewer.splatMesh.rotation);
-                    pointCloudObj.position.copy(window.viewer.splatMesh.position);
-                    pointCloudObj.scale.copy(window.viewer.splatMesh.scale);
+                    window.viewer.splatMesh.add(pointCloudObj);
+                } else {
+                    window.viewer.threeScene.add(pointCloudObj);
                 }
-
-                window.viewer.threeScene.add(pointCloudObj);
 
                 // Enable Laser Scan / Hybrid options now that point cloud is available
                 const sel = document.getElementById('view-mode-select');
@@ -925,13 +912,6 @@
                         if (opt.value === 'hybrid') { opt.disabled = false; opt.text = 'Hybrid (Both)'; }
                     }
                 }
-
-                // Wire up rotation sync with reset button
-                const prevReset = document.getElementById('rot-reset').onclick;
-                document.getElementById('rot-reset').onclick = () => {
-                    if (prevReset) prevReset();
-                    if (pointCloudObj) pointCloudObj.rotation.set(0, 0, 0);
-                };
 
                 // Sync initial visibility state
                 currentRenderMode = sel?.value || 'splat';
