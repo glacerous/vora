@@ -359,9 +359,9 @@
         <div class="control-group" id="view-mode-group">
             <span class="control-label">View Mode</span>
             <select class="control-select" id="view-mode-select">
-                <option value="splat" selected>3DGS Splat</option>
+                <option value="splat">3DGS Splat</option>
                 <option value="laser" disabled title="Not available for this scan">Laser Scan (loading…)</option>
-                <option value="hybrid" disabled title="Not available for this scan">Hybrid (loading…)</option>
+                <option value="hybrid" selected disabled title="Not available for this scan">Hybrid (loading…)</option>
             </select>
         </div>
         <div class="control-group">
@@ -489,7 +489,7 @@
         import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
         import * as GaussianSplats3D from 'gaussian-splats-3d';
 
-        let currentRenderMode = 'splat'; // splat | laser | hybrid
+        let currentRenderMode = 'hybrid'; // splat | laser | hybrid
         let cadOverlayMode = 'all'; // all | cad_only | disabled
         let pointCloudObj = null;
         let viewer = null;
@@ -986,6 +986,10 @@
                         if (opt.value === 'laser') { opt.disabled = true; opt.text = 'Laser Scan (not available)'; }
                         if (opt.value === 'hybrid') { opt.disabled = true; opt.text = 'Hybrid (not available)'; }
                     }
+                    // Reset to splat if point cloud is not available
+                    sel.value = 'splat';
+                    currentRenderMode = 'splat';
+                    updateRenderStates();
                 }
             });
         }
