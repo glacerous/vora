@@ -310,6 +310,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     offsets = [-tol * 0.4, 0.0, tol * 0.4]
     radii = []
     centers_2d = []
+    slice_points_list = []
 
     for off in offsets:
         h_t = h_target + off
@@ -325,6 +326,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
         if R is not None and R > 0 and R < CROP_RADIUS * 1.5:
             radii.append(R)
             centers_2d.append((xc, yc))
+            slice_points_list.append(pts_slice)
 
     method_used = "MASt3R aligned multi-slice median"
     if not radii:
@@ -342,6 +344,15 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
         radii = [R]
         centers_2d = [(xc, yc)]
         method_used = "MASt3R aligned lower-trunk fallback"
+        slice_points_all = pts_trunk
+    else:
+        slice_points_all = np.concatenate(slice_points_list, axis=0)
+
+    # Subsample if too dense (max 500 points for efficient storage/rendering)
+    if len(slice_points_all) > 500:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(slice_points_all), size=500, replace=False)
+        slice_points_all = slice_points_all[idx]
 
     # Medians
     R_final = float(np.median(radii))
@@ -355,12 +366,10 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     center_3d = xc_2d * u1 + yc_2d * u2 + h_target * v
 
     # Quick error estimate on primary slice
-    mask_best = np.abs(proj_trunk - h_target) <= tol
-    pts_best = trunk_points[mask_best]
-    slice_count = len(pts_best)
+    slice_count = int(slice_points_all.shape[0])
     mean_err_cm = 0.0
     if slice_count >= 5:
-        pts_2d = np.column_stack((np.dot(pts_best, u1), np.dot(pts_best, u2)))
+        pts_2d = np.column_stack((np.dot(slice_points_all, u1), np.dot(slice_points_all, u2)))
         _, _, _, mean_err = fit_circle_robust(pts_2d)
         if mean_err is not None:
             mean_err_cm = float(round(mean_err * scale * 100, 2))
@@ -388,5 +397,6 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
             "h_max":          float(round(h_max, 4)),
             "h_target":       float(round(h_target, 4)),
             "scale_factor":   scale,
+            "slice_points_3d": [[float(round(p[0], 4)), float(round(p[1], 4)), float(round(p[2], 4))] for p in slice_points_all],
         }
     }
