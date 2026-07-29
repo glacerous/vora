@@ -693,7 +693,8 @@
 
         function fetchAndDisplayCarbon(splatPath) {
             let treeCode = null;
-            const match = splatPath.match(/\/tree_scans\/([^/]+)\//);
+            // Match both R2 URL pattern and local proxy URL pattern
+            const match = splatPath.match(/\/tree_scans\/([^/]+)\//) || splatPath.match(/\/splat-proxy\/([^/]+)\//);
             if (match) {
                 treeCode = match[1];
             }
@@ -872,14 +873,15 @@
                 pointsPath = splatPath.replace('result.ply', 'points3d.ply');
             }
 
-            // Rewrite R2 URLs through local proxy (same as splat)
-            if (pointsPath.includes('/tree_scans/') && (pointsPath.startsWith('http://') || pointsPath.startsWith('https://')) && !pointsPath.includes('localhost') && !pointsPath.includes('127.0.0.1')) {
+            // If path is already a proxy path (/splat-proxy/...), no rewrite needed
+            // If it's an external R2 URL, rewrite to proxy
+            if (!pointsPath.startsWith('/splat-proxy/') && pointsPath.includes('/tree_scans/') && (pointsPath.startsWith('http://') || pointsPath.startsWith('https://'))) {
                 const parts = pointsPath.split('/tree_scans/');
                 if (parts.length === 2) {
                     const sub = parts[1].split('/');
                     if (sub.length === 2) {
                         const treeCode = sub[0];
-                        const filename = sub[1].split('?')[0]; // strip query parameters
+                        const filename = sub[1].split('?')[0];
                         pointsPath = `/splat-proxy/${treeCode}/${filename}`;
                     }
                 }
