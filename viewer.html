@@ -535,35 +535,26 @@
                     const scene = viewer.threeScene;
                     const splatMesh = viewer.splatMesh;
                     
-                    const showSplat = (currentRenderMode === 'splat' || currentRenderMode === 'hybrid');
-                    
+                    // Toggle splatMesh visibility directly — CAD/point cloud are in scene root, not children
                     if (splatMesh) {
-                        // Keep parent node visible so that children (point cloud / CAD) are rendered,
-                        // but toggle the material visibility to hide/show the actual Gaussian Splats.
-                        splatMesh.visible = true;
-                        if (splatMesh.material) {
-                            splatMesh.material.visible = showSplat;
-                        }
+                        splatMesh.visible = (currentRenderMode === 'splat' || currentRenderMode === 'hybrid');
                     }
                     
                     if (pointCloudObj) {
                         pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
                     }
                     
-                    const cadOverlay = splatMesh ? splatMesh.getObjectByName('cad_measurement_overlay') : null;
+                    // Look for cadOverlay in the scene root (not as a splatMesh child)
+                    const cadOverlay = scene ? scene.getObjectByName('cad_measurement_overlay') : null;
                     if (cadOverlay) {
                         if (cadOverlayMode === 'disabled') {
                             cadOverlay.visible = false;
                         } else {
                             cadOverlay.visible = true;
-                            
                             const cadGeom = cadOverlay.getObjectByName('cad_geometry');
                             const highlights = cadOverlay.getObjectByName('fitting_highlights');
-                            
                             if (cadGeom) cadGeom.visible = true;
-                            if (highlights) {
-                                highlights.visible = (cadOverlayMode === 'all');
-                            }
+                            if (highlights) highlights.visible = (cadOverlayMode === 'all');
                         }
                     }
                 }
@@ -638,10 +629,23 @@
 
                     if (!viewer.camera) return;
 
-                    let dx = 0; // Left/Right
-                    let dy = 0; // Up/Down
-                    let dz = 0; // Forward/Backward
+                    // Sync CAD overlay and point cloud transforms with splatMesh every frame
+                    if (viewer.splatMesh) {
+                        const sm = viewer.splatMesh;
+                        const cadOverlay = viewer.threeScene ? viewer.threeScene.getObjectByName('cad_measurement_overlay') : null;
+                        if (cadOverlay) {
+                            cadOverlay.position.copy(sm.position);
+                            cadOverlay.quaternion.copy(sm.quaternion);
+                            cadOverlay.scale.copy(sm.scale);
+                        }
+                        if (pointCloudObj) {
+                            pointCloudObj.position.copy(sm.position);
+                            pointCloudObj.quaternion.copy(sm.quaternion);
+                            pointCloudObj.scale.copy(sm.scale);
+                        }
+                    }
 
+                    let dx = 0, dy = 0, dz = 0;
                     if (activeKeys['KeyW']) dz -= 1;
                     if (activeKeys['KeyS']) dz += 1;
                     if (activeKeys['KeyA']) dx -= 1;
@@ -835,12 +839,9 @@
                             console.log('Rendered ' + pointsArr.length + ' trunk circle-fitting highlight points.');
                         }
 
-                        // Add CAD Group directly as a child of splatMesh to sync coordinates perfectly (Task 2)
-                        if (window.viewer && window.viewer.splatMesh) {
-                            window.viewer.splatMesh.add(cadGroup);
-                        } else {
-                            scene.add(cadGroup);
-                        }
+                        // Add CAD Group to scene root (not splatMesh) so splatMesh.visible can be toggled cleanly
+                        // Transforms are synced every frame in the updateMovement rAF loop
+                        scene.add(cadGroup);
                         console.log('Successfully rendered 3D CAD Wireframe Overlay:', g3d);
 
                     } catch (overlayErr) {
@@ -904,12 +905,9 @@
                 pointCloudObj = new THREE.Points(geometry, material);
                 pointCloudObj.name = 'laser_scan_points';
 
-                // Add Point Cloud directly as a child of splatMesh to sync coordinates perfectly
-                if (window.viewer && window.viewer.splatMesh) {
-                    window.viewer.splatMesh.add(pointCloudObj);
-                } else {
-                    window.viewer.threeScene.add(pointCloudObj);
-                }
+                // Add Point Cloud to scene root (not splatMesh) so splatMesh.visible can be toggled cleanly
+                // Transforms are synced every frame in the updateMovement rAF loop
+                window.viewer.threeScene.add(pointCloudObj);
 
                 // Enable Laser Scan / Hybrid options now that point cloud is available
                 const sel = document.getElementById('view-mode-select');
