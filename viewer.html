@@ -492,6 +492,7 @@
         let currentRenderMode = 'splat'; // splat | laser | hybrid
         let cadOverlayMode = 'all'; // all | cad_only | disabled
         let pointCloudObj = null;
+        let viewer = null;
 
         // Update UI info
         document.getElementById('path-val').textContent = SPLAT_PATH;
@@ -500,7 +501,8 @@
         try {
             // 3D Gaussian Splatting uses OpenCV / Y-down convention, so cameraUp is [0, -1, 0]
             // to make the scene appear right-side up in the browser.
-            const viewer = new GaussianSplats3D.Viewer({
+            viewer = new GaussianSplats3D.Viewer({
+
                 'cameraUp': [0, -1, 0],
                 'initialCameraPosition': [0, -1, 4],
                 'initialCameraLookAt': [0, 0, 0],
@@ -569,33 +571,6 @@
                 const viewModeSelect = document.getElementById('view-mode-select');
                 const cadOverlaySelect = document.getElementById('cad-overlay-select');
 
-                function updateRenderStates() {
-                    const scene = viewer.threeScene;
-                    const splatMesh = viewer.splatMesh;
-                    
-                    // Toggle splatMesh visibility directly — CAD/point cloud are in scene root, not children
-                    if (splatMesh) {
-                        splatMesh.visible = (currentRenderMode === 'splat' || currentRenderMode === 'hybrid');
-                    }
-                    
-                    if (pointCloudObj) {
-                        pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
-                    }
-                    
-                    // Look for cadOverlay in the scene root (not as a splatMesh child)
-                    const cadOverlay = scene ? scene.getObjectByName('cad_measurement_overlay') : null;
-                    if (cadOverlay) {
-                        if (cadOverlayMode === 'disabled') {
-                            cadOverlay.visible = false;
-                        } else {
-                            cadOverlay.visible = true;
-                            const cadGeom = cadOverlay.getObjectByName('cad_geometry');
-                            const highlights = cadOverlay.getObjectByName('fitting_highlights');
-                            if (cadGeom) cadGeom.visible = true;
-                            if (highlights) highlights.visible = (cadOverlayMode === 'all');
-                        }
-                    }
-                }
 
                 viewModeSelect.onchange = (e) => {
                     currentRenderMode = e.target.value;
@@ -728,6 +703,35 @@
             statusBadge.textContent = "WebGL Error";
             statusBadge.className = "status-badge";
             statusBadge.style.color = "#f87171";
+        }
+
+        function updateRenderStates() {
+            if (!viewer) return;
+            const scene = viewer.threeScene;
+            const splatMesh = viewer.splatMesh;
+            
+            // Toggle splatMesh visibility directly — CAD/point cloud are in scene root, not children
+            if (splatMesh) {
+                splatMesh.visible = (currentRenderMode === 'splat' || currentRenderMode === 'hybrid');
+            }
+            
+            if (pointCloudObj) {
+                pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
+            }
+            
+            // Look for cadOverlay in the scene root (not as a splatMesh child)
+            const cadOverlay = scene ? scene.getObjectByName('cad_measurement_overlay') : null;
+            if (cadOverlay) {
+                if (cadOverlayMode === 'disabled') {
+                    cadOverlay.visible = false;
+                } else {
+                    cadOverlay.visible = true;
+                    const cadGeom = cadOverlay.getObjectByName('cad_geometry');
+                    const highlights = cadOverlay.getObjectByName('fitting_highlights');
+                    if (cadGeom) cadGeom.visible = true;
+                    if (highlights) highlights.visible = (cadOverlayMode === 'all');
+                }
+            }
         }
 
         function fetchAndDisplayCarbon(splatPath) {
