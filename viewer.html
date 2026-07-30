@@ -748,6 +748,26 @@
                 <option value="disabled">Disabled</option>
             </select>
         </div>
+
+        <div class="control-group" style="margin-top: 8px; border-top: 1px solid rgba(8,29,42,0.1); padding-top: 8px;">
+            <button id="manual-select-btn" class="rot-btn" style="background: rgba(2,132,199,0.1); border-color: rgba(2,132,199,0.25); color: #0284c7; font-weight: 600; padding: 6px 0; font-size: 11px; width: 100%;">
+                Fix Trunk Selection
+            </button>
+        </div>
+        
+        <div id="manual-select-panel" style="display: none; flex-direction: column; gap: 8px; margin-top: 4px; padding: 10px; background: rgba(8,29,42,0.03); border-radius: 8px; border: 1px dashed rgba(2,132,199,0.3);">
+            <div style="font-size: 10px; color: var(--text-secondary); line-height: 1.3;">
+                <strong>Instructions:</strong> Click a point on the trunk in the point cloud to set the center, then adjust the radius.
+            </div>
+            <div class="control-group">
+                <span class="control-label">Selection Radius: <span id="radius-val">0.30</span>m</span>
+                <input type="range" id="selection-radius" min="0.1" max="1.5" step="0.05" value="0.30" style="width: 100%; accent-color: #0284c7; cursor: pointer;">
+            </div>
+            <div style="display: flex; gap: 6px;">
+                <button id="confirm-select-btn" class="rot-btn" style="background: #10b981; color: white; border: none; font-weight: 600; padding: 6px 0; font-size: 11px; cursor: not-allowed;" disabled>Confirm</button>
+                <button id="cancel-select-btn" class="rot-btn" style="background: #ef4444; color: white; border: none; font-weight: 600; padding: 6px 0; font-size: 11px;">Cancel</button>
+            </div>
+        </div>
     </div>
 
     <!-- Control Panel -->
@@ -955,6 +975,178 @@
                     cadOverlayMode = e.target.value;
                     updateRenderStates();
                 };
+
+                // ── Manual Trunk Selection Logic (Langkah 2) ──────────────────
+                let manualSelectModeActive = false;
+                let selectedClickPoint = null; // THREE.Vector3
+                let selectionVisualSphere = null; // THREE.Mesh
+                let selectionRadius = 0.30;
+
+                const manualSelectBtn = document.getElementById('manual-select-btn');
+                const manualSelectPanel = document.getElementById('manual-select-panel');
+                const selectionRadiusInput = document.getElementById('selection-radius');
+                const radiusValSpan = document.getElementById('radius-val');
+                const confirmSelectBtn = document.getElementById('confirm-select-btn');
+                const cancelSelectBtn = document.getElementById('cancel-select-btn');
+
+                manualSelectBtn.onclick = () => {
+                    // Ensure view mode is hybrid or laser so point cloud is visible
+                    if (viewModeSelect && viewModeSelect.value === 'splat') {
+                        viewModeSelect.value = 'hybrid';
+                        currentRenderMode = 'hybrid';
+                        updateRenderStates();
+                    }
+                    
+                    manualSelectModeActive = true;
+                    manualSelectPanel.style.display = 'flex';
+                    manualSelectBtn.style.display = 'none';
+                    
+                    const container = document.getElementById('splat-container');
+                    if (container) container.style.cursor = 'crosshair';
+                };
+
+                selectionRadiusInput.oninput = (e) => {
+                    selectionRadius = parseFloat(e.target.value);
+                    radiusValSpan.textContent = selectionRadius.toFixed(2);
+                    if (selectedClickPoint) {
+                        updateSelectionSphere();
+                    }
+                };
+
+                function updateSelectionSphere() {
+                    if (!selectedClickPoint || !pointCloudObj) return;
+                    
+                    if (selectionVisualSphere) {
+                        pointCloudObj.remove(selectionVisualSphere);
+                    }
+                    
+                    const sphereGeo = new THREE.SphereGeometry(selectionRadius, 16, 16);
+                    const sphereMat = new THREE.MeshBasicMaterial({
+                        color: 0x06b6d4, // cyan
+                        transparent: true,
+                        opacity: 0.35,
+                        wireframe: true
+                    });
+                    selectionVisualSphere = new THREE.Mesh(sphereGeo, sphereMat);
+                    
+                    const localPt = selectedClickPoint.clone();
+                    pointCloudObj.worldToLocal(localPt);
+                    selectionVisualSphere.position.copy(localPt);
+                    
+                    pointCloudObj.add(selectionVisualSphere);
+                }
+
+                function exitManualSelectMode() {
+                    manualSelectModeActive = false;
+                    selectedClickPoint = null;
+                    if (selectionVisualSphere && pointCloudObj) {
+                        pointCloudObj.remove(selectionVisualSphere);
+                    }
+                    selectionVisualSphere = null;
+                    
+                    manualSelectPanel.style.display = 'none';
+                    manualSelectBtn.style.display = 'block';
+                    confirmSelectBtn.disabled = true;
+                    confirmSelectBtn.style.cursor = 'not-allowed';
+                    confirmSelectBtn.textContent = 'Confirm';
+                    
+                    const container = document.getElementById('splat-container');
+                    if (container) container.style.cursor = 'auto';
+                }
+
+                cancelSelectBtn.onclick = () => {
+                    exitManualSelectMode();
+                };
+
+                confirmSelectBtn.onclick = () => {
+                    if (!selectedClickPoint || !pointCloudObj) return;
+                    
+                    const localPt = selectedClickPoint.clone();
+                    pointCloudObj.worldToLocal(localPt);
+                    
+                    let treeCode = '';
+                    if (SPLAT_PATH.includes('/tree_scans/')) {
+                        const parts = SPLAT_PATH.split('/tree_scans/');
+                        treeCode = parts[1].split('/')[0];
+                    } else if (SPLAT_PATH.includes('/splat-proxy/')) {
+                        const parts = SPLAT_PATH.split('/splat-proxy/');
+                        treeCode = parts[1].split('/')[0];
+                    } else {
+                        const urlParams = new URLSearchParams(window.location.search);
+                        treeCode = urlParams.get('tree_code') || '';
+                    }
+                    
+                    if (!treeCode) {
+                        alert("Could not resolve tree code for override.");
+                        return;
+                    }
+
+                    confirmSelectBtn.disabled = true;
+                    confirmSelectBtn.textContent = 'Processing...';
+
+                    fetch('/manual_override', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            tree_code: treeCode,
+                            center_x: localPt.x,
+                            center_y: localPt.y,
+                            center_z: localPt.z,
+                            radius: selectionRadius
+                        })
+                    })
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success) {
+                            alert("Trunk selection manually overridden and recalculated successfully!");
+                            fetchAndDisplayCarbon(SPLAT_PATH);
+                            exitManualSelectMode();
+                            
+                            try {
+                                window.parent.postMessage({
+                                    type: 'vora_metrics_updated',
+                                    tree_code: treeCode
+                                }, '*');
+                            } catch (e) {}
+                        } else {
+                            alert("Recalculation failed: " + (data.error || "Unknown error"));
+                            confirmSelectBtn.disabled = false;
+                            confirmSelectBtn.textContent = 'Confirm';
+                        }
+                    })
+                    .catch(err => {
+                        alert("Error sending override request: " + err);
+                        confirmSelectBtn.disabled = false;
+                        confirmSelectBtn.textContent = 'Confirm';
+                    });
+                };
+
+                const raycaster = new THREE.Raycaster();
+                raycaster.params.Points.threshold = 0.04;
+                const mouse = new THREE.Vector2();
+
+                window.addEventListener('click', (event) => {
+                    if (!manualSelectModeActive || !pointCloudObj) return;
+                    
+                    if (event.target.tagName === 'SELECT' || event.target.tagName === 'BUTTON' || event.target.tagName === 'INPUT' || event.target.closest('.viewer-controls') || event.target.closest('.rotation-panel')) {
+                        return;
+                    }
+
+                    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+                    raycaster.setFromCamera(mouse, viewer.camera);
+                    const intersects = raycaster.intersectObject(pointCloudObj, true);
+                    
+                    if (intersects.length > 0) {
+                        selectedClickPoint = intersects[0].point.clone();
+                        updateSelectionSphere();
+                        
+                        confirmSelectBtn.disabled = false;
+                        confirmSelectBtn.style.cursor = 'pointer';
+                        console.log('Selected manual center point:', selectedClickPoint);
+                    }
+                });
 
                 const STEP = Math.PI / 12; // 15 degrees
                 const mesh = () => viewer.splatMesh;

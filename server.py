@@ -78,6 +78,13 @@ class ScansResponse(BaseModel):
     success: bool
     scans: List[Any]
 
+class ManualOverrideRequest(BaseModel):
+    tree_code: str
+    center_x: float
+    center_y: float
+    center_z: float
+    radius: float
+
 # ── Helper: load scale_factor from calibration.json (scan-id-aware) ─────────
 import json as _json
 import logging as _logging
@@ -1115,6 +1122,141 @@ async def splat_proxy(tree_code: str, filename: str):
 async def client_log(data: dict = Body(...)):
     print(f"[CLIENT LOG] {data.get('level', 'INFO')}: {data.get('message', '')}")
     return {"status": "ok"}
+
+
+@app.post("/manual_override", summary="Recalculate DBH and carbon using manually clicked center & radius")
+async def manual_override(body: ManualOverrideRequest):
+    """
+    Accepts manually identified coordinates for trunk center and radius.
+    Downloads the points3d.ply file for the tree, runs override extraction,
+    recalculates biomass/carbon/CO2e, and updates the database record.
+    """
+    try:
+        import requests
+        from storage.d1_client import execute_d1_query, save_scan_result
+        # 1. Fetch latest scan record to reuse metadata (e.g. density, climate)
+        sql = "SELECT * FROM tree_scans WHERE tree_code = ? ORDER BY scan_date DESC LIMIT 1"
+        scans = execute_d1_query(sql, [body.tree_code])
+        if not scans:
+            raise HTTPException(status_code=404, detail="No existing scan record found for tree_code")
+        
+        latest_scan = scans[0]
+        splat_file_url = latest_scan.get("splat_file_url")
+        if not splat_file_url:
+            raise HTTPException(status_code=404, detail="Scan does not have a splat file URL")
+
+        # 2. Derive points3d URL
+        if "_result.ply" in splat_file_url:
+            points3d_url = splat_file_url.replace("_result.ply", "_points3d.ply")
+        elif "result.ply" in splat_file_url:
+            points3d_url = splat_file_url.replace("result.ply", "points3d.ply")
+        else:
+            points3d_url = splat_file_url.replace(".ply", "_points3d.ply")
+
+        # 3. Download the points3d.ply file to a temporary location
+        local_dir = os.path.join(UPLOAD_DIR, "overrides")
+        os.makedirs(local_dir, exist_ok=True)
+        local_ply_path = os.path.join(local_dir, f"{body.tree_code}_points3d.ply")
+
+        print(f"[OVERRIDE] Downloading point cloud for override from {points3d_url}")
+        res = requests.get(points3d_url, timeout=30)
+        if res.status_code != 200:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to download points3d.ply from Cloudflare R2: HTTP {res.status_code}"
+            )
+        with open(local_ply_path, "wb") as f:
+            f.write(res.content)
+        print(f"[OVERRIDE] Point cloud downloaded: {local_ply_path}")
+
+        # 4. Perform manual override DBH extraction
+        from carbon.dbh_extractor import extract_dbh_with_manual_override
+        scale_factor = _load_scale_factor_for_scan(body.tree_code)
+        
+        res_override = extract_dbh_with_manual_override(
+            ply_path=local_ply_path,
+            cx=body.center_x,
+            cy=body.center_y,
+            cz=body.center_z,
+            radius=body.radius,
+            scale_factor=scale_factor
+        )
+
+        if "error" in res_override:
+            raise HTTPException(status_code=400, detail=res_override["error"])
+
+        # 5. Recalculate biomass & carbon
+        from carbon.allometric import estimate_carbon
+        wood_density = latest_scan.get("wood_density_used") or 0.6
+        forest_type = "moist"
+        climate_zone = latest_scan.get("climate_zone_detected") or "Unknown"
+        if climate_zone != "Unknown":
+            try:
+                from carbon.climate_zone import classify_koppen_to_forest_type
+                forest_type = classify_koppen_to_forest_type(climate_zone)
+            except Exception as e:
+                print(f"[OVERRIDE ERROR] Failed to map climate: {e}")
+
+        carbon_result = estimate_carbon(
+            dbh_cm=res_override["dbh_cm"],
+            height_m=res_override["height_m"],
+            wood_density=wood_density,
+            forest_type=forest_type
+        )
+
+        # 6. Save recalculated results back to Cloudflare D1
+        confidence_note = "Manually verified trunk selection"
+        
+        species_preds = None
+        sp_str = latest_scan.get("species_predictions")
+        if sp_str:
+            try:
+                species_preds = _json.loads(sp_str)
+            except Exception:
+                species_preds = sp_str
+
+        save_scan_result(
+            tree_code=body.tree_code,
+            dbh_cm=res_override["dbh_cm"],
+            tinggi_m=res_override["height_m"],
+            biomassa_kg=carbon_result["total_biomass_kg"],
+            karbon_kg=carbon_result["carbon_kg"],
+            co2e_kg=carbon_result["co2e_kg"],
+            splat_file_url=splat_file_url,
+            confidence_note=confidence_note,
+            thumbnail_url=latest_scan.get("thumbnail_url"),
+            geometry_3d=res_override["geometry_3d"],
+            species_predictions=species_preds,
+            wood_density_used=wood_density,
+            wood_density_source=latest_scan.get("wood_density_source") or "generic-default",
+            climate_zone_detected=climate_zone,
+            formula_used=carbon_result["formula_used"],
+            agb_kg=carbon_result["above_ground_biomass_kg"],
+            bgb_kg=carbon_result["below_ground_biomass_kg"],
+            gps_lat=latest_scan.get("gps_lat"),
+            gps_lon=latest_scan.get("gps_lon"),
+        )
+        print(f"[OVERRIDE] Successfully updated D1 record for {body.tree_code} via manual override.")
+        
+        try:
+            os.remove(local_ply_path)
+        except Exception:
+            pass
+
+        return {
+            "success": True,
+            "dbh_cm": res_override["dbh_cm"],
+            "height_m": res_override["height_m"],
+            "biomassa_kg": carbon_result["total_biomass_kg"],
+            "karbon_kg": carbon_result["carbon_kg"],
+            "co2e_kg": carbon_result["co2e_kg"],
+            "formula_used": carbon_result["formula_used"],
+        }
+    except HTTPException as httpex:
+        raise httpex
+    except Exception as exc:
+        print(f"[OVERRIDE EXCEPTION] Failed to execute manual override: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ── Dev entry point ───────────────────────────────────────────────────────────

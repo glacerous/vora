@@ -400,3 +400,154 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
             "slice_points_3d": [[float(round(p[0], 4)), float(round(p[1], 4)), float(round(p[2], 4))] for p in slice_points_all],
         }
     }
+
+
+def extract_dbh_with_manual_override(ply_path: str, cx: float, cy: float, cz: float, radius: float,
+                                     scale_factor: float = 1.0, breast_height: float = 1.3) -> dict:
+    logger.info(f"[MANUAL DBH] Starting manual DBH extraction from {ply_path} with center=({cx}, {cy}, {cz}), radius={radius}")
+    scale = load_scale_factor(scale_factor)
+
+    try:
+        points = parse_ply_points(ply_path)
+    except Exception as exc:
+        return {"error": f"Failed to load point cloud: {exc}"}
+
+    if len(points) < 10:
+        return {"error": "Point cloud too sparse"}
+
+    # 1. Determine rough vertical axis
+    ranges = points.max(axis=0) - points.min(axis=0)
+    rough_axis_idx = int(np.argmax(ranges))
+
+    # 2. Filter point cloud ONLY within selection sphere radius around the clicked center
+    dist_sq = (points[:, 0] - cx)**2 + (points[:, 1] - cy)**2 + (points[:, 2] - cz)**2
+    trunk_mask = dist_sq <= radius**2
+    trunk_points = points[trunk_mask]
+
+    if len(trunk_points) < 10:
+        return {"error": f"Too few points within the selection radius ({len(trunk_points)} points). Please select a larger radius or a different point."}
+
+    # 3. PCA on manual trunk points to find direction
+    rough_z = trunk_points[:, rough_axis_idx]
+    rough_z_min = np.percentile(rough_z, 5)
+    rough_z_max = np.percentile(rough_z, 95)
+    rough_height = rough_z_max - rough_z_min
+
+    mid_trunk_mask = (rough_z >= rough_z_min + rough_height * 0.1) & (rough_z <= rough_z_min + rough_height * 0.9)
+    pca_pts = trunk_points[mid_trunk_mask]
+    if len(pca_pts) < 10:
+        pca_pts = trunk_points
+
+    trunk_mean = pca_pts.mean(axis=0)
+    centered = pca_pts - trunk_mean
+    cov = (centered.T @ centered) / max(len(centered) - 1, 1)
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+    v = eigenvectors[:, -1]
+
+    if v[rough_axis_idx] < 0:
+        v = -v
+
+    logger.info(f"[MANUAL DBH] Aligned trunk direction vector: {v}")
+
+    # 4. Project all points to find true height
+    proj = np.dot(points, v)
+    h_min = float(np.percentile(proj, 2))
+    h_max = float(np.percentile(proj, 98))
+    total_h = h_max - h_min
+    estimated_height_m = float(total_h * scale)
+
+    # 5. Set target height to the projection of clicked center along v
+    h_target = float(np.dot(np.array([cx, cy, cz]), v))
+
+    # 6. Fit circle at slices around h_target
+    if abs(v[0]) < 0.9:
+        ref = np.array([1.0, 0.0, 0.0])
+    else:
+        ref = np.array([0.0, 1.0, 0.0])
+    u1 = np.cross(v, ref)
+    u1 = u1 / np.linalg.norm(u1)
+    u2 = np.cross(v, u1)
+
+    proj_trunk = np.dot(trunk_points, v)
+    
+    base_tol = 0.08 / scale
+    tol = min(base_tol, total_h * 0.1)
+    tol = max(tol, 0.02)
+
+    offsets = [-tol * 0.3, 0.0, tol * 0.3]
+    radii = []
+    centers_2d = []
+    slice_points_list = []
+
+    for off in offsets:
+        h_t = h_target + off
+        mask = np.abs(proj_trunk - h_t) <= tol
+        pts_slice = trunk_points[mask]
+        if len(pts_slice) < 4:
+            continue
+        pts_2d = np.column_stack((np.dot(pts_slice, u1), np.dot(pts_slice, u2)))
+        xc_slice, yc_slice, R, err = fit_circle_2d(pts_2d)
+        if R is not None and R > 0 and R < radius * 1.5:
+            radii.append(R)
+            centers_2d.append((xc_slice, yc_slice))
+            slice_points_list.append(pts_slice)
+
+    method_used = "Manual override trunk select"
+    if not radii:
+        logger.warning("[MANUAL DBH] Aligned slice failed, using fallback on selected trunk points...")
+        pts_2d = np.column_stack((np.dot(trunk_points, u1), np.dot(trunk_points, u2)))
+        xc_slice, yc_slice, R, _ = fit_circle_robust(pts_2d)
+        if R is None or R > radius * 2.0:
+            R = radius
+            xc_slice, yc_slice = 0.0, 0.0
+        radii = [R]
+        centers_2d = [(xc_slice, yc_slice)]
+        slice_points_all = trunk_points
+        method_used = "Manual override fallback"
+    else:
+        slice_points_all = np.concatenate(slice_points_list, axis=0)
+
+    if len(slice_points_all) > 500:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(slice_points_all), size=500, replace=False)
+        slice_points_all = slice_points_all[idx]
+
+    R_final = float(np.median(radii))
+    dbh_m = R_final * 2.0 * scale
+    dbh_cm = dbh_m * 100.0
+
+    xc_2d = float(np.median([c[0] for c in centers_2d]))
+    yc_2d = float(np.median([c[1] for c in centers_2d]))
+
+    center_3d = xc_2d * u1 + yc_2d * u2 + h_target * v
+
+    slice_count = int(slice_points_all.shape[0])
+    mean_err_cm = 0.0
+    if slice_count >= 5:
+        pts_2d = np.column_stack((np.dot(slice_points_all, u1), np.dot(slice_points_all, u2)))
+        _, _, _, mean_err = fit_circle_robust(pts_2d)
+        if mean_err is not None:
+            mean_err_cm = float(round(mean_err * scale * 100, 2))
+
+    return {
+        "dbh_cm":             float(round(dbh_cm, 2)),
+        "height_m":           float(round(estimated_height_m, 2)),
+        "confidence_note":    "Manually verified trunk selection",
+        "method":             method_used,
+        "slice_points_count": slice_count,
+        "mean_fit_error_cm":  mean_err_cm,
+        "geometry_3d": {
+            "center_x":       float(round(center_3d[0], 4)),
+            "center_y":       float(round(center_3d[1], 4)),
+            "center_z":       float(round(center_3d[2], 4)),
+            "dir_x":          float(round(v[0], 4)),
+            "dir_y":          float(round(v[1], 4)),
+            "dir_z":          float(round(v[2], 4)),
+            "radius_units":   float(round(R_final, 4)),
+            "h_min":          float(round(h_min, 4)),
+            "h_max":          float(round(h_max, 4)),
+            "h_target":       float(round(h_target, 4)),
+            "scale_factor":   scale,
+            "slice_points_3d": [[float(round(p[0], 4)), float(round(p[1], 4)), float(round(p[2], 4))] for p in slice_points_all],
+        }
+    }
