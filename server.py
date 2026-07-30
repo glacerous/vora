@@ -55,6 +55,8 @@ class ReconstructRequest(BaseModel):
     """Optional JSON body for POST /reconstruct."""
     tree_code: Optional[str] = None
     remove_background: Optional[bool] = True
+    gps_lat: Optional[float] = None
+    gps_lon: Optional[float] = None
 
 class StatusResponse(BaseModel):
     stage: str
@@ -248,8 +250,15 @@ def filter_points3d_ply(ply_path: str) -> None:
         print(f"[RECONSTRUCT-FILTER] Error filtering points3d.ply: {exc}")
 
 
-# ── Helper: carbon analysis (sync, CPU-bound — always called inside thread) ──
-def run_carbon_analysis(ply_path: str, points3d_path: str = None, scan_id: str = None) -> dict:
+def run_carbon_analysis(
+    ply_path: str,
+    points3d_path: str = None,
+    scan_id: str = None,
+    wood_density: float = 0.6,
+    forest_type: str = "moist",
+    wood_density_source: str = "generic-default",
+    climate_zone: str = "Unknown",
+) -> dict:
     try:
         from carbon.allometric import estimate_carbon
         from carbon.dbh_extractor import extract_dbh, extract_dbh_from_mast3r
@@ -296,6 +305,10 @@ def run_carbon_analysis(ply_path: str, points3d_path: str = None, scan_id: str =
                 "below_ground_biomass_kg": None,
                 "carbon_kg":               None,
                 "co2e_kg":                 None,
+                "wood_density_used":       wood_density,
+                "wood_density_source":     wood_density_source,
+                "climate_zone_detected":   climate_zone,
+                "formula_used":            "None",
                 "disclaimer":              "Reconstruction failed: points3d.ply not available.",
                 "geometry_3d":             None,
             }
@@ -303,7 +316,8 @@ def run_carbon_analysis(ply_path: str, points3d_path: str = None, scan_id: str =
         carbon_result = estimate_carbon(
             dbh_cm=dbh_result["dbh_cm"],
             height_m=dbh_result["height_m"],
-            wood_density=0.6,
+            wood_density=wood_density,
+            forest_type=forest_type,
         )
         return {
             "dbh_cm":                  dbh_result["dbh_cm"],
@@ -319,6 +333,10 @@ def run_carbon_analysis(ply_path: str, points3d_path: str = None, scan_id: str =
             "below_ground_biomass_kg": carbon_result["below_ground_biomass_kg"],
             "carbon_kg":               carbon_result["carbon_kg"],
             "co2e_kg":                 carbon_result["co2e_kg"],
+            "wood_density_used":       wood_density,
+            "wood_density_source":     wood_density_source,
+            "climate_zone_detected":   climate_zone,
+            "formula_used":            carbon_result["formula_used"],
             "disclaimer":              carbon_result["disclaimer"],
             "geometry_3d":             dbh_result.get("geometry_3d"),
         }
@@ -543,7 +561,7 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         upd("error", str(exc), error=str(exc))
 
 # ── Background thread: GPU reconstruction + R2/D1 persistence (sync, IO heavy) ─
-def _reconstruct_thread(tree_code: str, remove_background: bool = False) -> None:
+def _reconstruct_thread(tree_code: str, remove_background: bool = False, gps_lat: float = None, gps_lon: float = None) -> None:
     try:
         if state.get("cancel_requested", False):
             raise RuntimeError("Job cancelled by user")
@@ -644,8 +662,89 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False) -> None
         elapsed = time.time() - t0
         print(f"[RECONSTRUCT] Total pipeline runtime: {elapsed:.2f} seconds")
 
+        # 1. Resolve GPS coordinates from EXIF metadata if not provided manually
+        if gps_lat is None or gps_lon is None:
+            try:
+                from carbon.gps_exif import get_exif_gps
+                for f in files:
+                    coords = get_exif_gps(f)
+                    if coords:
+                        gps_lat, gps_lon = coords
+                        print(f"[RECONSTRUCT-GPS] EXIF GPS detected: ({gps_lat}, {gps_lon})")
+                        break
+            except Exception as gps_exif_err:
+                print(f"[RECONSTRUCT-GPS ERROR] EXIF scan failed: {gps_exif_err}")
+
+        # 2. Resolve Climate Zone from GPS coordinates
+        climate_zone = "Unknown"
+        forest_type = "moist"
+        if gps_lat is not None and gps_lon is not None:
+            try:
+                from carbon.climate_zone import get_koppen_classification, classify_koppen_to_forest_type
+                code = get_koppen_classification(gps_lat, gps_lon)
+                if code:
+                    climate_zone = code
+                    forest_type = classify_koppen_to_forest_type(code)
+                    print(f"[RECONSTRUCT-CLIMATE] Koppen Climate: {climate_zone}, Forest type: {forest_type}")
+            except Exception as climate_err:
+                print(f"[RECONSTRUCT-CLIMATE ERROR] Mapresso query failed: {climate_err}")
+
+        # 3. Detect Species via Pl@ntNet API
+        species_preds = None
+        try:
+            upd("reconstructing", "Detecting tree species using Pl@ntNet API...")
+            from carbon.species_detection import detect_species
+            img_files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
+            if img_files:
+                detect_files = []
+                if len(img_files) >= 1:
+                    detect_files.append(img_files[0])
+                if len(img_files) >= 3:
+                    detect_files.append(img_files[len(img_files)//2])
+                    detect_files.append(img_files[-1])
+                elif len(img_files) == 2:
+                    detect_files.append(img_files[1])
+                species_preds = detect_species(detect_files)
+        except Exception as sp_err:
+            print(f"[RECONSTRUCT] Pl@ntNet species detection exception: {sp_err}")
+
+        # 4. Determine Wood Density
+        wood_density = 0.6
+        wood_density_source = "generic-default"
+        if species_preds and len(species_preds) > 0:
+            top_pred = species_preds[0]
+            if top_pred.get("confidence", 0.0) > 20.0:
+                sci_name = top_pred.get("scientific_name")
+                try:
+                    from carbon.wood_density_lookup import get_wood_density
+                    specific_wd = get_wood_density(sci_name)
+                    if specific_wd is not None:
+                        wood_density = specific_wd
+                        wood_density_source = "species-matched"
+                        print(f"[RECONSTRUCT-WD] Matched wood density for {sci_name}: {wood_density}")
+                except Exception as wd_err:
+                    print(f"[RECONSTRUCT-WD ERROR] Wood density lookup exception: {wd_err}")
+
+        # 5. Run Carbon Analysis using custom parameters
         upd("reconstructing", "✓ Reconstruction done. Estimating DBH and Carbon...")
-        carbon_est = run_carbon_analysis(out, points3d_path=points3d_path, scan_id=tree_code)
+        carbon_est = run_carbon_analysis(
+            out, 
+            points3d_path=points3d_path, 
+            scan_id=tree_code,
+            wood_density=wood_density,
+            forest_type=forest_type,
+            wood_density_source=wood_density_source,
+            climate_zone=climate_zone
+        )
+        
+        # Append fallback message to confidence note if GPS not available
+        if gps_lat is None or gps_lon is None:
+            fallback_msg = " (GPS data not available - fallback to moist forest assumption)"
+            if carbon_est.get("confidence"):
+                carbon_est["confidence"] += fallback_msg
+            else:
+                carbon_est["confidence"] = "GPS data not available - fallback to moist forest assumption"
+                
         state["carbon_estimation"] = carbon_est
 
         if carbon_est and "error" not in carbon_est:
@@ -674,27 +773,6 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False) -> None
                     except Exception as thumb_err:
                         print(f"Thumbnail upload error: {thumb_err}")
 
-                # Pl@ntNet Species Detection (Task 4)
-                species_preds = None
-                try:
-                    upd("reconstructing", "Detecting tree species using Pl@ntNet API...")
-                    from carbon.species_detection import detect_species
-                    # Get up to 3 image files (start, middle, and end for better coverage)
-                    img_files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
-                    if img_files:
-                        detect_files = []
-                        if len(img_files) >= 1:
-                            detect_files.append(img_files[0])
-                        if len(img_files) >= 3:
-                            detect_files.append(img_files[len(img_files)//2])
-                            detect_files.append(img_files[-1])
-                        elif len(img_files) == 2:
-                            detect_files.append(img_files[1])
-                        
-                        species_preds = detect_species(detect_files)
-                except Exception as sp_err:
-                    print(f"[RECONSTRUCT] Pl@ntNet species detection exception: {sp_err}")
-
                 upd("reconstructing", "Saving scan results to Cloudflare D1...")
                 from storage.d1_client import save_scan_result
                 save_scan_result(
@@ -709,6 +787,14 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False) -> None
                     thumbnail_url=thumbnail_url,
                     geometry_3d=carbon_est.get("geometry_3d"),
                     species_predictions=species_preds,
+                    wood_density_used=carbon_est.get("wood_density_used"),
+                    wood_density_source=carbon_est.get("wood_density_source"),
+                    climate_zone_detected=carbon_est.get("climate_zone_detected"),
+                    formula_used=carbon_est.get("formula_used"),
+                    agb_kg=carbon_est.get("above_ground_biomass_kg"),
+                    bgb_kg=carbon_est.get("below_ground_biomass_kg"),
+                    gps_lat=gps_lat,
+                    gps_lon=gps_lon,
                 )
                 upd("done", f"✓ Done in {elapsed:.0f}s — {mb:.1f} MB Gaussian Splat ready! (Tree code: {tree_code})")
             except Exception as exc:
@@ -880,10 +966,12 @@ async def use_photos(photos: List[UploadFile] = File(...)):
 @app.post("/reconstruct", summary="Start GPU reconstruction on extracted frames")
 async def reconstruct(
     background_tasks: BackgroundTasks,
-    # Accept tree_code and remove_background from JSON body OR query string for maximum flexibility
+    # Accept tree_code, remove_background, and GPS coordinates from JSON body OR query string for maximum flexibility
     body: Optional[ReconstructRequest] = Body(default=None),
     tree_code_query: Optional[str] = Query(default=None, alias="tree_code"),
     remove_bg_query: Optional[bool] = Query(default=None, alias="remove_background"),
+    gps_lat_query: Optional[float] = Query(default=None, alias="gps_lat"),
+    gps_lon_query: Optional[float] = Query(default=None, alias="gps_lon"),
 ):
     """
     Dispatches the GPU reconstruction job (via Modal) as a background task.
@@ -904,9 +992,13 @@ async def reconstruct(
     final_code = tree_code_query or (body.tree_code if body else None) or f"POHON-{random.randint(1000, 9999)}"
     final_code = final_code.strip().upper()
 
+    # Resolve GPS params
+    gps_lat = gps_lat_query if gps_lat_query is not None else (body.gps_lat if body else None)
+    gps_lon = gps_lon_query if gps_lon_query is not None else (body.gps_lon if body else None)
+
     state["error"] = None
     upd("reconstructing", "Queuing reconstruction…")
-    background_tasks.add_task(_reconstruct_thread, final_code, remove_bg)
+    background_tasks.add_task(_reconstruct_thread, final_code, remove_bg, gps_lat, gps_lon)
     return {"started": True, "tree_code": final_code}
 
 

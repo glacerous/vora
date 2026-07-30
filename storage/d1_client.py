@@ -55,13 +55,22 @@ import json
 
 def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg: float,
                      karbon_kg: float, co2e_kg: float, splat_file_url: str, confidence_note: str,
-                     thumbnail_url: str = None, geometry_3d: dict = None, species_predictions: list = None):
+                     thumbnail_url: str = None, geometry_3d: dict = None, species_predictions: list = None,
+                     wood_density_used: float = None, wood_density_source: str = None,
+                     climate_zone_detected: str = None, formula_used: str = None,
+                     agb_kg: float = None, bgb_kg: float = None,
+                     gps_lat: float = None, gps_lon: float = None):
     """
     Inserts a new scan record into the tree_scans database table on Cloudflare D1.
     """
     sql = """
-    INSERT INTO tree_scans (tree_code, scan_date, dbh_cm, tinggi_m, biomassa_kg, karbon_kg, co2e_kg, splat_file_url, confidence_note, thumbnail_url, geometry_3d, species_predictions)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tree_scans (
+        tree_code, scan_date, dbh_cm, tinggi_m, biomassa_kg, karbon_kg, co2e_kg, 
+        splat_file_url, confidence_note, thumbnail_url, geometry_3d, species_predictions,
+        wood_density_used, wood_density_source, climate_zone_detected, formula_used,
+        agb_kg, bgb_kg, gps_lat, gps_lon
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     # Use ISO 8601 UTC format for scan_date
     scan_date = datetime.now(timezone.utc).isoformat()
@@ -79,8 +88,37 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
         confidence_note,
         thumbnail_url,
         geom_str,
-        species_str
+        species_str,
+        wood_density_used,
+        wood_density_source,
+        climate_zone_detected,
+        formula_used,
+        agb_kg,
+        bgb_kg,
+        gps_lat,
+        gps_lon
     ])
+
+def populate_scan_defaults(r: dict):
+    if r.get("dbh_cm") is not None:
+        if r.get("wood_density_used") is None:
+            r["wood_density_used"] = 0.6
+        if r.get("wood_density_source") is None:
+            r["wood_density_source"] = "generic-default"
+        if r.get("climate_zone_detected") is None:
+            r["climate_zone_detected"] = "Unknown"
+        if r.get("formula_used") is None:
+            h = r.get("tinggi_m")
+            if h is not None and h > 0:
+                r["formula_used"] = "Chave 2005 (moist forest with height)"
+            else:
+                r["formula_used"] = "Chave 2005 (moist forest, DBH-only)"
+        if r.get("agb_kg") is None:
+            total_biomass = r.get("biomassa_kg") or 0.0
+            r["agb_kg"] = float(round(total_biomass / 1.24, 2))
+        if r.get("bgb_kg") is None:
+            total_biomass = r.get("biomassa_kg") or 0.0
+            r["bgb_kg"] = float(round(total_biomass * 0.24 / 1.24, 2))
 
 def get_scan_history(tree_code: str):
     """
@@ -99,6 +137,7 @@ def get_scan_history(tree_code: str):
                 r["species_predictions"] = json.loads(r["species_predictions"])
             except Exception:
                 pass
+        populate_scan_defaults(r)
     return rows
 
 def get_all_scans(limit: int = 20, offset: int = 0, include_invalid: bool = False):
@@ -121,6 +160,7 @@ def get_all_scans(limit: int = 20, offset: int = 0, include_invalid: bool = Fals
                 r["species_predictions"] = json.loads(r["species_predictions"])
             except Exception:
                 pass
+        populate_scan_defaults(r)
     return rows
 
 def generate_tree_code() -> str:
