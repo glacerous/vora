@@ -1181,8 +1181,71 @@
                         const dy = g3d.dir_y !== undefined ? g3d.dir_y : 0;
                         const dz = g3d.dir_z !== undefined ? g3d.dir_z : 1;
 
-                        const center_3d = new THREE.Vector3(cx, cy, cz);
-                        const dir_3d = new THREE.Vector3(dx, dy, dz).normalize();
+                        let center_3d = new THREE.Vector3(cx, cy, cz);
+                        let dir_3d = new THREE.Vector3(dx, dy, dz).normalize();
+
+                        // Recalculate center/direction from slice_points_3d if available (per user instruction)
+                        if (g3d.slice_points_3d && g3d.slice_points_3d.length >= 2) {
+                            try {
+                                const N_pts = g3d.slice_points_3d.length;
+                                // 1. Compute Centroid
+                                let sumX = 0, sumY = 0, sumZ = 0;
+                                g3d.slice_points_3d.forEach(pt => {
+                                    sumX += pt[0];
+                                    sumY += pt[1];
+                                    sumZ += pt[2];
+                                });
+                                const centroid = new THREE.Vector3(sumX / N_pts, sumY / N_pts, sumZ / N_pts);
+
+                                // 2. Compute Covariance Matrix
+                                let cxx = 0, cxy = 0, cxz = 0;
+                                let cyy = 0, cyz = 0, czz = 0;
+                                g3d.slice_points_3d.forEach(pt => {
+                                    const dx_pt = pt[0] - centroid.x;
+                                    const dy_pt = pt[1] - centroid.y;
+                                    const dz_pt = pt[2] - centroid.z;
+                                    cxx += dx_pt * dx_pt;
+                                    cxy += dx_pt * dy_pt;
+                                    cxz += dx_pt * dz_pt;
+                                    cyy += dy_pt * dy_pt;
+                                    cyz += dy_pt * dz_pt;
+                                    czz += dz_pt * dz_pt;
+                                });
+                                cxx /= N_pts;
+                                cxy /= N_pts;
+                                cxz /= N_pts;
+                                cyy /= N_pts;
+                                cyz /= N_pts;
+                                czz /= N_pts;
+
+                                // 3. Power Iteration to find principal component (dominant eigenvector)
+                                let b_vec = dir_3d.clone(); // start with current normalized direction
+                                if (b_vec.lengthSq() < 1e-4) {
+                                    b_vec.set(0, 1, 0);
+                                }
+                                for (let iter = 0; iter < 15; iter++) {
+                                    const nextX = cxx * b_vec.x + cxy * b_vec.y + cxz * b_vec.z;
+                                    const nextY = cxy * b_vec.x + cyy * b_vec.y + cyz * b_vec.z;
+                                    const nextZ = cxz * b_vec.x + cyz * b_vec.y + czz * b_vec.z;
+                                    const nextB = new THREE.Vector3(nextX, nextY, nextZ);
+                                    const len = nextB.length();
+                                    if (len < 1e-9) break;
+                                    b_vec.copy(nextB).multiplyScalar(1 / len);
+                                }
+                                b_vec.normalize();
+
+                                // Maintain direction orientation relative to original vector
+                                if (b_vec.dot(dir_3d) < 0) {
+                                    b_vec.multiplyScalar(-1);
+                                }
+
+                                center_3d = centroid;
+                                dir_3d = b_vec;
+                                console.log('Successfully recalculated CAD center and direction from slice_points_3d PCA:', center_3d, dir_3d);
+                            } catch (pcaErr) {
+                                console.warn('Failed to compute PCA direction from slice_points_3d:', pcaErr);
+                            }
+                        }
 
                         // Default Camera Orientation (PCA / trunk direction & center)
                         if (!cameraOriented) {
