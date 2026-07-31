@@ -58,6 +58,10 @@ class ReconstructRequest(BaseModel):
     remove_background: Optional[bool] = True
     gps_lat: Optional[float] = None
     gps_lon: Optional[float] = None
+    p1: Optional[List[float]] = None
+    p2: Optional[List[float]] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 class StatusResponse(BaseModel):
     stage: str
@@ -273,10 +277,12 @@ def run_carbon_analysis(
     forest_type: str = "moist",
     wood_density_source: str = "generic-default",
     climate_zone: str = "Unknown",
+    P1: list[float] = None,
+    P2: list[float] = None,
 ) -> dict:
     try:
         from carbon.allometric import estimate_carbon
-        from carbon.dbh_extractor import extract_dbh, extract_dbh_from_mast3r
+        from carbon.dbh_extractor import extract_dbh, extract_dbh_from_mast3r, extract_dbh_with_2d_clicks
 
         # Load scale_factor from calibration.json (scan-id-aware, with fallback + warnings)
         scale_factor = _load_scale_factor_for_scan(scan_id)
@@ -284,7 +290,26 @@ def run_carbon_analysis(
         # ── Primary: extract from MASt3R geometric point cloud ────────────────
         dbh_result = None
         err_msg = None
-        if points3d_path and os.path.exists(points3d_path):
+        if P1 is not None and P2 is not None and points3d_path and os.path.exists(points3d_path):
+            print(f"[CARBON] Running manual 2D clicks DBH extraction using P1={P1}, P2={P2}")
+            try:
+                dbh_result = extract_dbh_with_2d_clicks(
+                    ply_path=points3d_path,
+                    P1=np.array(P1),
+                    P2=np.array(P2),
+                    scale=scale_factor
+                )
+                if "error" in dbh_result:
+                    print(f"[CARBON] Manual extraction failed: {dbh_result['error']}")
+                    err_msg = dbh_result['error']
+                    dbh_result = None
+                else:
+                    print(f"[CARBON] Manual extraction succeeded: DBH={dbh_result['dbh_cm']} cm")
+            except Exception as manual_err:
+                print(f"[CARBON] Manual extraction exception: {manual_err}")
+                err_msg = str(manual_err)
+                dbh_result = None
+        elif points3d_path and os.path.exists(points3d_path):
             print(f"[CARBON] Trying MASt3R point cloud for measurement: {points3d_path}")
             try:
                 dbh_result = extract_dbh_from_mast3r(
@@ -576,7 +601,16 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         upd("error", str(exc), error=str(exc))
 
 # ── Background thread: GPU reconstruction + R2/D1 persistence (sync, IO heavy) ─
-def _reconstruct_thread(tree_code: str, remove_background: bool = False, gps_lat: float = None, gps_lon: float = None) -> None:
+def _reconstruct_thread(
+    tree_code: str,
+    remove_background: bool = False,
+    gps_lat: float = None,
+    gps_lon: float = None,
+    p1: list[float] = None,
+    p2: list[float] = None,
+    width: int = None,
+    height: int = None,
+) -> None:
     import modal
     progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
     try:
@@ -686,6 +720,24 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False, gps_lat
                 f.write(points3d_all_bytes)
             print(f"[RECONSTRUCT] Saved raw MASt3R dense pointmap: {points3d_all_path} ({len(points3d_all_bytes)/1024/1024:.1f} MB)")
 
+        P1_3d = None
+        P2_3d = None
+        if p1 is not None and p2 is not None and points3d_all_path and os.path.exists(points3d_all_path):
+            try:
+                pts3d = np.load(points3d_all_path)
+                N, H_crop, W_crop, _ = pts3d.shape
+                repr_idx = N // 2
+                pointmap = pts3d[repr_idx]
+                
+                u1_crop, v1_crop = map_pixel_to_cropped(p1[0], p1[1], width, height, W_crop, H_crop)
+                u2_crop, v2_crop = map_pixel_to_cropped(p2[0], p2[1], width, height, W_crop, H_crop)
+                
+                P1_3d = get_robust_3d_point(pointmap, u1_crop, v1_crop).tolist()
+                P2_3d = get_robust_3d_point(pointmap, u2_crop, v2_crop).tolist()
+                print(f"[RECONSTRUCT] Coordinate mapping successful: P1_3d={P1_3d}, P2_3d={P2_3d}")
+            except Exception as map_err:
+                print(f"[RECONSTRUCT ERROR] Failed to map pixel coordinates to 3D: {map_err}")
+
         elapsed = time.time() - t0
         print(f"[RECONSTRUCT] Total pipeline runtime: {elapsed:.2f} seconds")
 
@@ -762,7 +814,9 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False, gps_lat
             wood_density=wood_density,
             forest_type=forest_type,
             wood_density_source=wood_density_source,
-            climate_zone=climate_zone
+            climate_zone=climate_zone,
+            P1=P1_3d,
+            P2=P2_3d
         )
         
         # Append fallback message to confidence note if GPS not available
@@ -1052,10 +1106,26 @@ async def reconstruct(
     gps_lat = gps_lat_query if gps_lat_query is not None else (body.gps_lat if body else None)
     gps_lon = gps_lon_query if gps_lon_query is not None else (body.gps_lon if body else None)
 
+    # Resolve manual clicks
+    p1 = body.p1 if body else None
+    p2 = body.p2 if body else None
+    width = body.width if body else None
+    height = body.height if body else None
+
     state["error"] = None
     state["tree_code"] = final_code
     upd("reconstructing", "Queuing reconstruction…")
-    background_tasks.add_task(_reconstruct_thread, final_code, remove_bg, gps_lat, gps_lon)
+    background_tasks.add_task(
+        _reconstruct_thread,
+        final_code,
+        remove_bg,
+        gps_lat,
+        gps_lon,
+        p1,
+        p2,
+        width,
+        height
+    )
     return {"started": True, "tree_code": final_code}
 
 
