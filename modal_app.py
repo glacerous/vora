@@ -2,6 +2,7 @@ import os
 import modal
 
 app = modal.App("instantsplat-app")
+progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
 
 # GPU Configuration - easy to swap to "a100" or "h100" if "a10g" triggers CUDA Out Of Memory (OOM) errors
 GPU_CONFIG = "a10g"
@@ -32,7 +33,7 @@ image = (
     timeout=1800,  # 30 minutes
     image=image
 )
-def run_reconstruction(images_bytes: list[bytes]) -> dict:
+def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown") -> dict:
     import os
     import time
     import shutil
@@ -151,6 +152,7 @@ def run_reconstruction(images_bytes: list[bytes]) -> dict:
                 )
                 
     # 3. Stage 1: Geometric Initialization (init_geo.py)
+    progress_dict[tree_code] = "Initializing geometry (MASt3R)"
     # Run WITHOUT --n_views — let init_geo pick its default number of views.
     # It will create a sparse_{N}/ folder inside source_path which we detect next.
     init_cmd = [
@@ -178,6 +180,7 @@ def run_reconstruction(images_bytes: list[bytes]) -> dict:
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] init_geo created sparse_{detected_n_views}/ — using n_views={detected_n_views} for train.py")
 
     # 4. Stage 2: Fast 3D-Gaussian Optimization (train.py)
+    progress_dict[tree_code] = "Training Gaussians"
     train_cmd = [
         "python3", "train.py",
         "--source_path", source_path,
@@ -239,6 +242,7 @@ def run_reconstruction(images_bytes: list[bytes]) -> dict:
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Sending: {output_file_path} ({os.path.getsize(output_file_path):,} bytes)")
     
     # 6. Post-processing: remove outlier / floater Gaussians before returning
+    progress_dict[tree_code] = "Extracting point cloud"
     # This runs on the Modal GPU machine which has scipy (numpy is always available).
     # Parameters are deliberately conservative to avoid over-pruning valid splats.
     try:

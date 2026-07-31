@@ -44,6 +44,7 @@ state: dict = {
     "overlap_warning":   None,
     "cancel_requested":  False,
     "calibration_frame":  None,
+    "tree_code":         None,
 }
 
 def upd(stage: str, msg: str, **kw: Any) -> None:
@@ -68,6 +69,7 @@ class StatusResponse(BaseModel):
     frames: List[str]
     has_result: bool
     calibration_frame: Optional[Any] = None
+    tree_code: Optional[str] = None
 
 class HistoryResponse(BaseModel):
     success: bool
@@ -575,11 +577,13 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
 
 # ── Background thread: GPU reconstruction + R2/D1 persistence (sync, IO heavy) ─
 def _reconstruct_thread(tree_code: str, remove_background: bool = False, gps_lat: float = None, gps_lon: float = None) -> None:
+    import modal
+    progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
     try:
+        progress_dict[tree_code] = "Uploading images"
         if state.get("cancel_requested", False):
             raise RuntimeError("Job cancelled by user")
         upd("reconstructing", "Connecting to Modal…")
-        import modal
 
         files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
         if not files:
@@ -635,7 +639,7 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False, gps_lat
         fn     = modal.Function.from_name("instantsplat-app", "run_reconstruction")
         
         t_remote_start = time.time()
-        result = fn.remote(imgs)
+        result = fn.remote(imgs, tree_code)
         t_remote_end = time.time()
         
         elapsed_remote = t_remote_end - t_remote_start
@@ -749,6 +753,7 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False, gps_lat
                     print(f"[RECONSTRUCT-WD ERROR] Wood density lookup exception: {wd_err}")
 
         # 5. Run Carbon Analysis using custom parameters
+        progress_dict[tree_code] = "Computing DBH & carbon"
         upd("reconstructing", "✓ Reconstruction done. Estimating DBH and Carbon...")
         carbon_est = run_carbon_analysis(
             out, 
@@ -772,6 +777,7 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False, gps_lat
 
         if carbon_est and "error" not in carbon_est:
             try:
+                progress_dict[tree_code] = "Uploading results"
                 upd("reconstructing", "Uploading reconstruction files to Cloudflare R2...")
                 from storage.r2_client import upload_splat, upload_thumbnail
                 ts = int(time.time())
@@ -843,6 +849,11 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False, gps_lat
         else:
             print(f"[RECONSTRUCT ERROR] Critical pipeline failure: {exc}")
             upd("error", str(exc), error=str(exc))
+    finally:
+        try:
+            del progress_dict[tree_code]
+        except Exception:
+            pass
 
 # ── Application lifespan: pre-calculate carbon if result.ply already exists ──
 @asynccontextmanager
@@ -929,8 +940,22 @@ async def status():
         if os.path.exists(FRAMES_DIR)
         else []
     )
+    
+    current_msg = state.get("message")
+    if state.get("stage") == "reconstructing":
+        tc = state.get("tree_code")
+        if tc:
+            try:
+                import modal
+                progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
+                if tc in progress_dict:
+                    current_msg = progress_dict[tc]
+            except Exception as e:
+                print(f"[STATUS] Failed to read Modal progress: {e}")
+                
     return {
         **state,
+        "message":    current_msg,
         "frames":     frames,
         "has_result": os.path.exists(os.path.join(OUTPUT_DIR, "result.ply")),
     }
@@ -1028,6 +1053,7 @@ async def reconstruct(
     gps_lon = gps_lon_query if gps_lon_query is not None else (body.gps_lon if body else None)
 
     state["error"] = None
+    state["tree_code"] = final_code
     upd("reconstructing", "Queuing reconstruction…")
     background_tasks.add_task(_reconstruct_thread, final_code, remove_bg, gps_lat, gps_lon)
     return {"started": True, "tree_code": final_code}
