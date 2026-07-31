@@ -1340,9 +1340,32 @@
                             }
                         }
 
+                        // Project slice_points_3d points onto dir_3d to find their actual range relative to center_3d
+                        let actualHMin = hMin;
+                        let actualHMax = hMax;
+                        let actualHTarget = hTarget;
+                        let actualHeight = height;
+
+                        if (g3d.slice_points_3d && g3d.slice_points_3d.length > 0) {
+                            let minProj = Infinity;
+                            let maxProj = -Infinity;
+                            g3d.slice_points_3d.forEach(pt => {
+                                const pVec = new THREE.Vector3(pt[0] - center_3d.x, pt[1] - center_3d.y, pt[2] - center_3d.z);
+                                const proj = pVec.dot(dir_3d);
+                                if (proj < minProj) minProj = proj;
+                                if (proj > maxProj) maxProj = proj;
+                            });
+                            if (maxProj > minProj) {
+                                actualHMin = minProj;
+                                actualHMax = maxProj;
+                                actualHTarget = 0;
+                                actualHeight = Math.abs(maxProj - minProj);
+                            }
+                        }
+
                         // Calculate base, top, and center coordinates of trunk cylinder
-                        const base_3d = center_3d.clone().addScaledVector(dir_3d, hMin - hTarget);
-                        const top_3d = center_3d.clone().addScaledVector(dir_3d, hMax - hTarget);
+                        const base_3d = center_3d.clone().addScaledVector(dir_3d, actualHMin - actualHTarget);
+                        const top_3d = center_3d.clone().addScaledVector(dir_3d, actualHMax - actualHTarget);
                         const center_cyl = base_3d.clone().add(top_3d).multiplyScalar(0.5);
 
                         // Calculate quaternion rotation to align with trunk direction
@@ -1350,7 +1373,7 @@
                         const qAlign = new THREE.Quaternion().setFromUnitVectors(up, dir_3d);
 
                         // 1. Trunk Wireframe Cylinder
-                        const cylGeo = new THREE.CylinderGeometry(radius, radius, height, 16, 8, true);
+                        const cylGeo = new THREE.CylinderGeometry(radius, radius, actualHeight, 16, 8, true);
                         const cylMat = new THREE.MeshBasicMaterial({
                             color: 0x06b6d4, // cyan
                             wireframe: true,

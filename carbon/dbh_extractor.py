@@ -177,10 +177,14 @@ def extract_dbh(ply_path, scale_factor=1.0, vertical_axis='z', breast_height=1.3
     center_3d[proj_axes[1]] = yc
     center_3d[axis_idx] = z_target
     
+    conf_note = "High"
+    if estimated_height_m < 1.0:
+        conf_note = f"WARNING: Trunk segment captured is only {estimated_height_m:.2f}m tall, insufficient to reach standard breast height (1.3m). DBH measurement may not represent true breast-height diameter - recommend recapturing with more trunk visible in frame"
+
     return {
         "dbh_cm": float(round(dbh_cm, 2)),
         "height_m": float(round(estimated_height_m, 2)),
-        "confidence_note": "High",
+        "confidence_note": conf_note,
         "method": "Numpy Point Cloud Slicing",
         "slice_points_count": len(points_2d),
         "mean_fit_error_cm": float(round(mean_err * scale * 100, 2)),
@@ -375,6 +379,8 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
             mean_err_cm = float(round(mean_err * scale * 100, 2))
 
     confidence = "High" if (mean_err_cm <= 3.0) else "Medium"
+    if estimated_height_m < 1.0:
+        confidence = f"WARNING: Trunk segment captured is only {estimated_height_m:.2f}m tall, insufficient to reach standard breast height (1.3m). DBH measurement may not represent true breast-height diameter - recommend recapturing with more trunk visible in frame"
 
     logger.info(f"[MAST3R DBH] Final result: DBH={dbh_cm:.2f} cm, height={estimated_height_m:.2f} m, confidence={confidence}")
 
@@ -529,10 +535,14 @@ def extract_dbh_with_manual_override(ply_path: str, cx: float, cy: float, cz: fl
         if mean_err is not None:
             mean_err_cm = float(round(mean_err * scale * 100, 2))
 
+    confidence_note = "Manually verified trunk selection"
+    if estimated_height_m < 1.0:
+        confidence_note = f"WARNING: Trunk segment captured is only {estimated_height_m:.2f}m tall, insufficient to reach standard breast height (1.3m). DBH measurement may not represent true breast-height diameter - recommend recapturing with more trunk visible in frame"
+
     return {
         "dbh_cm":             float(round(dbh_cm, 2)),
         "height_m":           float(round(estimated_height_m, 2)),
-        "confidence_note":    "Manually verified trunk selection",
+        "confidence_note":    confidence_note,
         "method":             method_used,
         "slice_points_count": slice_count,
         "mean_fit_error_cm":  mean_err_cm,
@@ -671,10 +681,14 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
         if mean_err is not None:
             mean_err_cm = float(round(mean_err * scale * 100, 2))
 
+    confidence_note = "Manually corrected"
+    if estimated_height_m < 1.0:
+        confidence_note = f"WARNING: Trunk segment captured is only {estimated_height_m:.2f}m tall, insufficient to reach standard breast height (1.3m). DBH measurement may not represent true breast-height diameter - recommend recapturing with more trunk visible in frame"
+
     return {
         "dbh_cm":             float(round(dbh_cm, 2)),
         "height_m":           float(round(estimated_height_m, 2)),
-        "confidence_note":    "Manually corrected",
+        "confidence_note":    confidence_note,
         "method":             method_used,
         "slice_points_count": slice_count,
         "mean_fit_error_cm":  mean_err_cm,
