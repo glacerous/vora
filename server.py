@@ -1235,9 +1235,11 @@ async def manual_override(body: ManualOverrideRequest):
         sp_str = latest_scan.get("species_predictions")
         if sp_str:
             try:
-                species_preds = _json.loads(sp_str)
-            except Exception:
+                while isinstance(sp_str, str) and sp_str.strip():
+                    sp_str = _json.loads(sp_str)
                 species_preds = sp_str
+            except Exception:
+                species_preds = None
 
         save_scan_result(
             tree_code=body.tree_code,
@@ -1431,12 +1433,12 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
         raw_sp = target_scan.get("species_predictions")
         if raw_sp:
             try:
-                if isinstance(raw_sp, str):
-                    species_preds = json.loads(raw_sp)
-                else:
-                    species_preds = raw_sp
-            except Exception:
+                while isinstance(raw_sp, str) and raw_sp.strip():
+                    raw_sp = json.loads(raw_sp)
                 species_preds = raw_sp
+            except Exception as e:
+                print(f"[RECALCULATE] Failed to parse species_predictions: {e}")
+                species_preds = None
 
         # Pl@ntNet opportunistic retry if species_predictions is missing/empty
         thumbnail_url = target_scan.get("thumbnail_url")
