@@ -1426,7 +1426,62 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             raise HTTPException(status_code=400, detail=res_override["error"])
 
         # 8. Recalculate biomass & carbon
-        wood_density = target_scan.get("wood_density_used") or 0.6
+        # Check species_predictions
+        species_preds = None
+        raw_sp = target_scan.get("species_predictions")
+        if raw_sp:
+            try:
+                if isinstance(raw_sp, str):
+                    species_preds = json.loads(raw_sp)
+                else:
+                    species_preds = raw_sp
+            except Exception:
+                species_preds = raw_sp
+
+        # Pl@ntNet opportunistic retry if species_predictions is missing/empty
+        thumbnail_url = target_scan.get("thumbnail_url")
+        if not species_preds and thumbnail_url:
+            print(f"[RECALCULATE] species_predictions is empty. Retrying Pl@ntNet with thumbnail {thumbnail_url}...")
+            try:
+                temp_thumb_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_thumb.jpg")
+                res_thumb = requests.get(thumbnail_url, timeout=15)
+                if res_thumb.status_code == 200:
+                    with open(temp_thumb_path, "wb") as f:
+                        f.write(res_thumb.content)
+                    from carbon.species_detection import detect_species
+                    species_preds = detect_species([temp_thumb_path])
+                    print(f"[RECALCULATE] Pl@ntNet retry result: {species_preds}")
+                    try:
+                        os.remove(temp_thumb_path)
+                    except Exception:
+                        pass
+                else:
+                    print(f"[RECALCULATE] Thumbnail download failed (HTTP {res_thumb.status_code})")
+            except Exception as plant_err:
+                print(f"[RECALCULATE] Pl@ntNet retry failed: {plant_err}")
+
+        # Resolve wood density from species
+        wood_density = 0.6
+        wood_density_source = "generic-default"
+        if species_preds and len(species_preds) > 0:
+            top_pred = species_preds[0]
+            if top_pred.get("confidence", 0.0) > 20.0:
+                sci_name = top_pred.get("scientific_name")
+                try:
+                    from carbon.wood_density_lookup import get_wood_density
+                    specific_wd = get_wood_density(sci_name)
+                    if specific_wd is not None:
+                        wood_density = specific_wd
+                        wood_density_source = "species-matched"
+                        print(f"[RECALCULATE] Wood density matched for {sci_name}: {wood_density}")
+                except Exception as wd_err:
+                    print(f"[RECALCULATE ERROR] Wood density lookup: {wd_err}")
+
+        # Fallback to existing if not matched to specific species
+        if wood_density_source == "generic-default" and target_scan.get("wood_density_used"):
+            wood_density = target_scan.get("wood_density_used")
+            wood_density_source = target_scan.get("wood_density_source") or "generic-default"
+
         forest_type = "moist"
         climate_zone = target_scan.get("climate_zone_detected") or "Unknown"
         if climate_zone != "Unknown":
@@ -1451,16 +1506,17 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             biomassa_kg=carbon_result["total_biomass_kg"],
             karbon_kg=carbon_result["carbon_kg"],
             co2e_kg=carbon_result["co2e_kg"],
-            confidence_note="Manually corrected",
+            confidence_note=res_override["confidence_note"],
             geometry_3d=res_override["geometry_3d"],
             wood_density_used=wood_density,
-            wood_density_source=target_scan.get("wood_density_source") or "generic-default",
+            wood_density_source=wood_density_source,
             climate_zone_detected=climate_zone,
             formula_used=carbon_result["formula_used"],
             agb_kg=carbon_result["above_ground_biomass_kg"],
             bgb_kg=carbon_result["below_ground_biomass_kg"],
             gps_lat=target_scan.get("gps_lat"),
             gps_lon=target_scan.get("gps_lon"),
+            species_predictions=species_preds,
         )
         print(f"[RECALCULATE] Successfully updated D1 record id {scan_id} for {tree_code} via 2D clicks override.")
 
@@ -1481,7 +1537,7 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             "biomassa_kg": carbon_result["total_biomass_kg"],
             "karbon_kg": carbon_result["carbon_kg"],
             "co2e_kg": carbon_result["co2e_kg"],
-            "confidence_note": "Manually corrected",
+            "confidence_note": res_override["confidence_note"],
         }
 
     except HTTPException as http_exc:

@@ -104,7 +104,8 @@ def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg
                        geometry_3d: dict = None, wood_density_used: float = None,
                        wood_density_source: str = None, climate_zone_detected: str = None,
                        formula_used: str = None, agb_kg: float = None, bgb_kg: float = None,
-                       gps_lat: float = None, gps_lon: float = None):
+                       gps_lat: float = None, gps_lon: float = None,
+                       species_predictions: list = None):
     """
     Updates an existing scan record in the tree_scans database table on Cloudflare D1 by scan_id.
     """
@@ -113,10 +114,11 @@ def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg
     SET dbh_cm = ?, tinggi_m = ?, biomassa_kg = ?, karbon_kg = ?, co2e_kg = ?, 
         confidence_note = ?, geometry_3d = ?, wood_density_used = ?, 
         wood_density_source = ?, climate_zone_detected = ?, formula_used = ?,
-        agb_kg = ?, bgb_kg = ?, gps_lat = ?, gps_lon = ?
+        agb_kg = ?, bgb_kg = ?, gps_lat = ?, gps_lon = ?, species_predictions = ?
     WHERE id = ?
     """
     geom_str = json.dumps(geometry_3d) if geometry_3d else None
+    species_str = json.dumps(species_predictions) if species_predictions else None
     execute_d1_query(sql, [
         dbh_cm, 
         tinggi_m, 
@@ -133,6 +135,7 @@ def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg
         bgb_kg,
         gps_lat,
         gps_lon,
+        species_str,
         scan_id
     ])
 
