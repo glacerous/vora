@@ -551,3 +551,145 @@ def extract_dbh_with_manual_override(ply_path: str, cx: float, cy: float, cz: fl
             "slice_points_3d": [[float(round(p[0], 4)), float(round(p[1], 4)), float(round(p[2], 4))] for p in slice_points_all],
         }
     }
+
+def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, scale: float, crop_radius_m: float = 0.25, breast_height_m: float = 1.3) -> dict:
+    try:
+        points = parse_ply_points(ply_path)
+    except Exception as exc:
+        return {"error": f"Failed to load point cloud: {exc}"}
+
+    if len(points) < 10:
+        return {"error": "Point cloud too sparse"}
+
+    # 1. Determine direction vector v
+    v = P2 - P1
+    v_norm = np.linalg.norm(v)
+    if v_norm < 1e-6:
+        return {"error": "P1 and P2 are identical or too close"}
+    v = v / v_norm
+
+    # 2. Filter point cloud within cylinder around the axis v
+    # w is the vector from P1 to each point Q
+    w = points - P1
+    # h is the projection length along v
+    h_proj = np.dot(w, v)
+    # d is the perpendicular distance to the axis v
+    d_proj = np.linalg.norm(w - h_proj[:, np.newaxis] * v[np.newaxis, :], axis=-1)
+
+    crop_radius = crop_radius_m / scale
+    # We crop points that are within crop_radius of the axis and within the span of P1 and P2 (with some margin)
+    margin = 0.2 / scale
+    trunk_mask = (d_proj <= crop_radius) & (h_proj >= -margin) & (h_proj <= v_norm + margin)
+    trunk_points = points[trunk_mask]
+
+    if len(trunk_points) < 10:
+        # Fallback: ignore height constraints, just keep all points within crop_radius of axis
+        trunk_mask = d_proj <= crop_radius
+        trunk_points = points[trunk_mask]
+
+    if len(trunk_points) < 10:
+        return {"error": f"Too few points within the crop cylinder ({len(trunk_points)} points)."}
+
+    # 3. Project all points in points3d.ply to find true height (overall tree height)
+    proj_all = np.dot(points, v)
+    h_min = float(np.percentile(proj_all, 2))
+    h_max = float(np.percentile(proj_all, 98))
+    total_h = h_max - h_min
+    estimated_height_m = float(total_h * scale)
+
+    # 4. Set target breast height target
+    # P1 is the ground, so breast height target is 1.3 meters above P1
+    h_target = float(np.dot(P1, v) + breast_height_m / scale)
+
+    # 5. Fit circle at slices around h_target
+    if abs(v[0]) < 0.9:
+        ref = np.array([1.0, 0.0, 0.0])
+    else:
+        ref = np.array([0.0, 1.0, 0.0])
+    u1 = np.cross(v, ref)
+    u1 = u1 / np.linalg.norm(u1)
+    u2 = np.cross(v, u1)
+
+    proj_trunk = np.dot(trunk_points, v)
+    
+    base_tol = 0.08 / scale
+    tol = min(base_tol, total_h * 0.1)
+    tol = max(tol, 0.02)
+
+    offsets = [-tol * 0.3, 0.0, tol * 0.3]
+    radii = []
+    centers_2d = []
+    slice_points_list = []
+
+    for off in offsets:
+        h_t = h_target + off
+        mask = np.abs(proj_trunk - h_t) <= tol
+        pts_slice = trunk_points[mask]
+        if len(pts_slice) < 4:
+            continue
+        pts_2d = np.column_stack((np.dot(pts_slice, u1), np.dot(pts_slice, u2)))
+        xc_slice, yc_slice, R, err = fit_circle_2d(pts_2d)
+        if R is not None and R > 0 and R < crop_radius * 1.5:
+            radii.append(R)
+            centers_2d.append((xc_slice, yc_slice))
+            slice_points_list.append(pts_slice)
+
+    method_used = "Manual override 2D clicks"
+    if not radii:
+        logger.warning("[MANUAL DBH] Aligned slice failed, using fallback on selected cylinder points...")
+        pts_2d = np.column_stack((np.dot(trunk_points, u1), np.dot(trunk_points, u2)))
+        xc_slice, yc_slice, R, _ = fit_circle_robust(pts_2d)
+        if R is None or R > crop_radius * 2.0:
+            R = crop_radius / 2
+            xc_slice, yc_slice = 0.0, 0.0
+        radii = [R]
+        centers_2d = [(xc_slice, yc_slice)]
+        slice_points_all = trunk_points
+        method_used = "Manual override 2D fallback"
+    else:
+        slice_points_all = np.concatenate(slice_points_list, axis=0)
+
+    if len(slice_points_all) > 500:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(slice_points_all), size=500, replace=False)
+        slice_points_all = slice_points_all[idx]
+
+    R_final = float(np.median(radii))
+    dbh_m = R_final * 2.0 * scale
+    dbh_cm = dbh_m * 100.0
+
+    xc_2d = float(np.median([c[0] for c in centers_2d]))
+    yc_2d = float(np.median([c[1] for c in centers_2d]))
+
+    center_3d = xc_2d * u1 + yc_2d * u2 + h_target * v
+
+    slice_count = int(slice_points_all.shape[0])
+    mean_err_cm = 0.0
+    if slice_count >= 5:
+        pts_2d = np.column_stack((np.dot(slice_points_all, u1), np.dot(slice_points_all, u2)))
+        _, _, _, mean_err = fit_circle_robust(pts_2d)
+        if mean_err is not None:
+            mean_err_cm = float(round(mean_err * scale * 100, 2))
+
+    return {
+        "dbh_cm":             float(round(dbh_cm, 2)),
+        "height_m":           float(round(estimated_height_m, 2)),
+        "confidence_note":    "Manually corrected",
+        "method":             method_used,
+        "slice_points_count": slice_count,
+        "mean_fit_error_cm":  mean_err_cm,
+        "geometry_3d": {
+            "center_x":       float(round(center_3d[0], 4)),
+            "center_y":       float(round(center_3d[1], 4)),
+            "center_z":       float(round(center_3d[2], 4)),
+            "dir_x":          float(round(v[0], 4)),
+            "dir_y":          float(round(v[1], 4)),
+            "dir_z":          float(round(v[2], 4)),
+            "radius_units":   float(round(R_final, 4)),
+            "h_min":          float(round(h_min, 4)),
+            "h_max":          float(round(h_max, 4)),
+            "h_target":       float(round(h_target, 4)),
+            "scale_factor":   scale,
+            "slice_points_3d": [[float(round(p[0], 4)), float(round(p[1], 4)), float(round(p[2], 4))] for p in slice_points_all],
+        }
+    }

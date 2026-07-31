@@ -400,10 +400,33 @@ def run_reconstruction(images_bytes: list[bytes]) -> dict:
         searched_paths = [os.path.abspath(d) for d in search_dirs]
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: points3D.ply not found in expected paths: {searched_paths}")
 
+    # Search and load points3D_all.npy
+    points3d_all_data = None
+    target_npy_names_lower = {"points3d_all.npy"}
+    npy_candidates = []
+    for s_dir in search_dirs:
+        if os.path.exists(s_dir):
+            for root, _, files in os.walk(s_dir):
+                for file in files:
+                    if file.lower() in target_npy_names_lower:
+                        npy_candidates.append(os.path.join(root, file))
+
+    for candidate in npy_candidates:
+        if os.path.exists(candidate):
+            fsize = os.path.getsize(candidate)
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Checking NPY candidate: {candidate} ({fsize:,} bytes)")
+            if fsize < 1024:
+                continue
+            with open(candidate, "rb") as f:
+                points3d_all_data = f.read()
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Found dense pointmap: {candidate} ({len(points3d_all_data)/1024/1024:.1f} MB)")
+            break
+
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] --- Export completed successfully ---")
     return {
         "splat": splat_data,
-        "points3d": points3d_data,  # None if not found
+        "points3d": points3d_data,        # None if not found
+        "points3d_all": points3d_all_data, # None if not found
     }
 
 
