@@ -85,6 +85,12 @@ class ManualOverrideRequest(BaseModel):
     center_z: float
     radius: float
 
+class Recalculate2DRequest(BaseModel):
+    p1: list[float]
+    p2: list[float]
+    width: int
+    height: int
+
 # ── Helper: load scale_factor from calibration.json (scan-id-aware) ─────────
 import json as _json
 import logging as _logging
@@ -640,10 +646,12 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False, gps_lat
         if isinstance(result, dict):
             splat_bytes    = result.get("splat", b"")
             points3d_bytes = result.get("points3d")   # may be None
+            points3d_all_bytes = result.get("points3d_all") # may be None
         else:
             # Backward compat: old Modal version returned raw bytes
             splat_bytes    = result
             points3d_bytes = None
+            points3d_all_bytes = None
 
         # Save splat (viewer)
         out = os.path.join(OUTPUT_DIR, "result.ply")
@@ -665,6 +673,14 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False, gps_lat
             filter_points3d_ply(points3d_path)
         else:
             print("[RECONSTRUCT] No MASt3R point cloud returned — measurement will use splat")
+
+        # Save MASt3R dense pointmap
+        points3d_all_path = None
+        if points3d_all_bytes:
+            points3d_all_path = os.path.join(OUTPUT_DIR, "points3D_all.npy")
+            with open(points3d_all_path, "wb") as f:
+                f.write(points3d_all_bytes)
+            print(f"[RECONSTRUCT] Saved raw MASt3R dense pointmap: {points3d_all_path} ({len(points3d_all_bytes)/1024/1024:.1f} MB)")
 
         elapsed = time.time() - t0
         print(f"[RECONSTRUCT] Total pipeline runtime: {elapsed:.2f} seconds")
@@ -761,13 +777,21 @@ def _reconstruct_thread(tree_code: str, remove_background: bool = False, gps_lat
                 ts = int(time.time())
                 splat_url = upload_splat(out, tree_code, custom_timestamp=ts)
                 
-                # If MASt3R points3d.ply was computed, upload it too
+                 # If MASt3R points3d.ply was computed, upload it too
                 if points3d_path and os.path.exists(points3d_path):
                     try:
                         upload_splat(points3d_path, tree_code, custom_timestamp=ts)
                         print(f"[RECONSTRUCT] Uploaded MASt3R points3d.ply with timestamp {ts}")
                     except Exception as upload_err:
                         print(f"Failed to upload points3d.ply to R2: {upload_err}")
+
+                # If MASt3R points3D_all.npy was computed, upload it too
+                if points3d_all_path and os.path.exists(points3d_all_path):
+                    try:
+                        upload_splat(points3d_all_path, tree_code, custom_timestamp=ts)
+                        print(f"[RECONSTRUCT] Uploaded MASt3R points3D_all.npy with timestamp {ts}")
+                    except Exception as upload_err:
+                        print(f"Failed to upload points3D_all.npy to R2: {upload_err}")
 
                 # Select middle representative frame as thumbnail
                 thumbnail_url = None
@@ -1256,6 +1280,215 @@ async def manual_override(body: ManualOverrideRequest):
         raise httpex
     except Exception as exc:
         print(f"[OVERRIDE EXCEPTION] Failed to execute manual override: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+def map_pixel_to_cropped(u_org, v_org, W1, H1, W_crop, H_crop, size=512):
+    scale = size / max(W1, H1)
+    W_resized = int(round(W1 * scale))
+    H_resized = int(round(H1 * scale))
+    cx, cy = W_resized // 2, H_resized // 2
+    halfw = (cx // 8) * 8
+    halfh = (cy // 8) * 8
+    left = cx - halfw
+    top = cy - halfh
+    
+    u_crop = u_org * scale - left
+    v_crop = v_org * scale - top
+    
+    u_crop = max(0, min(W_crop - 1, int(round(u_crop))))
+    v_crop = max(0, min(H_crop - 1, int(round(v_crop))))
+    return u_crop, v_crop
+
+
+def get_robust_3d_point(pointmap, u, v, window=5):
+    H, W, _ = pointmap.shape
+    points = []
+    for du in range(-window//2, window//2 + 1):
+        for dv in range(-window//2, window//2 + 1):
+            nu, nv = u + du, v + dv
+            if 0 <= nu < W and 0 <= nv < H:
+                pt = pointmap[nv, nu]
+                if not np.all(pt == 0) and not np.any(np.isnan(pt)):
+                    points.append(pt)
+    if len(points) == 0:
+        return pointmap[v, u]
+    return np.median(points, axis=0)
+
+
+@app.patch("/scan/{scan_id}/recalculate", summary="Recalculate DBH and carbon using 2D clicked coordinates mapped to MASt3R pointmap")
+async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
+    """
+    Accepts 2D click coordinates from representative frame.
+    Downloads points3D_all.npy (dense pointmap) and points3d.ply.
+    Maps clicked coordinates to 3D point cloud, recalculates DBH/carbon.
+    Updates the existing scan record in database by scan_id.
+    """
+    try:
+        import requests
+        from storage.d1_client import execute_d1_query, update_scan_result
+        from carbon.dbh_extractor import extract_dbh_with_2d_clicks
+        from carbon.allometric import estimate_carbon
+
+        # 1. Fetch target scan record by scan_id
+        sql = "SELECT * FROM tree_scans WHERE id = ?"
+        scans = execute_d1_query(sql, [scan_id])
+        if not scans:
+            raise HTTPException(status_code=404, detail="Scan record not found")
+        
+        target_scan = scans[0]
+        tree_code = target_scan.get("tree_code")
+        splat_file_url = target_scan.get("splat_file_url")
+        if not splat_file_url:
+            raise HTTPException(status_code=400, detail="Target scan does not have a splat file URL")
+
+        # 2. Derive pointmap (.npy) and points3d (.ply) URLs from splat_file_url
+        if "_result.ply" in splat_file_url:
+            base_filename = splat_file_url.rsplit("/", 1)[-1]
+            timestamp = base_filename.split("_")[0]
+            pointmap_url = splat_file_url.replace("_result.ply", "_points3D_all.npy")
+            points3d_url = splat_file_url.replace("_result.ply", "_points3d.ply")
+        elif "result.ply" in splat_file_url:
+            base_filename = splat_file_url.rsplit("/", 1)[-1]
+            timestamp = base_filename.split("_")[0] if "_" in base_filename else "default"
+            pointmap_url = splat_file_url.replace("result.ply", "points3D_all.npy")
+            points3d_url = splat_file_url.replace("result.ply", "points3d.ply")
+        else:
+            base_filename = splat_file_url.rsplit("/", 1)[-1]
+            timestamp = base_filename.split(".")[0]
+            pointmap_url = splat_file_url.replace(".ply", "_points3D_all.npy")
+            points3d_url = splat_file_url.replace(".ply", "_points3d.ply")
+
+        # 3. Create temp local directories
+        local_dir = os.path.join(UPLOAD_DIR, "recalculates")
+        os.makedirs(local_dir, exist_ok=True)
+        local_npy_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3D_all.npy")
+        local_ply_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d.ply")
+
+        # 4. Download dense pointmap (NPY) from R2
+        print(f"[RECALCULATE] Downloading dense pointmap from {pointmap_url}")
+        try:
+            res_npy = requests.get(pointmap_url, timeout=30)
+            if res_npy.status_code != 200:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Historical scan does not have dense pointmap data. Please perform a new reconstruction."
+                )
+            with open(local_npy_path, "wb") as f:
+                f.write(res_npy.content)
+        except HTTPException as he:
+            raise he
+        except Exception as npy_err:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to download dense pointmap: {npy_err}"
+            )
+
+        # 5. Download points3d.ply from R2
+        print(f"[RECALCULATE] Downloading points3d.ply from {points3d_url}")
+        try:
+            res_ply = requests.get(points3d_url, timeout=30)
+            if res_ply.status_code != 200:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to download points3d.ply: HTTP {res_ply.status_code}"
+                )
+            with open(local_ply_path, "wb") as f:
+                f.write(res_ply.content)
+        except Exception as ply_err:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to download points3d.ply: {ply_err}"
+            )
+
+        # 6. Load pointmap and perform coordinate mapping
+        pts3d = np.load(local_npy_path)
+        N, H_crop, W_crop, _ = pts3d.shape
+        repr_idx = N // 2
+        pointmap = pts3d[repr_idx]
+
+        u1_crop, v1_crop = map_pixel_to_cropped(body.p1[0], body.p1[1], body.width, body.height, W_crop, H_crop)
+        u2_crop, v2_crop = map_pixel_to_cropped(body.p2[0], body.p2[1], body.width, body.height, W_crop, H_crop)
+
+        P1 = get_robust_3d_point(pointmap, u1_crop, v1_crop)
+        P2 = get_robust_3d_point(pointmap, u2_crop, v2_crop)
+
+        # 7. Perform DBH extraction with 2D clicks
+        scale_factor = _load_scale_factor_for_scan(tree_code)
+        res_override = extract_dbh_with_2d_clicks(
+            ply_path=local_ply_path,
+            P1=P1,
+            P2=P2,
+            scale=scale_factor
+        )
+
+        if "error" in res_override:
+            raise HTTPException(status_code=400, detail=res_override["error"])
+
+        # 8. Recalculate biomass & carbon
+        wood_density = target_scan.get("wood_density_used") or 0.6
+        forest_type = "moist"
+        climate_zone = target_scan.get("climate_zone_detected") or "Unknown"
+        if climate_zone != "Unknown":
+            try:
+                from carbon.climate_zone import classify_koppen_to_forest_type
+                forest_type = classify_koppen_to_forest_type(climate_zone)
+            except Exception as e:
+                print(f"[RECALCULATE ERROR] Failed to map climate: {e}")
+
+        carbon_result = estimate_carbon(
+            dbh_cm=res_override["dbh_cm"],
+            height_m=res_override["height_m"],
+            wood_density=wood_density,
+            forest_type=forest_type
+        )
+
+        # 9. Update target scan record in Cloudflare D1
+        update_scan_result(
+            scan_id=scan_id,
+            dbh_cm=res_override["dbh_cm"],
+            tinggi_m=res_override["height_m"],
+            biomassa_kg=carbon_result["total_biomass_kg"],
+            karbon_kg=carbon_result["carbon_kg"],
+            co2e_kg=carbon_result["co2e_kg"],
+            confidence_note="Manually corrected",
+            geometry_3d=res_override["geometry_3d"],
+            wood_density_used=wood_density,
+            wood_density_source=target_scan.get("wood_density_source") or "generic-default",
+            climate_zone_detected=climate_zone,
+            formula_used=carbon_result["formula_used"],
+            agb_kg=carbon_result["above_ground_biomass_kg"],
+            bgb_kg=carbon_result["below_ground_biomass_kg"],
+            gps_lat=target_scan.get("gps_lat"),
+            gps_lon=target_scan.get("gps_lon"),
+        )
+        print(f"[RECALCULATE] Successfully updated D1 record id {scan_id} for {tree_code} via 2D clicks override.")
+
+        # 10. Clean up temp files
+        try:
+            if os.path.exists(local_npy_path):
+                os.remove(local_npy_path)
+            if os.path.exists(local_ply_path):
+                os.remove(local_ply_path)
+        except Exception as cleanup_err:
+            print(f"[RECALCULATE CLEANUP ERROR] {cleanup_err}")
+
+        return {
+            "success": True,
+            "tree_code": tree_code,
+            "dbh_cm": res_override["dbh_cm"],
+            "height_m": res_override["height_m"],
+            "biomassa_kg": carbon_result["total_biomass_kg"],
+            "karbon_kg": carbon_result["carbon_kg"],
+            "co2e_kg": carbon_result["co2e_kg"],
+            "confidence_note": "Manually corrected",
+        }
+
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
 
 

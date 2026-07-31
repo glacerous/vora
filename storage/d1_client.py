@@ -99,6 +99,43 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
         gps_lon
     ])
 
+def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg: float,
+                       karbon_kg: float, co2e_kg: float, confidence_note: str,
+                       geometry_3d: dict = None, wood_density_used: float = None,
+                       wood_density_source: str = None, climate_zone_detected: str = None,
+                       formula_used: str = None, agb_kg: float = None, bgb_kg: float = None,
+                       gps_lat: float = None, gps_lon: float = None):
+    """
+    Updates an existing scan record in the tree_scans database table on Cloudflare D1 by scan_id.
+    """
+    sql = """
+    UPDATE tree_scans 
+    SET dbh_cm = ?, tinggi_m = ?, biomassa_kg = ?, karbon_kg = ?, co2e_kg = ?, 
+        confidence_note = ?, geometry_3d = ?, wood_density_used = ?, 
+        wood_density_source = ?, climate_zone_detected = ?, formula_used = ?,
+        agb_kg = ?, bgb_kg = ?, gps_lat = ?, gps_lon = ?
+    WHERE id = ?
+    """
+    geom_str = json.dumps(geometry_3d) if geometry_3d else None
+    execute_d1_query(sql, [
+        dbh_cm, 
+        tinggi_m, 
+        biomassa_kg, 
+        karbon_kg, 
+        co2e_kg, 
+        confidence_note,
+        geom_str,
+        wood_density_used,
+        wood_density_source,
+        climate_zone_detected,
+        formula_used,
+        agb_kg,
+        bgb_kg,
+        gps_lat,
+        gps_lon,
+        scan_id
+    ])
+
 def populate_scan_defaults(r: dict):
     if r.get("dbh_cm") is not None:
         if r.get("wood_density_used") is None:
