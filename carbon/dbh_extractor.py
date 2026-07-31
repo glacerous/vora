@@ -629,7 +629,7 @@ def extract_dbh_with_manual_override(ply_path: str, cx: float, cy: float, cz: fl
     mean_err_cm = 0.0
     if slice_count >= 5:
         pts_2d = np.column_stack((np.dot(slice_points_all, u1), np.dot(slice_points_all, u2)))
-        _, _, _, mean_err = fit_circle_robust(pts_2d)
+        _, _, _, mean_err, _ = fit_circle_robust(pts_2d)
         if mean_err is not None:
             mean_err_cm = float(round(mean_err * scale * 100, 2))
 
@@ -777,7 +777,7 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     mean_err_cm = 0.0
     if slice_count >= 5:
         pts_2d = np.column_stack((np.dot(slice_points_all, u1), np.dot(slice_points_all, u2)))
-        _, _, _, mean_err = fit_circle_robust(pts_2d)
+        _, _, _, mean_err, _ = fit_circle_robust(pts_2d)
         if mean_err is not None:
             mean_err_cm = float(round(mean_err * scale * 100, 2))
 
