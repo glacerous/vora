@@ -217,140 +217,219 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
 
     if len(points) < 30:
         return {"error": f"MASt3R cloud too sparse for DBH extraction ({len(points)} pts)"}
-
     # ── 1. Determine rough vertical axis coordinates ───────────────────────────
     ranges = points.max(axis=0) - points.min(axis=0)
     rough_axis_idx = int(np.argmax(ranges))
     proj_axes = [i for i in [0, 1, 2] if i != rough_axis_idx]
     
-    # ── 2. Filter out Ground/Terrain using 2D density peak detection ───────────
-    # The tree trunk is a high-density vertical column. Terrain points are spread out.
+    # ── 2. Stage 1 (Coarse Crop) ──────────────────────────────────────────────
+    # Density peak 2D + crop radius 0.45 units for initial isolation
     h1 = points[:, proj_axes[0]]
     h2 = points[:, proj_axes[1]]
     
-    # 2D Grid Histogram binning to find where the trunk is centered horizontally
+    # 2D Grid Histogram binning to find trunk horizontal peak center
     hist, xedges, yedges = np.histogram2d(h1, h2, bins=30)
     max_idx = np.unravel_index(np.argmax(hist), hist.shape)
     peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
     peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
     
-    # Crop the points horizontally around this peak (crop radius = 0.4 units)
-    # This filters out 90%+ of the terrain and surrounding clutter
-    dist_sq = (h1 - peak_h1)**2 + (h2 - peak_h2)**2
     CROP_RADIUS = 0.45
-    trunk_mask = dist_sq <= CROP_RADIUS**2
-    trunk_points = points[trunk_mask]
+    dist_sq = (h1 - peak_h1)**2 + (h2 - peak_h2)**2
+    coarse_trunk_mask = dist_sq <= CROP_RADIUS**2
+    coarse_trunk_points = points[coarse_trunk_mask]
     
-    if len(trunk_points) < 20:
-        # Fallback to uncropped points if crop is too aggressive
-        trunk_points = points
-        logger.warning("[MAST3R DBH] Crop yielded too few points, falling back to full cloud.")
+    if len(coarse_trunk_points) < 20:
+        coarse_trunk_points = points
+        logger.warning("[MAST3R DBH] Coarse crop yielded too few points, using full cloud.")
 
-    # ── 3. Run PCA on the isolated trunk points to find 3D direction vector ─────
-    rough_z = trunk_points[:, rough_axis_idx]
+    # ── 3. PCA + Circle Fitting (Pass 1 - Coarse) ─────────────────────────────
+    rough_z = coarse_trunk_points[:, rough_axis_idx]
     rough_z_min = np.percentile(rough_z, 5)
     rough_z_max = np.percentile(rough_z, 95)
     rough_height = rough_z_max - rough_z_min
 
-    # Sample mid-trunk section of the cropped points
+    # Sample mid-trunk section of coarse cropped points
     mid_trunk_mask = (rough_z >= rough_z_min + rough_height * 0.15) & (rough_z <= rough_z_min + rough_height * 0.60)
-    pca_pts = trunk_points[mid_trunk_mask]
-    if len(pca_pts) < 15:
-        pca_pts = trunk_points
+    pca_pts_coarse = coarse_trunk_points[mid_trunk_mask]
+    if len(pca_pts_coarse) < 15:
+        pca_pts_coarse = coarse_trunk_points
         
-    # Use at most 10,000 points for PCA to keep memory usage bounded
-    if len(pca_pts) > 10000:
+    if len(pca_pts_coarse) > 10000:
         rng = np.random.default_rng(42)
-        idx = rng.choice(len(pca_pts), size=10000, replace=False)
-        pca_pts = pca_pts[idx]
+        idx = rng.choice(len(pca_pts_coarse), size=10000, replace=False)
+        pca_pts_coarse = pca_pts_coarse[idx]
 
-    trunk_mean = pca_pts.mean(axis=0)
-    centered = pca_pts - trunk_mean
-    # Use covariance eigendecomposition (3×3 matrix) — memory-safe for any N
-    cov = (centered.T @ centered) / max(len(centered) - 1, 1)
-    eigenvalues, eigenvectors = np.linalg.eigh(cov)
-    # eigh returns ascending order — largest eigenvalue (principal axis) is last
-    v = eigenvectors[:, -1]
+    trunk_mean_pass1 = pca_pts_coarse.mean(axis=0)
+    centered_pass1 = pca_pts_coarse - trunk_mean_pass1
+    cov_pass1 = (centered_pass1.T @ centered_pass1) / max(len(centered_pass1) - 1, 1)
+    eigenvalues_pass1, eigenvectors_pass1 = np.linalg.eigh(cov_pass1)
+    v_pass1 = eigenvectors_pass1[:, -1]
     
-    # Ensure direction vector points "upwards" relative to rough vertical axis
-    if v[rough_axis_idx] < 0:
-        v = -v
-        
-    logger.info(f"[MAST3R DBH] Aligned trunk direction vector: {v}")
+    if v_pass1[rough_axis_idx] < 0:
+        v_pass1 = -v_pass1
 
-    # ── 4. Project all points onto the trunk axis vector to find true height ────
-    proj = np.dot(points, v)
-    h_min = float(np.percentile(proj, 2))
-    h_max = float(np.percentile(proj, 98))
-    total_h = h_max - h_min
-    estimated_height_m = float(total_h * scale)
+    proj_pass1 = np.dot(points, v_pass1)
+    h_min_pass1 = float(np.percentile(proj_pass1, 2))
+    h_max_pass1 = float(np.percentile(proj_pass1, 98))
+    total_h_pass1 = h_max_pass1 - h_min_pass1
     
-    logger.info(f"[MAST3R DBH] True height along aligned axis: {estimated_height_m:.2f} m")
+    h_target_pass1 = h_min_pass1 + (breast_height / scale)
+    if h_target_pass1 >= h_max_pass1 * 0.90:
+        h_target_pass1 = h_min_pass1 + total_h_pass1 * 0.30
 
-    # ── 5. Set target height for DBH ───────────────────────────────────────────
-    h_target = h_min + (breast_height / scale)
-    if h_target >= h_max * 0.90:
-        h_target = h_min + total_h * 0.30
-
-    # ── 6. Project slice points perpendicular to trunk and fit circle ──────────
-    # Orthonormal basis perpendicular to v
-    if abs(v[0]) < 0.9:
-        ref = np.array([1.0, 0.0, 0.0])
+    if abs(v_pass1[0]) < 0.9:
+        ref_pass1 = np.array([1.0, 0.0, 0.0])
     else:
-        ref = np.array([0.0, 1.0, 0.0])
-    u1 = np.cross(v, ref)
-    u1 = u1 / np.linalg.norm(u1)
-    u2 = np.cross(v, u1)
-    
-    # Project cropped trunk points onto aligned axis
-    proj_trunk = np.dot(trunk_points, v)
-    
+        ref_pass1 = np.array([0.0, 1.0, 0.0])
+    u1_pass1 = np.cross(v_pass1, ref_pass1)
+    u1_pass1 = u1_pass1 / np.linalg.norm(u1_pass1)
+    u2_pass1 = np.cross(v_pass1, u1_pass1)
+
+    proj_trunk_pass1 = np.dot(coarse_trunk_points, v_pass1)
     base_tol = 0.12 / scale
     density_factor = max(1.0, (5000 / max(len(points), 1)) ** 0.5)
     tol = base_tol * density_factor
-    tol = min(tol, total_h * 0.15)
-    tol = max(tol, total_h * 0.02)
+    tol = min(tol, total_h_pass1 * 0.15)
+    tol = max(tol, total_h_pass1 * 0.02)
 
     offsets = [-tol * 0.4, 0.0, tol * 0.4]
-    radii = []
-    centers_2d = []
-    slice_points_list = []
+    radii_pass1 = []
+    centers_2d_pass1 = []
 
     for off in offsets:
-        h_t = h_target + off
-        mask = np.abs(proj_trunk - h_t) <= tol
-        pts_slice = trunk_points[mask]
+        h_t = h_target_pass1 + off
+        mask = np.abs(proj_trunk_pass1 - h_t) <= tol
+        pts_slice = coarse_trunk_points[mask]
         if len(pts_slice) < 5:
             continue
-            
-        # Project onto 2D plane perpendicular to v
-        pts_2d = np.column_stack((np.dot(pts_slice, u1), np.dot(pts_slice, u2)))
-        
-        xc, yc, R, err = fit_circle_2d(pts_2d)
+        pts_2d = np.column_stack((np.dot(pts_slice, u1_pass1), np.dot(pts_slice, u2_pass1)))
+        xc, yc, R, _ = fit_circle_2d(pts_2d)
         if R is not None and R > 0 and R < CROP_RADIUS * 1.5:
-            radii.append(R)
-            centers_2d.append((xc, yc))
-            slice_points_list.append(pts_slice)
+            radii_pass1.append(R)
+            centers_2d_pass1.append((xc, yc))
 
-    method_used = "MASt3R aligned multi-slice median"
-    if not radii:
-        logger.warning("[MAST3R DBH] Aligned multi-slice failed, using fallback on trunk points...")
-        mask = (proj_trunk >= h_min) & (proj_trunk <= h_min + total_h * 0.5)
-        pts_trunk = trunk_points[mask]
+    if not radii_pass1:
+        mask = (proj_trunk_pass1 >= h_min_pass1) & (proj_trunk_pass1 <= h_min_pass1 + total_h_pass1 * 0.5)
+        pts_trunk = coarse_trunk_points[mask]
+        if len(pts_trunk) >= 5:
+            pts_2d = np.column_stack((np.dot(pts_trunk, u1_pass1), np.dot(pts_trunk, u2_pass1)))
+            xc, yc, R, _ = fit_circle_robust(pts_2d)
+            if R is None or R > CROP_RADIUS * 2.0:
+                R = 0.15 / scale
+                xc, yc = 0.0, 0.0
+            radii_pass1 = [R]
+            centers_2d_pass1 = [(xc, yc)]
+        else:
+            radii_pass1 = [0.15 / scale]
+            centers_2d_pass1 = [(0.0, 0.0)]
+
+    R_pass1 = float(np.median(radii_pass1))
+    xc_pass1 = float(np.median([c[0] for c in centers_2d_pass1]))
+    yc_pass1 = float(np.median([c[1] for c in centers_2d_pass1]))
+    center_3d_pass1 = xc_pass1 * u1_pass1 + yc_pass1 * u2_pass1 + h_target_pass1 * v_pass1
+
+    # ── 4. Stage 2 (Fine Crop centered on PCA axis) ───────────────────────────
+    # fine_crop_radius = radius_pass1 * tolerance_factor (e.g. 1.4)
+    TOLERANCE_FACTOR = 1.4
+    fine_crop_radius = R_pass1 * TOLERANCE_FACTOR
+
+    # Perpendicular distance of all raw points to the 1st pass axis line
+    w = points - center_3d_pass1
+    h_proj = np.dot(w, v_pass1)
+    perp = w - h_proj[:, np.newaxis] * v_pass1[np.newaxis, :]
+    perp_dist = np.linalg.norm(perp, axis=1)
+
+    fine_trunk_mask = perp_dist <= fine_crop_radius
+    fine_trunk_points = points[fine_trunk_mask]
+
+    if len(fine_trunk_points) < 20:
+        fine_trunk_points = coarse_trunk_points
+        logger.warning("[MAST3R DBH] Fine crop yielded too few points, using coarse crop.")
+
+    # ── 5. PCA + Circle Fitting (Pass 2 - Fine/Final) ─────────────────────────
+    rough_z_pass2 = fine_trunk_points[:, rough_axis_idx]
+    rough_z_min_pass2 = np.percentile(rough_z_pass2, 5)
+    rough_z_max_pass2 = np.percentile(rough_z_pass2, 95)
+    rough_height_pass2 = rough_z_max_pass2 - rough_z_min_pass2
+
+    mid_trunk_mask_pass2 = (rough_z_pass2 >= rough_z_min_pass2 + rough_height_pass2 * 0.15) & (rough_z_pass2 <= rough_z_min_pass2 + rough_height_pass2 * 0.60)
+    pca_pts_pass2 = fine_trunk_points[mid_trunk_mask_pass2]
+    if len(pca_pts_pass2) < 15:
+        pca_pts_pass2 = fine_trunk_points
+
+    if len(pca_pts_pass2) > 10000:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(pca_pts_pass2), size=10000, replace=False)
+        pca_pts_pass2 = pca_pts_pass2[idx]
+
+    trunk_mean_pass2 = pca_pts_pass2.mean(axis=0)
+    centered_pass2 = pca_pts_pass2 - trunk_mean_pass2
+    cov_pass2 = (centered_pass2.T @ centered_pass2) / max(len(centered_pass2) - 1, 1)
+    eigenvalues_pass2, eigenvectors_pass2 = np.linalg.eigh(cov_pass2)
+    v_pass2 = eigenvectors_pass2[:, -1]
+
+    if v_pass2[rough_axis_idx] < 0:
+        v_pass2 = -v_pass2
+
+    proj_pass2 = np.dot(points, v_pass2)
+    h_min_pass2 = float(np.percentile(proj_pass2, 2))
+    h_max_pass2 = float(np.percentile(proj_pass2, 98))
+    total_h_pass2 = h_max_pass2 - h_min_pass2
+    estimated_height_m = float(total_h_pass2 * scale)
+
+    h_target_pass2 = h_min_pass2 + (breast_height / scale)
+    if h_target_pass2 >= h_max_pass2 * 0.90:
+        h_target_pass2 = h_min_pass2 + total_h_pass2 * 0.30
+
+    if abs(v_pass2[0]) < 0.9:
+        ref_pass2 = np.array([1.0, 0.0, 0.0])
+    else:
+        ref_pass2 = np.array([0.0, 1.0, 0.0])
+    u1_pass2 = np.cross(v_pass2, ref_pass2)
+    u1_pass2 = u1_pass2 / np.linalg.norm(u1_pass2)
+    u2_pass2 = np.cross(v_pass2, u1_pass2)
+
+    proj_trunk_pass2 = np.dot(fine_trunk_points, v_pass2)
+    tol_pass2 = base_tol * density_factor
+    tol_pass2 = min(tol_pass2, total_h_pass2 * 0.15)
+    tol_pass2 = max(tol_pass2, total_h_pass2 * 0.02)
+
+    offsets = [-tol_pass2 * 0.4, 0.0, tol_pass2 * 0.4]
+    radii_pass2 = []
+    centers_2d_pass2 = []
+    slice_points_list_pass2 = []
+
+    for off in offsets:
+        h_t = h_target_pass2 + off
+        mask = np.abs(proj_trunk_pass2 - h_t) <= tol_pass2
+        pts_slice = fine_trunk_points[mask]
+        if len(pts_slice) < 5:
+            continue
+        pts_2d = np.column_stack((np.dot(pts_slice, u1_pass2), np.dot(pts_slice, u2_pass2)))
+        xc, yc, R, _ = fit_circle_2d(pts_2d)
+        if R is not None and R > 0 and R < fine_crop_radius * 1.5:
+            radii_pass2.append(R)
+            centers_2d_pass2.append((xc, yc))
+            slice_points_list_pass2.append(pts_slice)
+
+    method_used = "MASt3R aligned multi-slice median (refined)"
+    if not radii_pass2:
+        logger.warning("[MAST3R DBH] Aligned refined multi-slice failed, using fallback on refined trunk points...")
+        mask = (proj_trunk_pass2 >= h_min_pass2) & (proj_trunk_pass2 <= h_min_pass2 + total_h_pass2 * 0.5)
+        pts_trunk = fine_trunk_points[mask]
         if len(pts_trunk) < 5:
-            return {"error": "No points in aligned trunk region after terrain crop"}
-        pts_2d = np.column_stack((np.dot(pts_trunk, u1), np.dot(pts_trunk, u2)))
+            return {"error": "No points in aligned trunk region after refined crop"}
+        pts_2d = np.column_stack((np.dot(pts_trunk, u1_pass2), np.dot(pts_trunk, u2_pass2)))
         xc, yc, R, _ = fit_circle_robust(pts_2d)
-        if R is None or R > CROP_RADIUS * 2.0:
-            # Absolute default fallback
-            R = 0.15 / scale
+        if R is None or R > fine_crop_radius * 2.0:
+            R = R_pass1
             xc, yc = 0.0, 0.0
-        radii = [R]
-        centers_2d = [(xc, yc)]
-        method_used = "MASt3R aligned lower-trunk fallback"
+        radii_pass2 = [R]
+        centers_2d_pass2 = [(xc, yc)]
+        method_used = "MASt3R aligned refined fallback"
         slice_points_all = pts_trunk
     else:
-        slice_points_all = np.concatenate(slice_points_list, axis=0)
+        slice_points_all = np.concatenate(slice_points_list_pass2, axis=0)
 
     # Subsample if too dense (max 500 points for efficient storage/rendering)
     if len(slice_points_all) > 500:
@@ -359,21 +438,26 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
         slice_points_all = slice_points_all[idx]
 
     # Medians
-    R_final = float(np.median(radii))
+    R_final = float(np.median(radii_pass2))
     dbh_m   = R_final * 2.0 * scale
     dbh_cm  = dbh_m * 100.0
 
-    xc_2d = float(np.median([c[0] for c in centers_2d]))
-    yc_2d = float(np.median([c[1] for c in centers_2d]))
+    xc_2d = float(np.median([c[0] for c in centers_2d_pass2]))
+    yc_2d = float(np.median([c[1] for c in centers_2d_pass2]))
+    center_3d = xc_2d * u1_pass2 + yc_2d * u2_pass2 + h_target_pass2 * v_pass2
 
-    # Reconstruct 3D center point at DBH height
-    center_3d = xc_2d * u1 + yc_2d * u2 + h_target * v
+    # ── 6. Log both passes for comparison ─────────────────────────────────────
+    logger.info(f"[MAST3R DBH] Iterative refinement completed:")
+    logger.info(f"             Pass 1 Radius: {R_pass1 * scale * 100:.2f} cm (units: {R_pass1:.4f})")
+    logger.info(f"             Pass 2 Radius: {R_final * scale * 100:.2f} cm (units: {R_final:.4f})")
+    logger.info(f"             Difference: {(R_pass1 - R_final) * scale * 100:.2f} cm")
+    logger.info(f"             Pass 1 Direction: {v_pass1}")
+    logger.info(f"             Pass 2 Direction: {v_pass2}")
 
-    # Quick error estimate on primary slice
     slice_count = int(slice_points_all.shape[0])
     mean_err_cm = 0.0
     if slice_count >= 5:
-        pts_2d = np.column_stack((np.dot(slice_points_all, u1), np.dot(slice_points_all, u2)))
+        pts_2d = np.column_stack((np.dot(slice_points_all, u1_pass2), np.dot(slice_points_all, u2_pass2)))
         _, _, _, mean_err = fit_circle_robust(pts_2d)
         if mean_err is not None:
             mean_err_cm = float(round(mean_err * scale * 100, 2))
@@ -395,18 +479,17 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
             "center_x":       float(round(center_3d[0], 4)),
             "center_y":       float(round(center_3d[1], 4)),
             "center_z":       float(round(center_3d[2], 4)),
-            "dir_x":          float(round(v[0], 4)),
-            "dir_y":          float(round(v[1], 4)),
-            "dir_z":          float(round(v[2], 4)),
+            "dir_x":          float(round(v_pass2[0], 4)),
+            "dir_y":          float(round(v_pass2[1], 4)),
+            "dir_z":          float(round(v_pass2[2], 4)),
             "radius_units":   float(round(R_final, 4)),
-            "h_min":          float(round(h_min, 4)),
-            "h_max":          float(round(h_max, 4)),
-            "h_target":       float(round(h_target, 4)),
+            "h_min":          float(round(h_min_pass2, 4)),
+            "h_max":          float(round(h_max_pass2, 4)),
+            "h_target":       float(round(h_target_pass2, 4)),
             "scale_factor":   scale,
             "slice_points_3d": [[float(round(p[0], 4)), float(round(p[1], 4)), float(round(p[2], 4))] for p in slice_points_all],
         }
     }
-
 
 def extract_dbh_with_manual_override(ply_path: str, cx: float, cy: float, cz: float, radius: float,
                                      scale_factor: float = 1.0, breast_height: float = 1.3) -> dict:
