@@ -92,9 +92,9 @@ def parse_ply_points(ply_path):
 
         return points
 
-def fit_circle_2d(points_2d):
+def fit_circle_2d(points_2d, outlier_threshold_ratio=0.15):
     if len(points_2d) < 3:
-        return None, None, None, "Too few points (< 3) for circle fitting"
+        return None, None, None, None, "Too few points (< 3) for circle fitting"
         
     x = points_2d[:, 0]
     y = points_2d[:, 1]
@@ -109,10 +109,18 @@ def fit_circle_2d(points_2d):
         yc = B / 2.0
         R_sq = C + xc**2 + yc**2
         if R_sq < 0:
-            return None, None, None, "Invalid negative radius squared"
-        return xc, yc, np.sqrt(R_sq), None
+            return None, None, None, None, "Invalid negative radius squared"
+        R = np.sqrt(R_sq)
+        
+        # Calculate inlier mask
+        dists = np.sqrt((x - xc)**2 + (y - yc)**2)
+        radial_errors = np.abs(dists - R)
+        thresh = max(0.01, outlier_threshold_ratio * R)
+        inlier_mask = radial_errors < thresh
+        
+        return xc, yc, R, inlier_mask, None
     except Exception as e:
-        return None, None, None, f"Least squares solver error: {e}"
+        return None, None, None, None, f"Least squares solver error: {e}"
 
 def fit_circle_robust(points_2d, max_iters=5, outlier_threshold_ratio=0.15):
     inliers = points_2d
@@ -120,7 +128,7 @@ def fit_circle_robust(points_2d, max_iters=5, outlier_threshold_ratio=0.15):
     for i in range(max_iters):
         if len(inliers) < 3:
             break
-        xc, yc, R, err = fit_circle_2d(inliers)
+        xc, yc, R, _, err = fit_circle_2d(inliers, outlier_threshold_ratio)
         if err is not None:
             break
         dists = np.sqrt((inliers[:, 0] - xc)**2 + (inliers[:, 1] - yc)**2)
@@ -133,10 +141,13 @@ def fit_circle_robust(points_2d, max_iters=5, outlier_threshold_ratio=0.15):
         inliers = inliers[mask]
         
     if R is not None:
-        dists = np.sqrt((inliers[:, 0] - xc)**2 + (inliers[:, 1] - yc)**2)
-        mean_err = np.mean(np.abs(dists - R))
-        return xc, yc, R, mean_err
-    return None, None, None, None
+        dists = np.sqrt((points_2d[:, 0] - xc)**2 + (points_2d[:, 1] - yc)**2)
+        radial_errors = np.abs(dists - R)
+        thresh = max(0.01, outlier_threshold_ratio * R)
+        inlier_mask = radial_errors < thresh
+        mean_err = np.mean(radial_errors[inlier_mask]) if np.sum(inlier_mask) > 0 else 0.0
+        return xc, yc, R, mean_err, inlier_mask
+    return None, None, None, None, None
 
 def extract_dbh(ply_path, scale_factor=1.0, vertical_axis='z', breast_height=1.3, tolerance=0.05):
     scale = load_scale_factor(scale_factor)
@@ -163,7 +174,7 @@ def extract_dbh(ply_path, scale_factor=1.0, vertical_axis='z', breast_height=1.3
     if len(points_2d) < 10:
         return {"error": "Too few points in slice"}
         
-    xc, yc, R, mean_err = fit_circle_robust(points_2d)
+    xc, yc, R, mean_err, _ = fit_circle_robust(points_2d)
     if R is None:
         return {"error": "Circle fitting failed"}
         
@@ -303,7 +314,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
         if len(pts_slice) < 5:
             continue
         pts_2d = np.column_stack((np.dot(pts_slice, u1_pass1), np.dot(pts_slice, u2_pass1)))
-        xc, yc, R, _ = fit_circle_2d(pts_2d)
+        xc, yc, R, _, _ = fit_circle_2d(pts_2d)
         if R is not None and R > 0 and R < CROP_RADIUS * 1.5:
             radii_pass1.append(R)
             centers_2d_pass1.append((xc, yc))
@@ -313,7 +324,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
         pts_trunk = coarse_trunk_points[mask]
         if len(pts_trunk) >= 5:
             pts_2d = np.column_stack((np.dot(pts_trunk, u1_pass1), np.dot(pts_trunk, u2_pass1)))
-            xc, yc, R, _ = fit_circle_robust(pts_2d)
+            xc, yc, R, _, _ = fit_circle_robust(pts_2d)
             if R is None or R > CROP_RADIUS * 2.0:
                 R = 0.15 / scale
                 xc, yc = 0.0, 0.0
@@ -406,11 +417,11 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
         if len(pts_slice) < 5:
             continue
         pts_2d = np.column_stack((np.dot(pts_slice, u1_pass2), np.dot(pts_slice, u2_pass2)))
-        xc, yc, R, _ = fit_circle_2d(pts_2d)
+        xc, yc, R, inlier_mask, err = fit_circle_2d(pts_2d)
         if R is not None and R > 0 and R < fine_crop_radius * 1.5:
             radii_pass2.append(R)
             centers_2d_pass2.append((xc, yc))
-            slice_points_list_pass2.append(pts_slice)
+            slice_points_list_pass2.append(pts_slice[inlier_mask])
 
     method_used = "MASt3R aligned multi-slice median (refined)"
     if not radii_pass2:
@@ -420,14 +431,16 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
         if len(pts_trunk) < 5:
             return {"error": "No points in aligned trunk region after refined crop"}
         pts_2d = np.column_stack((np.dot(pts_trunk, u1_pass2), np.dot(pts_trunk, u2_pass2)))
-        xc, yc, R, _ = fit_circle_robust(pts_2d)
+        xc, yc, R, _, inlier_mask = fit_circle_robust(pts_2d)
         if R is None or R > fine_crop_radius * 2.0:
             R = R_pass1
             xc, yc = 0.0, 0.0
-        radii_pass2 = [R]
-        centers_2d_pass2 = [(xc, yc)]
-        method_used = "MASt3R aligned refined fallback"
-        slice_points_all = pts_trunk
+            slice_points_all = pts_trunk
+        else:
+            radii_pass2 = [R]
+            centers_2d_pass2 = [(xc, yc)]
+            method_used = "MASt3R aligned refined fallback"
+            slice_points_all = pts_trunk[inlier_mask]
     else:
         slice_points_all = np.concatenate(slice_points_list_pass2, axis=0)
 
@@ -458,7 +471,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     mean_err_cm = 0.0
     if slice_count >= 5:
         pts_2d = np.column_stack((np.dot(slice_points_all, u1_pass2), np.dot(slice_points_all, u2_pass2)))
-        _, _, _, mean_err = fit_circle_robust(pts_2d)
+        _, _, _, mean_err, _ = fit_circle_robust(pts_2d)
         if mean_err is not None:
             mean_err_cm = float(round(mean_err * scale * 100, 2))
 
@@ -575,24 +588,26 @@ def extract_dbh_with_manual_override(ply_path: str, cx: float, cy: float, cz: fl
         if len(pts_slice) < 4:
             continue
         pts_2d = np.column_stack((np.dot(pts_slice, u1), np.dot(pts_slice, u2)))
-        xc_slice, yc_slice, R, err = fit_circle_2d(pts_2d)
+        xc_slice, yc_slice, R, inlier_mask, err = fit_circle_2d(pts_2d)
         if R is not None and R > 0 and R < radius * 1.5:
             radii.append(R)
             centers_2d.append((xc_slice, yc_slice))
-            slice_points_list.append(pts_slice)
+            slice_points_list.append(pts_slice[inlier_mask])
 
     method_used = "Manual override trunk select"
     if not radii:
         logger.warning("[MANUAL DBH] Aligned slice failed, using fallback on selected trunk points...")
         pts_2d = np.column_stack((np.dot(trunk_points, u1), np.dot(trunk_points, u2)))
-        xc_slice, yc_slice, R, _ = fit_circle_robust(pts_2d)
+        xc_slice, yc_slice, R, _, inlier_mask = fit_circle_robust(pts_2d)
         if R is None or R > radius * 2.0:
             R = radius
             xc_slice, yc_slice = 0.0, 0.0
-        radii = [R]
-        centers_2d = [(xc_slice, yc_slice)]
-        slice_points_all = trunk_points
-        method_used = "Manual override fallback"
+            slice_points_all = trunk_points
+        else:
+            radii = [R]
+            centers_2d = [(xc_slice, yc_slice)]
+            slice_points_all = trunk_points[inlier_mask]
+            method_used = "Manual override fallback"
     else:
         slice_points_all = np.concatenate(slice_points_list, axis=0)
 
@@ -721,24 +736,26 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
         if len(pts_slice) < 4:
             continue
         pts_2d = np.column_stack((np.dot(pts_slice, u1), np.dot(pts_slice, u2)))
-        xc_slice, yc_slice, R, err = fit_circle_2d(pts_2d)
+        xc_slice, yc_slice, R, inlier_mask, err = fit_circle_2d(pts_2d)
         if R is not None and R > 0 and R < crop_radius * 1.5:
             radii.append(R)
             centers_2d.append((xc_slice, yc_slice))
-            slice_points_list.append(pts_slice)
+            slice_points_list.append(pts_slice[inlier_mask])
 
     method_used = "Manual override 2D clicks"
     if not radii:
         logger.warning("[MANUAL DBH] Aligned slice failed, using fallback on selected cylinder points...")
         pts_2d = np.column_stack((np.dot(trunk_points, u1), np.dot(trunk_points, u2)))
-        xc_slice, yc_slice, R, _ = fit_circle_robust(pts_2d)
+        xc_slice, yc_slice, R, _, inlier_mask = fit_circle_robust(pts_2d)
         if R is None or R > crop_radius * 2.0:
             R = crop_radius / 2
             xc_slice, yc_slice = 0.0, 0.0
-        radii = [R]
-        centers_2d = [(xc_slice, yc_slice)]
-        slice_points_all = trunk_points
-        method_used = "Manual override 2D fallback"
+            slice_points_all = trunk_points
+        else:
+            radii = [R]
+            centers_2d = [(xc_slice, yc_slice)]
+            slice_points_all = trunk_points[inlier_mask]
+            method_used = "Manual override 2D fallback"
     else:
         slice_points_all = np.concatenate(slice_points_list, axis=0)
 
