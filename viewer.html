@@ -915,6 +915,7 @@
 
         import * as THREE from 'three';
         import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+        import { TransformControls } from 'three/addons/controls/TransformControls.js';
         import * as GaussianSplats3D from 'gaussian-splats-3d';
 
         let currentRenderMode = 'hybrid'; // splat | laser | hybrid
@@ -923,6 +924,20 @@
         let viewer = null;
         let currentSpeed = 0.05;
         let cameraOriented = false;
+
+        // Globals for TransformControls and cylinder manual adjustment
+        let transformControls = null;
+        let cadGeomGroup = null;
+        let currentScanId = null;
+        let currentTreeCode = null;
+
+        let radius = 0.1;
+        let actualHeight = 1.0;
+        let actualHMin = -0.5;
+        let actualHMax = 0.5;
+        let actualHTarget = 0;
+        let dir_3d = new THREE.Vector3(0, 1, 0);
+        let center_cyl = new THREE.Vector3(0, 0, 0);
 
         // Update UI info
         document.getElementById('path-val').textContent = SPLAT_PATH;
@@ -981,6 +996,20 @@
 
                 // Start the render loop FIRST so viewer.controls is initialized
                 viewer.start();
+
+                // Initialize TransformControls
+                if (viewer.camera && viewer.renderer) {
+                    transformControls = new TransformControls(viewer.camera, viewer.renderer.domElement);
+                    transformControls.addEventListener('change', () => {
+                        // triggers redraw
+                    });
+                    transformControls.addEventListener('dragging-changed', (event) => {
+                        if (viewer.controls) {
+                            viewer.controls.enabled = !event.value;
+                        }
+                    });
+                    viewer.threeScene.add(transformControls);
+                }
 
                 // Show orientation & render controls now that the scene is loaded
                 document.getElementById('rot-toggle').classList.add('visible');
@@ -1084,12 +1113,15 @@
                     }
 
                     let dx = 0, dy = 0, dz = 0;
-                    if (activeKeys['KeyW']) dz -= 1;
-                    if (activeKeys['KeyS']) dz += 1;
-                    if (activeKeys['KeyA']) dx -= 1;
-                    if (activeKeys['KeyD']) dx += 1;
-                    if (activeKeys['KeyQ']) dy -= 1;
-                    if (activeKeys['KeyE']) dy += 1;
+                    const isEditing = transformControls && transformControls.object;
+                    if (!isEditing) {
+                        if (activeKeys['KeyW']) dz -= 1;
+                        if (activeKeys['KeyS']) dz += 1;
+                        if (activeKeys['KeyA']) dx -= 1;
+                        if (activeKeys['KeyD']) dx += 1;
+                        if (activeKeys['KeyQ']) dy -= 1;
+                        if (activeKeys['KeyE']) dy += 1;
+                    }
 
                     if (dx !== 0 || dy !== 0 || dz !== 0) {
                         const boost = (activeKeys['ShiftLeft'] || activeKeys['ShiftRight']) ? 3.0 : 1.0;
@@ -1216,16 +1248,15 @@
                         const cadGroup = new THREE.Group();
                         cadGroup.name = 'cad_measurement_overlay';
 
-                        // Group specifically for geometric CAD lines
-                        const cadGeomGroup = new THREE.Group();
-                        cadGeomGroup.name = 'cad_geometry';
-                        cadGroup.add(cadGeomGroup);
+                        // Store current scan ID and tree code globally
+                        currentScanId = metrics.id;
+                        currentTreeCode = metrics.tree_code || treeCode;
 
-                        const radius = g3d.radius_units || 0.2;
-                        const hMin = g3d.h_min !== undefined ? g3d.h_min : -1;
-                        const hMax = g3d.h_max !== undefined ? g3d.h_max : 1;
-                        const hTarget = g3d.h_target !== undefined ? g3d.h_target : 0;
-                        const height = Math.abs(hMax - hMin);
+                        radius = g3d.radius_units || 0.2;
+                        actualHMin = g3d.h_min !== undefined ? g3d.h_min : -1;
+                        actualHMax = g3d.h_max !== undefined ? g3d.h_max : 1;
+                        actualHTarget = g3d.h_target !== undefined ? g3d.h_target : 0;
+                        actualHeight = Math.abs(actualHMax - actualHMin);
 
                         // Parse 3D coordinates & direction vector from RANSAC/PCA
                         const cx = g3d.center_x || 0;
@@ -1235,8 +1266,9 @@
                         const dy = g3d.dir_y !== undefined ? g3d.dir_y : 0;
                         const dz = g3d.dir_z !== undefined ? g3d.dir_z : 1;
 
-                        let center_3d = new THREE.Vector3(cx, cy, cz);
-                        let dir_3d = new THREE.Vector3(dx, dy, dz).normalize();
+                        center_cyl = new THREE.Vector3(cx, cy, cz);
+                        let center_3d = center_cyl;
+                        dir_3d = new THREE.Vector3(dx, dy, dz).normalize();
 
                         // Recalculate center/direction from slice_points_3d if available (per user instruction)
                         if (g3d.slice_points_3d && g3d.slice_points_3d.length >= 2) {
@@ -1293,9 +1325,9 @@
                                     b_vec.multiplyScalar(-1);
                                 }
 
-                                center_3d = centroid;
-                                dir_3d = b_vec;
-                                console.log('Successfully recalculated CAD center and direction from slice_points_3d PCA:', center_3d, dir_3d);
+                                center_cyl.copy(centroid);
+                                dir_3d.copy(b_vec);
+                                console.log('Successfully recalculated CAD center and direction from slice_points_3d PCA:', center_cyl, dir_3d);
                             } catch (pcaErr) {
                                 console.warn('Failed to compute PCA direction from slice_points_3d:', pcaErr);
                             }
@@ -1316,18 +1348,18 @@
 
                                 const fov = window.viewer.camera ? window.viewer.camera.fov : 50;
                                 const fovRad = (fov * Math.PI) / 180;
-                                const h_m = metrics.height_m || height;
+                                const h_m = metrics.height_m || actualHeight;
                                 const distance = (h_m / 2) / Math.tan(fovRad / 2) * 1.2;
 
-                                const camPos = center_3d.clone().addScaledVector(sideDir, distance);
+                                const camPos = center_cyl.clone().addScaledVector(sideDir, distance);
                                 window.viewer.camera.position.copy(camPos);
                                 if (window.viewer.controls) {
-                                    window.viewer.controls.target.copy(center_3d);
+                                    window.viewer.controls.target.copy(center_cyl);
                                     window.viewer.controls.update();
                                 } else {
-                                    window.viewer.camera.lookAt(center_3d);
+                                    window.viewer.camera.lookAt(center_cyl);
                                 }
-                                console.log('Auto-fit camera perpendicular to trunk:', camPos, '→ look at', center_3d);
+                                console.log('Auto-fit camera perpendicular to trunk:', camPos, '→ look at', center_cyl);
                                 
                                 currentSpeed = Math.max(0.005, h_m / 100);
                                 const speedIndicator = document.getElementById('speed-indicator');
@@ -1341,10 +1373,7 @@
                         }
 
                         // Project slice_points_3d points onto dir_3d to find their actual range relative to center_3d
-                        let actualHMin = hMin;
-                        let actualHMax = hMax;
-                        let actualHTarget = hTarget;
-                        let actualHeight = height;
+                        // (actualHMin, actualHMax, actualHTarget, actualHeight are already declared and initialized)
 
                         if (g3d.slice_points_3d && g3d.slice_points_3d.length > 0) {
                             let minProj = Infinity;
@@ -1366,13 +1395,20 @@
                         // Calculate base, top, and center coordinates of trunk cylinder
                         const base_3d = center_3d.clone().addScaledVector(dir_3d, actualHMin - actualHTarget);
                         const top_3d = center_3d.clone().addScaledVector(dir_3d, actualHMax - actualHTarget);
-                        const center_cyl = base_3d.clone().add(top_3d).multiplyScalar(0.5);
+                        const center_geom = base_3d.clone().add(top_3d).multiplyScalar(0.5);
 
-                        // Calculate quaternion rotation to align with trunk direction
-                        const up = new THREE.Vector3(0, 1, 0); // cylinder defaults upright along Y
+                        // Calculate quaternion rotation to align local Y with dir_3d
+                        const up = new THREE.Vector3(0, 1, 0);
                         const qAlign = new THREE.Quaternion().setFromUnitVectors(up, dir_3d);
 
-                        // 1. Trunk Wireframe Cylinder
+                        // Initialize cadGeomGroup centered at center_geom and rotated along dir_3d
+                        cadGeomGroup = new THREE.Group();
+                        cadGeomGroup.name = 'cad_geometry';
+                        cadGeomGroup.position.copy(center_geom);
+                        cadGeomGroup.quaternion.copy(qAlign);
+                        cadGroup.add(cadGeomGroup);
+
+                        // 1. Trunk Wireframe Cylinder (local Y coordinates)
                         const cylGeo = new THREE.CylinderGeometry(radius, radius, actualHeight, 16, 8, true);
                         const cylMat = new THREE.MeshBasicMaterial({
                             color: 0x06b6d4, // cyan
@@ -1381,27 +1417,33 @@
                             opacity: 0.55
                         });
                         const cylinder = new THREE.Mesh(cylGeo, cylMat);
-                        cylinder.quaternion.copy(qAlign);
-                        cylinder.position.copy(center_cyl);
+                        cylinder.position.set(0, 0, 0);
                         cadGeomGroup.add(cylinder);
 
-                        // 2. Glowing DBH Measurement Ring at 1.3m (breast height)
+                        // 2. Glowing DBH Measurement Ring
                         const ringGeo = new THREE.TorusGeometry(radius * 1.05, radius * 0.04, 16, 32);
                         const ringMat = new THREE.MeshBasicMaterial({
                             color: 0x10b981, // emerald green
                             wireframe: true
                         });
                         const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-                        
-                        // Align torus plane to be perpendicular to the cylinder direction vector
-                        ringMesh.quaternion.copy(qAlign);
                         const qTorus = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
-                        ringMesh.quaternion.multiply(qTorus);
-                        ringMesh.position.copy(center_3d);
+                        ringMesh.quaternion.copy(qTorus);
+                        
+                        // Ring height relative to center_geom along the local Y axis
+                        let ringY = 0 - (actualHMin + actualHMax)/2 + actualHTarget;
+                        const topY = actualHeight / 2;
+                        if (ringY > topY) {
+                            ringY = topY - 0.02;
+                        }
+                        ringMesh.position.set(0, ringY, 0);
                         cadGeomGroup.add(ringMesh);
 
-                        // 3. Vertical Height Axis Line
-                        const points = [base_3d, top_3d];
+                        // 3. Vertical Height Axis Line (along local Y)
+                        const points = [
+                            new THREE.Vector3(0, -actualHeight/2, 0),
+                            new THREE.Vector3(0, actualHeight/2, 0)
+                        ];
                         const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
                         const lineMat = new THREE.LineDashedMaterial({
                             color: 0x38bdf8,
@@ -1578,10 +1620,132 @@
             }, 6000);
         }
 
+        window.setTransformMode = function(mode) {
+            if (transformControls) {
+                transformControls.setMode(mode);
+                // Update button active styles
+                document.querySelectorAll('.transform-btn').forEach(btn => {
+                    btn.style.background = 'rgba(255,255,255,0.1)';
+                });
+                const activeBtn = document.getElementById('btn-' + mode);
+                if (activeBtn) {
+                    activeBtn.style.background = '#0284c7';
+                }
+            }
+        };
+
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'w' || e.key === 'W') setTransformMode('translate');
+            if (e.key === 'e' || e.key === 'E') setTransformMode('rotate');
+            if (e.key === 'r' || e.key === 'R') setTransformMode('scale');
+        });
+
+        window.saveManualAdjustment = async function() {
+            if (!cadGeomGroup || currentScanId === null) return;
+            
+            const btn = document.getElementById('btn-save-adjust');
+            const originalText = btn ? btn.textContent : 'Saving...';
+            if (btn) {
+                btn.textContent = 'Saving...';
+                btn.style.background = '#059669';
+                btn.disabled = true;
+            }
+
+            try {
+                // 1. Extract scale and coordinates from cadGeomGroup
+                const scl = cadGeomGroup.scale;
+                const pos = cadGeomGroup.position;
+                const rot = cadGeomGroup.quaternion;
+
+                const new_radius = radius * scl.x;
+                const new_height = actualHeight * scl.y;
+
+                // Center is absolute position in cadGroup space
+                const new_center = pos.clone();
+
+                // Direction is the local Y axis rotated by cadGeomGroup.quaternion
+                const new_dir = new THREE.Vector3(0, 1, 0).applyQuaternion(rot).normalize();
+
+                // Compute h_min and h_max centered around the group position
+                const new_h_min = -new_height / 2;
+                const new_h_max = new_height / 2;
+                const new_h_target = 0;
+
+                const payload = {
+                    center_x: new_center.x,
+                    center_y: new_center.y,
+                    center_z: new_center.z,
+                    dir_x: new_dir.x,
+                    dir_y: new_dir.y,
+                    dir_z: new_dir.z,
+                    radius_units: new_radius,
+                    h_min: new_h_min,
+                    h_max: new_h_max,
+                    h_target: new_h_target
+                };
+
+                console.log("[MANUAL ADJUST] Saving manual alignment payload:", payload);
+
+                const response = await fetch(`/scan/${currentScanId}/adjust-geometry`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+                if (!response.ok || !result.success) {
+                    throw new Error(result.detail || 'Failed to save coordinates to database');
+                }
+
+                showToast('Trunk cylinder alignment saved successfully!', 'success');
+                if (transformControls) {
+                    transformControls.detach();
+                }
+                
+                // Notify parent page to reload metrics in UI
+                try {
+                    window.parent.postMessage({ type: 'vora_metrics_updated', tree_code: currentTreeCode }, '*');
+                } catch (msgErr) {
+                    console.warn("Failed to post vora_metrics_updated message to parent:", msgErr);
+                }
+
+            } catch (err) {
+                console.error("[MANUAL ADJUST ERROR]", err);
+                showToast('Failed to save: ' + err.message, 'error');
+            } finally {
+                if (btn) {
+                    btn.textContent = originalText;
+                    btn.style.background = '#10b981';
+                    btn.disabled = false;
+                }
+            }
+        };
+
         window.addEventListener('message', (event) => {
-            if (event.data && event.data.type === 'vora_metrics_updated') {
+            if (!event.data) return;
+            
+            if (event.data.type === 'vora_metrics_updated') {
                 console.log("[VIEWER] Received metrics updated message, refreshing carbon overlay...");
+                if (transformControls) transformControls.detach();
                 fetchAndDisplayCarbon(SPLAT_PATH);
+            }
+            else if (event.data.type === 'start_3d_edit') {
+                console.log("[VIEWER] Starting 3D manual alignment mode...");
+                if (transformControls && cadGeomGroup) {
+                    transformControls.attach(cadGeomGroup);
+                    transformControls.setMode('translate');
+                    showToast('3D Adjustment Mode Active:\n• Drag arrows to translate\n• Hotkeys: W (Translate) | E (Rotate) | R (Scale)', 'info');
+                }
+            }
+            else if (event.data.type === 'save_3d_edit') {
+                console.log("[VIEWER] Saving 3D manual alignment...");
+                saveManualAdjustment();
+            }
+            else if (event.data.type === 'cancel_3d_edit') {
+                console.log("[VIEWER] Cancelling 3D manual alignment...");
+                if (transformControls) transformControls.detach();
+                showToast('Adjustment cancelled.', 'info');
+                fetchAndDisplayCarbon(SPLAT_PATH); // Reloads original DB coordinates
             }
         });
     </script>

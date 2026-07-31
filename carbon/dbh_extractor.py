@@ -437,10 +437,10 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
             xc, yc = 0.0, 0.0
             slice_points_all = pts_trunk
         else:
-            radii_pass2 = [R]
-            centers_2d_pass2 = [(xc, yc)]
-            method_used = "MASt3R aligned refined fallback"
             slice_points_all = pts_trunk[inlier_mask]
+        radii_pass2 = [R]
+        centers_2d_pass2 = [(xc, yc)]
+        method_used = "MASt3R aligned refined fallback"
     else:
         slice_points_all = np.concatenate(slice_points_list_pass2, axis=0)
 
@@ -500,6 +500,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
             "h_max":          float(round(h_max_pass2, 4)),
             "h_target":       float(round(h_target_pass2, 4)),
             "scale_factor":   scale,
+            "method":         method_used,
             "slice_points_3d": [[float(round(p[0], 4)), float(round(p[1], 4)), float(round(p[2], 4))] for p in slice_points_all],
         }
     }
@@ -604,10 +605,10 @@ def extract_dbh_with_manual_override(ply_path: str, cx: float, cy: float, cz: fl
             xc_slice, yc_slice = 0.0, 0.0
             slice_points_all = trunk_points
         else:
-            radii = [R]
-            centers_2d = [(xc_slice, yc_slice)]
             slice_points_all = trunk_points[inlier_mask]
-            method_used = "Manual override fallback"
+        radii = [R]
+        centers_2d = [(xc_slice, yc_slice)]
+        method_used = "Manual override fallback"
     else:
         slice_points_all = np.concatenate(slice_points_list, axis=0)
 
@@ -656,6 +657,7 @@ def extract_dbh_with_manual_override(ply_path: str, cx: float, cy: float, cz: fl
             "h_max":          float(round(h_max, 4)),
             "h_target":       float(round(h_target, 4)),
             "scale_factor":   scale,
+            "method":         method_used,
             "slice_points_3d": [[float(round(p[0], 4)), float(round(p[1], 4)), float(round(p[2], 4))] for p in slice_points_all],
         }
     }
@@ -752,10 +754,10 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
             xc_slice, yc_slice = 0.0, 0.0
             slice_points_all = trunk_points
         else:
-            radii = [R]
-            centers_2d = [(xc_slice, yc_slice)]
             slice_points_all = trunk_points[inlier_mask]
-            method_used = "Manual override 2D fallback"
+        radii = [R]
+        centers_2d = [(xc_slice, yc_slice)]
+        method_used = "Manual override 2D fallback"
     else:
         slice_points_all = np.concatenate(slice_points_list, axis=0)
 
@@ -804,6 +806,7 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
             "h_max":          float(round(h_max, 4)),
             "h_target":       float(round(h_target, 4)),
             "scale_factor":   scale,
+            "method":         method_used,
             "slice_points_3d": [[float(round(p[0], 4)), float(round(p[1], 4)), float(round(p[2], 4))] for p in slice_points_all],
         }
     }

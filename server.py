@@ -222,7 +222,7 @@ def filter_points3d_ply(ply_path: str) -> None:
         peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
 
         dist_sq = (h1 - peak_h1)**2 + (h2 - peak_h2)**2
-        CROP_RADIUS = 0.45
+        CROP_RADIUS = 1.0
         crop_mask = dist_sq <= CROP_RADIUS**2
         
         # If crop yields too few points, fallback to all points
@@ -732,8 +732,17 @@ def _reconstruct_thread(
                 u1_crop, v1_crop = map_pixel_to_cropped(p1[0], p1[1], width, height, W_crop, H_crop)
                 u2_crop, v2_crop = map_pixel_to_cropped(p2[0], p2[1], width, height, W_crop, H_crop)
                 
-                P1_3d = get_robust_3d_point(pointmap, u1_crop, v1_crop).tolist()
-                P2_3d = get_robust_3d_point(pointmap, u2_crop, v2_crop).tolist()
+                P1_np = get_robust_3d_point(pointmap, u1_crop, v1_crop)
+                P2_np = get_robust_3d_point(pointmap, u2_crop, v2_crop)
+                
+                # Hybrid depth constraint: clamp depth only if deviation is > 30cm (background hit)
+                z_diff = P2_np[2] - P1_np[2]
+                if abs(z_diff) > 0.30:
+                    print(f"[RECONSTRUCT] Z-depth deviation ({abs(z_diff):.3f}m) > 0.3m. Background hit detected. Clamping Z2 to Z1.")
+                    P2_np[2] = P1_np[2]
+                    
+                P1_3d = P1_np.tolist()
+                P2_3d = P2_np.tolist()
                 print(f"[RECONSTRUCT] Coordinate mapping successful: P1_3d={P1_3d}, P2_3d={P2_3d}")
             except Exception as map_err:
                 print(f"[RECONSTRUCT ERROR] Failed to map pixel coordinates to 3D: {map_err}")
@@ -1399,7 +1408,7 @@ def map_pixel_to_cropped(u_org, v_org, W1, H1, W_crop, H_crop, size=512):
     return u_crop, v_crop
 
 
-def get_robust_3d_point(pointmap, u, v, window=5):
+def get_robust_3d_point(pointmap, u, v, window=15):
     H, W, _ = pointmap.shape
     points = []
     for du in range(-window//2, window//2 + 1):
@@ -1409,9 +1418,39 @@ def get_robust_3d_point(pointmap, u, v, window=5):
                 pt = pointmap[nv, nu]
                 if not np.all(pt == 0) and not np.any(np.isnan(pt)):
                     points.append(pt)
+                    
+    if len(points) == 0:
+        # Spiral search fallback
+        for r in range(1, 51):
+            found = False
+            for du in range(-r, r + 1):
+                for dv in [-r, r]:
+                    nu, nv = u + du, v + dv
+                    if 0 <= nu < W and 0 <= nv < H:
+                        pt = pointmap[nv, nu]
+                        if not np.all(pt == 0) and not np.any(np.isnan(pt)):
+                            points.append(pt)
+                            found = True
+            for dv in range(-r + 1, r):
+                for du in [-r, r]:
+                    nu, nv = u + du, v + dv
+                    if 0 <= nu < W and 0 <= nv < H:
+                        pt = pointmap[nv, nu]
+                        if not np.all(pt == 0) and not np.any(np.isnan(pt)):
+                            points.append(pt)
+                            found = True
+            if found:
+                break
+                
     if len(points) == 0:
         return pointmap[v, u]
-    return np.median(points, axis=0)
+        
+    # Sort by depth (Z axis is index 2)
+    # The tree trunk is the foreground, so it has smaller Z values.
+    # Take the average of the closest 30% of points.
+    points = sorted(points, key=lambda p: p[2])
+    n_keep = max(1, int(len(points) * 0.3))
+    return np.mean(points[:n_keep], axis=0)
 
 
 @app.patch("/scan/{scan_id}/recalculate", summary="Recalculate DBH and carbon using 2D clicked coordinates mapped to MASt3R pointmap")
@@ -1482,22 +1521,93 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                 detail=f"Failed to download dense pointmap: {npy_err}"
             )
 
-        # 5. Download points3d.ply from R2
-        print(f"[RECALCULATE] Downloading points3d.ply from {points3d_url}")
+        # 5. Regenerate points3d.ply from points3D_all.npy using the updated CROP_RADIUS
+        print(f"[RECALCULATE] Regenerating points3d.ply from {local_npy_path}")
         try:
-            res_ply = requests.get(points3d_url, timeout=30)
-            if res_ply.status_code != 200:
+            # Load and reshape
+            pts3d = np.load(local_npy_path)
+            N, H_crop, W_crop, _ = pts3d.shape
+            xyz = pts3d.reshape(-1, 3)
+            
+            # Remove invalid/zero points
+            mask_valid = ~np.all(xyz == 0, axis=1) & ~np.any(np.isnan(xyz), axis=1)
+            xyz = xyz[mask_valid]
+            
+            if len(xyz) >= 30:
+                # Find rough vertical axis
+                ranges = xyz.max(axis=0) - xyz.min(axis=0)
+                rough_axis_idx = int(np.argmax(ranges))
+                proj_axes = [i for i in [0, 1, 2] if i != rough_axis_idx]
+
+                h1 = xyz[:, proj_axes[0]]
+                h2 = xyz[:, proj_axes[1]]
+
+                # Crop horizontally around peak (trunk cluster)
+                hist, xedges, yedges = np.histogram2d(h1, h2, bins=30)
+                max_idx = np.unravel_index(np.argmax(hist), hist.shape)
+                peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
+                peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
+
+                dist_sq = (h1 - peak_h1)**2 + (h2 - peak_h2)**2
+                CROP_RADIUS = 1.0  # Heal crop to full height bounds
+                crop_mask = dist_sq <= CROP_RADIUS**2
+                
+                if np.sum(crop_mask) >= 20:
+                    xyz = xyz[crop_mask]
+                
+                # SOR outlier removal using KDTree
+                if len(xyz) >= 20:
+                    from scipy.spatial import KDTree
+                    tree = KDTree(xyz)
+                    nb_neighbors = 20
+                    std_ratio = 2.0
+                    distances, _ = tree.query(xyz, k=nb_neighbors + 1, workers=-1)
+                    mean_dists = distances[:, 1:].mean(axis=1)
+
+                    global_mean = mean_dists.mean()
+                    global_std  = mean_dists.std()
+                    threshold   = global_mean + std_ratio * global_std
+
+                    inlier_mask = mean_dists <= threshold
+                    xyz = xyz[inlier_mask]
+            
+            # Write to PLY
+            n = len(xyz)
+            with open(local_ply_path, "w") as f:
+                f.write("ply\n")
+                f.write("format ascii 1.0\n")
+                f.write(f"element vertex {n}\n")
+                f.write("property float x\n")
+                f.write("property float y\n")
+                f.write("property float z\n")
+                f.write("end_header\n")
+                for p in xyz:
+                    f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
+            
+            print(f"[RECALCULATE] Successfully regenerated local points3d.ply with {n} points")
+            
+            # Upload the new points3d.ply back to Cloudflare R2
+            from storage.r2_client import upload_splat
+            upload_splat(local_ply_path, tree_code, custom_timestamp=timestamp)
+            print(f"[RECALCULATE] Uploaded regenerated points3d.ply to R2")
+            
+        except Exception as regen_err:
+            print(f"[RECALCULATE] Failed to regenerate points3d.ply: {regen_err}. Falling back to downloading existing PLY.")
+            # Fallback: download the existing points3d.ply from R2
+            try:
+                res_ply = requests.get(points3d_url, timeout=30)
+                if res_ply.status_code != 200:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to download points3d.ply: HTTP {res_ply.status_code}"
+                    )
+                with open(local_ply_path, "wb") as f:
+                    f.write(res_ply.content)
+            except Exception as ply_err:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Failed to download points3d.ply: HTTP {res_ply.status_code}"
+                    detail=f"Failed to download points3d.ply: {ply_err}"
                 )
-            with open(local_ply_path, "wb") as f:
-                f.write(res_ply.content)
-        except Exception as ply_err:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Failed to download points3d.ply: {ply_err}"
-            )
 
         # 6. Load pointmap and perform coordinate mapping
         pts3d = np.load(local_npy_path)
@@ -1510,6 +1620,12 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
 
         P1 = get_robust_3d_point(pointmap, u1_crop, v1_crop)
         P2 = get_robust_3d_point(pointmap, u2_crop, v2_crop)
+        
+        # Hybrid depth constraint: clamp depth only if deviation is > 30cm (background hit)
+        z_diff = P2[2] - P1[2]
+        if abs(z_diff) > 0.30:
+            print(f"[RECALCULATE] Z-depth deviation ({abs(z_diff):.3f}m) > 0.3m. Background hit detected. Clamping Z2 to Z1.")
+            P2[2] = P1[2]
 
         # 7. Perform DBH extraction with 2D clicks
         scale_factor = _load_scale_factor_for_scan(tree_code)
@@ -1640,6 +1756,135 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
 
     except HTTPException as http_exc:
         raise http_exc
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class AdjustGeometryRequest(BaseModel):
+    center_x: float
+    center_y: float
+    center_z: float
+    dir_x: float
+    dir_y: float
+    dir_z: float
+    radius_units: float
+    h_min: float
+    h_max: float
+    h_target: float
+
+@app.patch("/scan/{scan_id}/adjust-geometry", summary="Manually update CAD cylinder geometry and recalculate metrics")
+async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
+    try:
+        from storage.d1_client import execute_d1_query, update_scan_result
+        from carbon.allometric import estimate_carbon
+
+        # 1. Fetch target scan record by scan_id
+        sql = "SELECT * FROM tree_scans WHERE id = ?"
+        scans = execute_d1_query(sql, [scan_id])
+        if not scans:
+            raise HTTPException(status_code=404, detail="Scan record not found")
+        target_scan = scans[0]
+        tree_code = target_scan.get("tree_code")
+        scale_factor = target_scan.get("scale_factor") or 1.0
+
+        # 2. Recalculate metrics based on manual coordinates
+        dbh_m = body.radius_units * 2.0 * scale_factor
+        dbh_cm = dbh_m * 100.0
+        
+        # Height is height span along the trunk axis
+        height_m = (body.h_max - body.h_min) * scale_factor
+
+        # 3. Resolve wood density from scan record
+        wood_density = target_scan.get("wood_density_used") or 0.6
+        wood_density_source = target_scan.get("wood_density_source") or "generic-default"
+
+        # 4. Resolve climate and forest type
+        forest_type = "moist"
+        climate_zone = target_scan.get("climate_zone_detected") or "Unknown"
+        if climate_zone != "Unknown":
+            try:
+                from carbon.climate_zone import classify_koppen_to_forest_type
+                forest_type = classify_koppen_to_forest_type(climate_zone)
+            except Exception as e:
+                print(f"[ADJUST GEOMETRY] Failed to map climate: {e}")
+
+        # 5. Estimate carbon
+        carbon_result = estimate_carbon(
+            dbh_cm=dbh_cm,
+            height_m=height_m,
+            wood_density=wood_density,
+            forest_type=forest_type
+        )
+
+        # 6. Reconstruct updated geometry_3d dictionary
+        geometry_3d = {
+            "center_x":       float(round(body.center_x, 4)),
+            "center_y":       float(round(body.center_y, 4)),
+            "center_z":       float(round(body.center_z, 4)),
+            "dir_x":          float(round(body.dir_x, 4)),
+            "dir_y":          float(round(body.dir_y, 4)),
+            "dir_z":          float(round(body.dir_z, 4)),
+            "radius_units":   float(round(body.radius_units, 4)),
+            "h_min":          float(round(body.h_min, 4)),
+            "h_max":          float(round(body.h_max, 4)),
+            "h_target":       float(round(body.h_target, 4)),
+            "scale_factor":   scale_factor,
+            "method":         "Manual transform controls adjustment"
+        }
+
+        # 7. Preserve existing slice points if available in geometry_3d
+        raw_geom = target_scan.get("geometry_3d")
+        if raw_geom:
+            try:
+                if isinstance(raw_geom, str):
+                    raw_geom = json.loads(raw_geom)
+                if "slice_points_3d" in raw_geom:
+                    geometry_3d["slice_points_3d"] = raw_geom["slice_points_3d"]
+            except Exception:
+                pass
+
+        # 8. Safely parse species_predictions to avoid double serialization in update_scan_result
+        species_preds = target_scan.get("species_predictions")
+        if isinstance(species_preds, str):
+            try:
+                species_preds = json.loads(species_preds)
+            except Exception:
+                pass
+
+        # 9. Update target scan record in Cloudflare D1
+        update_scan_result(
+            scan_id=scan_id,
+            dbh_cm=float(round(dbh_cm, 2)),
+            tinggi_m=float(round(height_m, 2)),
+            biomassa_kg=carbon_result["total_biomass_kg"],
+            karbon_kg=carbon_result["carbon_kg"],
+            co2e_kg=carbon_result["co2e_kg"],
+            confidence_note="Manually adjusted via 3D Transform Controls",
+            geometry_3d=geometry_3d,
+            wood_density_used=wood_density,
+            wood_density_source=wood_density_source,
+            climate_zone_detected=climate_zone,
+            formula_used=carbon_result["formula_used"],
+            agb_kg=carbon_result["above_ground_biomass_kg"],
+            bgb_kg=carbon_result["below_ground_biomass_kg"],
+            gps_lat=target_scan.get("gps_lat"),
+            gps_lon=target_scan.get("gps_lon"),
+            species_predictions=species_preds,
+        )
+        print(f"[ADJUST GEOMETRY] Successfully updated D1 record id {scan_id} for {tree_code} via manual adjustment.")
+
+        return {
+            "success": True,
+            "tree_code": tree_code,
+            "dbh_cm": float(round(dbh_cm, 2)),
+            "height_m": float(round(height_m, 2)),
+            "biomassa_kg": carbon_result["total_biomass_kg"],
+            "karbon_kg": carbon_result["carbon_kg"],
+            "co2e_kg": carbon_result["co2e_kg"]
+        }
+
     except Exception as exc:
         import traceback
         traceback.print_exc()
