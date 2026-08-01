@@ -1262,7 +1262,7 @@ async def manual_override(body: ManualOverrideRequest):
     """
     try:
         import requests
-        from storage.d1_client import execute_d1_query, save_scan_result
+        from storage.d1_client import execute_d1_query, update_scan_result
         # 1. Fetch latest scan record to reuse metadata (e.g. density, climate)
         sql = "SELECT * FROM tree_scans WHERE tree_code = ? ORDER BY scan_date DESC LIMIT 1"
         scans = execute_d1_query(sql, [body.tree_code])
@@ -1346,18 +1346,15 @@ async def manual_override(body: ManualOverrideRequest):
             except Exception:
                 species_preds = None
 
-        save_scan_result(
-            tree_code=body.tree_code,
+        update_scan_result(
+            scan_id=latest_scan["id"],
             dbh_cm=res_override["dbh_cm"],
             tinggi_m=res_override["height_m"],
             biomassa_kg=carbon_result["total_biomass_kg"],
             karbon_kg=carbon_result["carbon_kg"],
             co2e_kg=carbon_result["co2e_kg"],
-            splat_file_url=splat_file_url,
             confidence_note=confidence_note,
-            thumbnail_url=latest_scan.get("thumbnail_url"),
             geometry_3d=res_override["geometry_3d"],
-            species_predictions=species_preds,
             wood_density_used=wood_density,
             wood_density_source=latest_scan.get("wood_density_source") or "generic-default",
             climate_zone_detected=climate_zone,
@@ -1366,6 +1363,7 @@ async def manual_override(body: ManualOverrideRequest):
             bgb_kg=carbon_result["below_ground_biomass_kg"],
             gps_lat=latest_scan.get("gps_lat"),
             gps_lon=latest_scan.get("gps_lon"),
+            species_predictions=species_preds,
         )
         print(f"[OVERRIDE] Successfully updated D1 record for {body.tree_code} via manual override.")
         
