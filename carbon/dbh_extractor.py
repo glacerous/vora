@@ -881,6 +881,14 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     # P1 is the ground, so breast height target is 1.3 meters above P1
     h_target = float(np.dot(P1, v) + breast_height_m / scale)
 
+    # Sanity guard: kalau batang yang terekam terlalu pendek untuk mencapai breast
+    # height (1.3 m), clamp target ke dalam batang yang terlihat. Mirror dari
+    # extract_dbh_from_mast3r (dbh_extractor.py:457-459). Tanpa ini, h_target
+    # tersimpan DI ATAS seluruh point cloud dan viewer 3D menggambar cylinder/ring
+    # di ruang kosong (cylinder melayang jauh di atas batang).
+    if (h_target - h_min) >= total_h * 0.90:
+        h_target = h_min + total_h * 0.30
+
     # 5. Fit circle at slices around h_target
     if abs(v[0]) < 0.9:
         ref = np.array([1.0, 0.0, 0.0])

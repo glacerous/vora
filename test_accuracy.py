@@ -307,6 +307,63 @@ def test_manual_endpoint_height_validation():
           "identik di semua endpoint karena dipakai via helper yang sama.")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX — 2D-clicks h_target clamp (batang terekam terlalu pendek utk breast height)
+# Mirror guard extract_dbh_from_mast3r (dbh_extractor.py:457-459). Sebelum fix,
+# h_target = P1·v + 1.3/scale jatuh DI ATAS seluruh point cloud kalau batang < 1.3 m,
+# sehingga viewer 3D menggambar cylinder/ring di ruang kosong.
+# ─────────────────────────────────────────────────────────────────────────────
+def test_2d_clicks_short_trunk_clamp():
+    print("\n=== FIX: 2D-clicks h_target clamp (short trunk < breast height) ===")
+    from carbon.dbh_extractor import extract_dbh_with_2d_clicks
+    import shutil
+
+    tmp = tempfile.mkdtemp()
+    try:
+        # Case 1: trunk segment hanya 0.4 m (jauh lebih pendek dari breast height 1.3 m)
+        short = _trunk_segment_cloud(radius=0.13, height_m=0.4, scale=1.0, seed=3)
+        short_path = os.path.join(tmp, "short.ply")
+        _write_ascii_ply(short_path, short)
+        r = extract_dbh_with_2d_clicks(
+            short_path, P1=np.array([0.0, 0.0, 0.0]),
+            P2=np.array([0.0, 0.0, 0.4]), scale=1.0)
+        g = r["geometry_3d"]
+        h_min, h_max, h_t = g["h_min"], g["h_max"], g["h_target"]
+        total_h = h_max - h_min
+        check("short trunk -> h_target DI DALAM [h_min,h_max] (tidak melayang di atas)",
+              (h_t >= h_min - 1e-6) and (h_t <= h_max + 1e-6),
+              f"(h_target={h_t:.4f}, h_min={h_min:.4f}, h_max={h_max:.4f})")
+        check("short trunk -> h_target = h_min + 0.30*total_h (clamp aktif)",
+              abs(h_t - (h_min + 0.30 * total_h)) < 1e-6,
+              f"(h_target={h_t:.4f}, expected={h_min + 0.30 * total_h:.4f})")
+        check("short trunk -> clamp condition benar (1.3 m >= 90% total_h)",
+              (1.3 / 1.0) >= total_h * 0.90, f"(1.3 >= {total_h * 0.90:.4f})")
+        check("short trunk -> method pakai slice fit (bukan '2D fallback')",
+              r["method"] == "Manual override 2D clicks", f"({r['method']})")
+        check("short trunk -> DBH slice fit ~ diameter batang",
+              abs(r["dbh_cm"] - (2 * 0.13) * 100.0) < 4.0,
+              f"(dbh_cm={r['dbh_cm']:.2f})")
+
+        # Case 2: trunk cukup tinggi (5 m) -> clamp TIDAK boleh mengubah h_target
+        tall = _trunk_segment_cloud(radius=0.15, height_m=5.0, scale=1.0, seed=4)
+        tall_path = os.path.join(tmp, "tall.ply")
+        _write_ascii_ply(tall_path, tall)
+        r2 = extract_dbh_with_2d_clicks(
+            tall_path, P1=np.array([0.0, 0.0, 0.0]),
+            P2=np.array([0.0, 0.0, 5.0]), scale=1.0)
+        g2 = r2["geometry_3d"]
+        check("tall trunk -> h_target TETAP 1.3 m di atas P1 (tidak di-clamp)",
+              abs(g2["h_target"] - 1.3) < 1e-6,
+              f"(h_target={g2['h_target']:.4f})")
+        check("tall trunk -> h_target tetap di dalam batang",
+              g2["h_target"] >= g2["h_min"] and g2["h_target"] <= g2["h_max"],
+              f"(h_target={g2['h_target']:.4f}, h_min={g2['h_min']:.4f}, h_max={g2['h_max']:.4f})")
+        check("tall trunk -> method slice fit",
+              r2["method"] == "Manual override 2D clicks", f"({r2['method']})")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_no_unguarded_estimate_carbon_calls():
     print("\n=== PRIORITY 2 (lanjutan): audit caller estimate_carbon/carbon ===")
     server_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.py")
@@ -345,6 +402,7 @@ def main():
     test_full_tree_height()
     test_auto_pose_scale()
     test_manual_endpoint_height_validation()
+    test_2d_clicks_short_trunk_clamp()
     test_no_unguarded_estimate_carbon_calls()
     test_server_scale_loading()
 
