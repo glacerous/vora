@@ -1329,10 +1329,11 @@
                         // (all trunk points projected onto v_pass2) — use those directly.
                         console.log('[CAD] Cylinder extents from Python geometry_3d: h_min=' + actualHMin.toFixed(4) + ' h_max=' + actualHMax.toFixed(4) + ' h_target=' + actualHTarget.toFixed(4) + ' height=' + actualHeight.toFixed(4));
 
-                        // Calculate base, top, and center coordinates of trunk cylinder
+                        // Calculate base, top, and center coordinates of trunk cylinder (up to breast height / h_target)
                         const base_3d = center_3d.clone().addScaledVector(dir_3d, actualHMin - actualHTarget);
-                        const top_3d = center_3d.clone().addScaledVector(dir_3d, actualHMax - actualHTarget);
+                        const top_3d = center_3d; // top is exactly the breast height target
                         const center_geom = base_3d.clone().add(top_3d).multiplyScalar(0.5);
+                        actualHeight = Math.abs(actualHTarget - actualHMin);
 
                         // Calculate quaternion rotation to align local Y with dir_3d
                         const up = new THREE.Vector3(0, 1, 0);
@@ -1367,14 +1368,10 @@
                         const qTorus = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
                         ringMesh.quaternion.copy(qTorus);
                         
-                        // Ring height relative to center_geom along the local Y axis
-                        let ringY = 0 - (actualHMin + actualHMax)/2 + actualHTarget;
-                        const topY = actualHeight / 2;
-                        if (ringY > topY) {
-                            ringY = topY - 0.02;
-                        }
+                        // Ring is placed exactly at the top end of the cylinder (breast height / DBH measurement point)
+                        const ringY = actualHeight / 2;
                         ringMesh.position.set(0, ringY, 0);
-                        cadGeomGroup.add(ringMesh);
+                        cylinder.add(ringMesh);
 
                         // 3. Vertical Height Axis Line (along local Y)
                         const points = [
