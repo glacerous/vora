@@ -833,10 +833,10 @@ def _reconstruct_thread(
                 P1_np = get_robust_3d_point(pointmap, u1_crop, v1_crop)
                 P2_np = get_robust_3d_point(pointmap, u2_crop, v2_crop)
                 
-                # Hybrid depth constraint: clamp depth only if deviation is > 30cm (background hit)
+                # Hybrid depth constraint: clamp depth only if deviation is > 1.5m (background hit)
                 z_diff = P2_np[2] - P1_np[2]
-                if abs(z_diff) > 0.30:
-                    print(f"[RECONSTRUCT] Z-depth deviation ({abs(z_diff):.3f}m) > 0.3m. Background hit detected. Clamping Z2 to Z1.")
+                if abs(z_diff) > 1.5:
+                    print(f"[RECONSTRUCT] Z-depth deviation ({abs(z_diff):.3f}m) > 1.5m. Background hit detected. Clamping Z2 to Z1.")
                     P2_np[2] = P1_np[2]
                     
                 P1_3d = P1_np.tolist()
@@ -1776,10 +1776,10 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
         P1 = get_robust_3d_point(pointmap, u1_crop, v1_crop)
         P2 = get_robust_3d_point(pointmap, u2_crop, v2_crop)
         
-        # Hybrid depth constraint: clamp depth only if deviation is > 30cm (background hit)
+        # Hybrid depth constraint: clamp depth only if deviation is > 1.5m (background hit)
         z_diff = P2[2] - P1[2]
-        if abs(z_diff) > 0.30:
-            print(f"[RECALCULATE] Z-depth deviation ({abs(z_diff):.3f}m) > 0.3m. Background hit detected. Clamping Z2 to Z1.")
+        if abs(z_diff) > 1.5:
+            print(f"[RECALCULATE] Z-depth deviation ({abs(z_diff):.3f}m) > 1.5m. Background hit detected. Clamping Z2 to Z1.")
             P2[2] = P1[2]
 
         # 7. Perform DBH extraction with 2D clicks
