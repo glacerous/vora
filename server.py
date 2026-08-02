@@ -103,10 +103,14 @@ import logging as _logging
 
 _calib_logger = _logging.getLogger("calibration")
 
-def _load_scale_factor_for_scan(scan_id: str = None) -> float:
+def _load_scale_factor_for_scan(scan_id: str = None):
     """
-    Looks up scale_factor from calibration.json.
-    Priority: scan_id entry → 'default' entry → hardcoded 1.0 (with WARNING).
+    Looks up scale_factor from calibration.json (scan-id-aware).
+    Returns: (scale_factor, is_calibrated: bool, calibration_source: str).
+
+    Priority: scan_id entry → 'default' entry → uncalibrated 1.0 (explicitly flagged).
+    This function NEVER silently returns an uncalibrated 1.0 as if it were valid —
+    the caller receives is_calibrated=False and must surface that to the user.
     """
     calib_path = os.path.join(BASE_DIR, "calibration.json")
     if os.path.exists(calib_path):
@@ -120,7 +124,7 @@ def _load_scale_factor_for_scan(scan_id: str = None) -> float:
                     f"[CALIBRATION] Loaded scan-specific scale_factor={sf:.8f} "
                     f"for scan_id='{scan_id}' from {calib_path}"
                 )
-                return sf
+                return sf, True, "manual_scan_specific"
             # 2. Fall back to global 'default' entry if present
             if "default" in registry:
                 sf = float(registry["default"]["scale_factor"])
@@ -128,25 +132,25 @@ def _load_scale_factor_for_scan(scan_id: str = None) -> float:
                     f"[CALIBRATION] No scan-specific calibration for '{scan_id}'. "
                     f"Using global 'default' scale_factor={sf:.8f} from {calib_path}"
                 )
-                return sf
+                return sf, True, "manual_default"
             _calib_logger.warning(
                 f"[CALIBRATION] calibration.json exists at {calib_path} but contains "
                 f"no entry for scan_id='{scan_id}' and no 'default' key. "
-                f"Falling back to scale_factor=1.0 — DBH/height values will be UNCALIBRATED."
+                f"Returning UNCALIBRATED scale_factor=1.0."
             )
         except Exception as e:
             _calib_logger.warning(
                 f"[CALIBRATION] Failed to read {calib_path}: {e}. "
-                f"Falling back to scale_factor=1.0 — DBH/height values will be UNCALIBRATED."
+                f"Returning UNCALIBRATED scale_factor=1.0."
             )
     else:
         _calib_logger.warning(
             "[CALIBRATION] ⚠ WARNING: calibration.json NOT FOUND. "
-            "Using scale_factor=1.0 (uncalibrated default). "
+            "Returning UNCALIBRATED scale_factor=1.0. "
             "DBH and height measurements will be in arbitrary PLY units, NOT real-world meters. "
-            "Run calibrate_scale.py to create a calibration file."
+            "Run calibrate_scale.py (or rely on auto-pose calibration) to obtain a real scale."
         )
-    return 1.0
+    return 1.0, False, "uncalibrated"
 
 
 def filter_points3d_ply(ply_path: str) -> None:
@@ -281,11 +285,38 @@ def run_carbon_analysis(
     P2: list[float] = None,
 ) -> dict:
     try:
-        from carbon.allometric import estimate_carbon
-        from carbon.dbh_extractor import extract_dbh, extract_dbh_from_mast3r, extract_dbh_with_2d_clicks
+        from carbon.allometric import estimate_carbon, get_root_to_shoot_ratio
+        from carbon.dbh_extractor import (extract_dbh, extract_dbh_from_mast3r,
+                                          extract_dbh_with_2d_clicks, resolve_height_usage)
 
-        # Load scale_factor from calibration.json (scan-id-aware, with fallback + warnings)
-        scale_factor = _load_scale_factor_for_scan(scan_id)
+        # Load scale_factor from calibration.json (scan-id-aware).
+        # Returns (scale_factor, is_calibrated, calibration_source).
+        scale_factor, is_calibrated, calibration_source = _load_scale_factor_for_scan(scan_id)
+
+        # ── Implicit auto-pose calibration (only when no manual calibration exists) ──
+        # If a full-body person is detected in the frames AND localised inside the
+        # reconstructed point cloud, use that as the scale factor instead of the raw
+        # uncalibrated default. Manual calibration (calibration.json) always wins.
+        auto_calib_note = None
+        if (not is_calibrated) and points3d_path and os.path.exists(points3d_path):
+            try:
+                from carbon.height_calibration import auto_calibrate_scale_from_frames
+                from carbon.dbh_extractor import parse_ply_points
+                frames = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
+                pts_3d = parse_ply_points(points3d_path)
+                auto = auto_calibrate_scale_from_frames(frames, pts_3d)
+                if auto and auto.get("is_calibrated") and auto.get("scale_factor", 0) > 0:
+                    scale_factor = float(auto["scale_factor"])
+                    is_calibrated = True
+                    calibration_source = "auto_pose"
+                    auto_calib_note = f"auto-kalibrasi pose diterapkan: {auto['reason']}"
+                    print(f"[CARBON-AUTOCALIB] {auto_calib_note} scale_factor={scale_factor:.6f}")
+                else:
+                    print(f"[CARBON-AUTOCALIB] Pose auto-calibration did not succeed: {auto}")
+            except Exception as auto_err:
+                print(f"[CARBON-AUTOCALIB ERROR] Auto pose calibration failed: {auto_err}")
+
+        scale_status = "calibrated" if is_calibrated else "uncalibrated"
 
         # ── Primary: extract from MASt3R geometric point cloud ────────────────
         dbh_result = None
@@ -339,12 +370,26 @@ def run_carbon_analysis(
                 "slice_points_count":      0,
                 "mean_fit_error_cm":       0.0,
                 "scale_factor_used":       scale_factor,
-                "calibrated":              scale_factor != 1.0,
+                "calibrated":              is_calibrated,
+                "calibration_source":      calibration_source,
+                "scale_status":            scale_status,
+                "height_used":             "dbh_only_fallback",
+                "total_height_used_m":     None,
+                "segment_height_m":        None,
+                "height_fallback_reason":  "DBH extraction gagal",
+                "height_validated":        False,
+                "height_validation_reason": "DBH extraction gagal",
+                "quality_status":          "failed",
                 "biomass_kg":              None,
                 "above_ground_biomass_kg": None,
                 "below_ground_biomass_kg": None,
                 "carbon_kg":               None,
                 "co2e_kg":                 None,
+                "co2e_low_kg":             None,
+                "co2e_high_kg":            None,
+                "co2e_uncertainty_pct":    None,
+                "root_to_shoot_ratio":     get_root_to_shoot_ratio(forest_type),
+                "root_to_shoot_source":    "IPCC 2006 Tier 1 (Table 4.4)",
                 "wood_density_used":       wood_density,
                 "wood_density_source":     wood_density_source,
                 "climate_zone_detected":   climate_zone,
@@ -353,26 +398,71 @@ def run_carbon_analysis(
                 "geometry_3d":             None,
             }
 
+        # ── Height validity (full-tree vs trunk-segment) ─────────────────────
+        # Only use the height-based Chave formula when there is evidence that the
+        # extracted height represents TOTAL tree height, not just a trunk segment.
+        hinfo = resolve_height_usage(points3d_path, dbh_result.get("height_m"),
+                                      height_input_source="system", scale_factor=scale_factor)
+        height_used = hinfo["height_used"]
+        total_height_used = hinfo["total_height_used_m"]
+        segment_height_m = hinfo["segment_height_m"]
+        height_fallback_reason = hinfo["height_fallback_reason"]
+        height_validated = hinfo["height_validated"]
+        height_validation_reason = hinfo["height_validation_reason"]
+
+        # ── Quality gate on the circle fit ───────────────────────────────────
+        quality_status = "ok"
+        if dbh_result.get("slice_points_count", 0) < 10:
+            quality_status = "low_points"
+        elif dbh_result.get("mean_fit_error_cm", 0.0) > 10.0:
+            quality_status = "high_fit_error"
+
         carbon_result = estimate_carbon(
             dbh_cm=dbh_result["dbh_cm"],
-            height_m=dbh_result["height_m"],
+            height_m=hinfo["height_for_formula"],
             wood_density=wood_density,
             forest_type=forest_type,
         )
+        # Build the confidence note, explicitly flagging uncalibrated scale.
+        confidence_note = dbh_result["confidence_note"]
+        if not is_calibrated:
+            confidence_note += (
+                " | UNKALIBRASI: skala default (PLY unit) dipakai — hasil TIDAK dapat "
+                "diandalkan tanpa kalibrasi skala (auto-pose atau calibrate_scale.py)"
+            )
+        if auto_calib_note:
+            confidence_note += f" | {auto_calib_note}"
+        if height_used == "dbh_only_fallback" and height_fallback_reason:
+            confidence_note += f" | Fallback DBH-only ({height_fallback_reason})"
+
         return {
             "dbh_cm":                  dbh_result["dbh_cm"],
             "height_m":                dbh_result["height_m"],
-            "confidence":              dbh_result["confidence_note"],
+            "confidence":              confidence_note,
             "method":                  dbh_result["method"],
             "slice_points_count":      dbh_result["slice_points_count"],
             "mean_fit_error_cm":       dbh_result["mean_fit_error_cm"],
             "scale_factor_used":       scale_factor,
-            "calibrated":              scale_factor != 1.0,
+            "calibrated":              is_calibrated,
+            "calibration_source":      calibration_source,
+            "scale_status":            scale_status,
+            "height_used":             height_used,
+            "total_height_used_m":     total_height_used,
+            "segment_height_m":        segment_height_m,
+            "height_fallback_reason":  height_fallback_reason,
+            "height_validated":        height_validated,
+            "height_validation_reason": height_validation_reason,
+            "quality_status":          quality_status,
             "biomass_kg":              carbon_result["total_biomass_kg"],
             "above_ground_biomass_kg": carbon_result["above_ground_biomass_kg"],
             "below_ground_biomass_kg": carbon_result["below_ground_biomass_kg"],
             "carbon_kg":               carbon_result["carbon_kg"],
             "co2e_kg":                 carbon_result["co2e_kg"],
+            "co2e_low_kg":             carbon_result["co2e_low_kg"],
+            "co2e_high_kg":            carbon_result["co2e_high_kg"],
+            "co2e_uncertainty_pct":    carbon_result["co2e_uncertainty_pct"],
+            "root_to_shoot_ratio":     carbon_result["root_to_shoot_ratio"],
+            "root_to_shoot_source":    carbon_result["root_to_shoot_source"],
             "wood_density_used":       wood_density,
             "wood_density_source":     wood_density_source,
             "climate_zone_detected":   climate_zone,
@@ -799,9 +889,18 @@ def _reconstruct_thread(
         # 4. Determine Wood Density
         wood_density = 0.6
         wood_density_source = "generic-default"
+        # Species ID confidence threshold. Below this we do NOT trust top-1 for
+        # wood density and fall back to the generic default with an explicit flag
+        # instead of silently using whatever Pl@ntNet returned as top-1.
+        SPECIES_CONFIDENCE_THRESHOLD = 30.0
         if species_preds and len(species_preds) > 0:
             top_pred = species_preds[0]
-            if top_pred.get("confidence", 0.0) > 20.0:
+            top_conf = top_pred.get("confidence", 0.0)
+            if top_conf < SPECIES_CONFIDENCE_THRESHOLD:
+                wood_density_source = "generic-default (spesies tidak pasti)"
+                print(f"[RECONSTRUCT-WD] Top species confidence {top_conf:.1f}% < {SPECIES_CONFIDENCE_THRESHOLD}% — "
+                      f"menggunakan densitas default 0.6 (spesies tidak pasti)")
+            else:
                 sci_name = top_pred.get("scientific_name")
                 try:
                     from carbon.wood_density_lookup import get_wood_density
@@ -895,6 +994,18 @@ def _reconstruct_thread(
                     bgb_kg=carbon_est.get("below_ground_biomass_kg"),
                     gps_lat=gps_lat,
                     gps_lon=gps_lon,
+                    scale_status=carbon_est.get("scale_status"),
+                    scale_factor_used=carbon_est.get("scale_factor_used"),
+                    calibration_source=carbon_est.get("calibration_source"),
+                    height_used=carbon_est.get("height_used"),
+                    total_height_used_m=carbon_est.get("total_height_used_m"),
+                    segment_height_m=carbon_est.get("segment_height_m"),
+                    height_fallback_reason=carbon_est.get("height_fallback_reason"),
+                    quality_status=carbon_est.get("quality_status"),
+                    root_to_shoot_ratio=carbon_est.get("root_to_shoot_ratio"),
+                    co2e_uncertainty_pct=carbon_est.get("co2e_uncertainty_pct"),
+                    co2e_low_kg=carbon_est.get("co2e_low_kg"),
+                    co2e_high_kg=carbon_est.get("co2e_high_kg"),
                 )
                 upd("done", f"✓ Done in {elapsed:.0f}s — {mb:.1f} MB Gaussian Splat ready! (Tree code: {tree_code})")
             except Exception as exc:
@@ -1300,7 +1411,7 @@ async def manual_override(body: ManualOverrideRequest):
 
         # 4. Perform manual override DBH extraction
         from carbon.dbh_extractor import extract_dbh_with_manual_override
-        scale_factor = _load_scale_factor_for_scan(body.tree_code)
+        scale_factor, _is_cal, _src = _load_scale_factor_for_scan(body.tree_code)
         
         res_override = extract_dbh_with_manual_override(
             ply_path=local_ply_path,
@@ -1326,15 +1437,26 @@ async def manual_override(body: ManualOverrideRequest):
             except Exception as e:
                 print(f"[OVERRIDE ERROR] Failed to map climate: {e}")
 
+        # Height here is derived from the point cloud by the extractor (system height),
+        # so it must pass the same is_full_tree_height() validation as the automatic
+        # pipeline; otherwise we force the DBH-only fallback.
+        from carbon.dbh_extractor import resolve_height_usage
+        hinfo = resolve_height_usage(local_ply_path, res_override["height_m"],
+                                      height_input_source="system", scale_factor=scale_factor)
+
         carbon_result = estimate_carbon(
             dbh_cm=res_override["dbh_cm"],
-            height_m=res_override["height_m"],
+            height_m=hinfo["height_for_formula"],
             wood_density=wood_density,
             forest_type=forest_type
         )
 
         # 6. Save recalculated results back to Cloudflare D1
         confidence_note = "Manually verified trunk selection"
+        if not hinfo["height_validated"]:
+            confidence_note += (
+                f" | {hinfo['height_validation_reason'] or hinfo['height_fallback_reason']}"
+            )
         
         species_preds = None
         sp_str = latest_scan.get("species_predictions")
@@ -1364,6 +1486,20 @@ async def manual_override(body: ManualOverrideRequest):
             gps_lat=latest_scan.get("gps_lat"),
             gps_lon=latest_scan.get("gps_lon"),
             species_predictions=species_preds,
+            scale_status=(latest_scan.get("scale_status") or ("calibrated" if _is_cal else "uncalibrated")),
+            scale_factor_used=scale_factor,
+            calibration_source=(latest_scan.get("calibration_source") or _src),
+            height_used=hinfo["height_used"],
+            total_height_used_m=hinfo["total_height_used_m"],
+            segment_height_m=hinfo["segment_height_m"],
+            height_fallback_reason=hinfo["height_fallback_reason"],
+            height_validated=hinfo["height_validated"],
+            height_validation_reason=hinfo["height_validation_reason"],
+            quality_status=latest_scan.get("quality_status") or "ok",
+            root_to_shoot_ratio=carbon_result["root_to_shoot_ratio"],
+            co2e_uncertainty_pct=carbon_result["co2e_uncertainty_pct"],
+            co2e_low_kg=carbon_result["co2e_low_kg"],
+            co2e_high_kg=carbon_result["co2e_high_kg"],
         )
         print(f"[OVERRIDE] Successfully updated D1 record for {body.tree_code} via manual override.")
         
@@ -1380,6 +1516,13 @@ async def manual_override(body: ManualOverrideRequest):
             "karbon_kg": carbon_result["carbon_kg"],
             "co2e_kg": carbon_result["co2e_kg"],
             "formula_used": carbon_result["formula_used"],
+            "scale_status": (latest_scan.get("scale_status") or ("calibrated" if _is_cal else "uncalibrated")),
+            "height_used": hinfo["height_used"],
+            "total_height_used_m": hinfo["total_height_used_m"],
+            "segment_height_m": hinfo["segment_height_m"],
+            "height_fallback_reason": hinfo["height_fallback_reason"],
+            "height_validated": hinfo["height_validated"],
+            "height_validation_reason": hinfo["height_validation_reason"],
         }
     except HTTPException as httpex:
         raise httpex
@@ -1462,7 +1605,7 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
     try:
         import requests
         from storage.d1_client import execute_d1_query, update_scan_result
-        from carbon.dbh_extractor import extract_dbh_with_2d_clicks
+        from carbon.dbh_extractor import extract_dbh_with_2d_clicks, resolve_height_usage
         from carbon.allometric import estimate_carbon
 
         # 1. Fetch target scan record by scan_id
@@ -1626,7 +1769,7 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             P2[2] = P1[2]
 
         # 7. Perform DBH extraction with 2D clicks
-        scale_factor = _load_scale_factor_for_scan(tree_code)
+        scale_factor, _is_cal2, _src2 = _load_scale_factor_for_scan(tree_code)
         res_override = extract_dbh_with_2d_clicks(
             ply_path=local_ply_path,
             P1=P1,
@@ -1672,12 +1815,13 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             except Exception as plant_err:
                 print(f"[RECALCULATE] Pl@ntNet retry failed: {plant_err}")
 
-        # Resolve wood density from species
+        # Resolve wood density from species (same threshold as the automatic pipeline)
         wood_density = 0.6
         wood_density_source = "generic-default"
+        SPECIES_CONFIDENCE_THRESHOLD = 30.0
         if species_preds and len(species_preds) > 0:
             top_pred = species_preds[0]
-            if top_pred.get("confidence", 0.0) > 20.0:
+            if top_pred.get("confidence", 0.0) >= SPECIES_CONFIDENCE_THRESHOLD:
                 sci_name = top_pred.get("scientific_name")
                 try:
                     from carbon.wood_density_lookup import get_wood_density
@@ -1703,14 +1847,25 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             except Exception as e:
                 print(f"[RECALCULATE ERROR] Failed to map climate: {e}")
 
+        # Height is derived from the (regenerated) point cloud by extract_dbh_with_2d_clicks,
+        # i.e. a system height — validate like the automatic pipeline; fallback to DBH-only
+        # if the truncated trunk does not represent total tree height.
+        hinfo = resolve_height_usage(local_ply_path, res_override["height_m"],
+                                      height_input_source="system", scale_factor=scale_factor)
+
         carbon_result = estimate_carbon(
             dbh_cm=res_override["dbh_cm"],
-            height_m=res_override["height_m"],
+            height_m=hinfo["height_for_formula"],
             wood_density=wood_density,
             forest_type=forest_type
         )
 
         # 9. Update target scan record in Cloudflare D1
+        recalc_conf_note = res_override["confidence_note"]
+        if not hinfo["height_validated"]:
+            recalc_conf_note += (
+                f" | {hinfo['height_validation_reason'] or hinfo['height_fallback_reason']}"
+            )
         update_scan_result(
             scan_id=scan_id,
             dbh_cm=res_override["dbh_cm"],
@@ -1718,7 +1873,7 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             biomassa_kg=carbon_result["total_biomass_kg"],
             karbon_kg=carbon_result["carbon_kg"],
             co2e_kg=carbon_result["co2e_kg"],
-            confidence_note=res_override["confidence_note"],
+            confidence_note=recalc_conf_note,
             geometry_3d=res_override["geometry_3d"],
             wood_density_used=wood_density,
             wood_density_source=wood_density_source,
@@ -1729,6 +1884,20 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             gps_lat=target_scan.get("gps_lat"),
             gps_lon=target_scan.get("gps_lon"),
             species_predictions=species_preds,
+            scale_status=(target_scan.get("scale_status") or ("calibrated" if _is_cal2 else "uncalibrated")),
+            scale_factor_used=scale_factor,
+            calibration_source=(target_scan.get("calibration_source") or _src2),
+            height_used=hinfo["height_used"],
+            total_height_used_m=hinfo["total_height_used_m"],
+            segment_height_m=hinfo["segment_height_m"],
+            height_fallback_reason=hinfo["height_fallback_reason"],
+            height_validated=hinfo["height_validated"],
+            height_validation_reason=hinfo["height_validation_reason"],
+            quality_status=target_scan.get("quality_status") or "ok",
+            root_to_shoot_ratio=carbon_result["root_to_shoot_ratio"],
+            co2e_uncertainty_pct=carbon_result["co2e_uncertainty_pct"],
+            co2e_low_kg=carbon_result["co2e_low_kg"],
+            co2e_high_kg=carbon_result["co2e_high_kg"],
         )
         print(f"[RECALCULATE] Successfully updated D1 record id {scan_id} for {tree_code} via 2D clicks override.")
 
@@ -1749,7 +1918,14 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             "biomassa_kg": carbon_result["total_biomass_kg"],
             "karbon_kg": carbon_result["carbon_kg"],
             "co2e_kg": carbon_result["co2e_kg"],
-            "confidence_note": res_override["confidence_note"],
+            "confidence_note": recalc_conf_note,
+            "scale_status": (target_scan.get("scale_status") or ("calibrated" if _is_cal2 else "uncalibrated")),
+            "height_used": hinfo["height_used"],
+            "total_height_used_m": hinfo["total_height_used_m"],
+            "segment_height_m": hinfo["segment_height_m"],
+            "height_fallback_reason": hinfo["height_fallback_reason"],
+            "height_validated": hinfo["height_validated"],
+            "height_validation_reason": hinfo["height_validation_reason"],
         }
 
     except HTTPException as http_exc:
@@ -1785,13 +1961,15 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
             raise HTTPException(status_code=404, detail="Scan record not found")
         target_scan = scans[0]
         tree_code = target_scan.get("tree_code")
-        scale_factor = target_scan.get("scale_factor") or 1.0
+        # Use the same scan-id-aware loader as every other endpoint for consistency.
+        scale_factor, _is_cal3, _src3 = _load_scale_factor_for_scan(tree_code)
 
         # 2. Recalculate metrics based on manual coordinates
         dbh_m = body.radius_units * 2.0 * scale_factor
         dbh_cm = dbh_m * 100.0
         
-        # Height is height span along the trunk axis
+        # Height is height span along the trunk axis, EXPLICITLY provided by the user
+        # via the 3D transform controls (h_min/h_max) — i.e. a manual height input.
         height_m = (body.h_max - body.h_min) * scale_factor
 
         # 3. Resolve wood density from scan record
@@ -1808,13 +1986,21 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
             except Exception as e:
                 print(f"[ADJUST GEOMETRY] Failed to map climate: {e}")
 
+        # User explicitly supplied the height: honour it (no forced DBH-only fallback)
+        # but flag it clearly as un-validated — the system did not verify it against
+        # the reconstructed point cloud.
+        from carbon.dbh_extractor import resolve_height_usage
+        hinfo = resolve_height_usage(None, height_m,
+                                      height_input_source="manual", scale_factor=scale_factor)
+
         # 5. Estimate carbon
         carbon_result = estimate_carbon(
             dbh_cm=dbh_cm,
-            height_m=height_m,
+            height_m=hinfo["height_for_formula"],
             wood_density=wood_density,
             forest_type=forest_type
         )
+
 
         # 6. Reconstruct updated geometry_3d dictionary
         geometry_3d = {
@@ -1852,6 +2038,9 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
                 pass
 
         # 9. Update target scan record in Cloudflare D1
+        adj_conf_note = "Manually adjusted via 3D Transform Controls"
+        if not hinfo["height_validated"]:
+            adj_conf_note += f" | {hinfo['height_validation_reason']}"
         update_scan_result(
             scan_id=scan_id,
             dbh_cm=float(round(dbh_cm, 2)),
@@ -1859,7 +2048,7 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
             biomassa_kg=carbon_result["total_biomass_kg"],
             karbon_kg=carbon_result["carbon_kg"],
             co2e_kg=carbon_result["co2e_kg"],
-            confidence_note="Manually adjusted via 3D Transform Controls",
+            confidence_note=adj_conf_note,
             geometry_3d=geometry_3d,
             wood_density_used=wood_density,
             wood_density_source=wood_density_source,
@@ -1870,6 +2059,20 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
             gps_lat=target_scan.get("gps_lat"),
             gps_lon=target_scan.get("gps_lon"),
             species_predictions=species_preds,
+            scale_status=(target_scan.get("scale_status") or ("calibrated" if _is_cal3 else "uncalibrated")),
+            scale_factor_used=scale_factor,
+            calibration_source=(target_scan.get("calibration_source") or _src3),
+            height_used=hinfo["height_used"],
+            total_height_used_m=hinfo["total_height_used_m"],
+            segment_height_m=hinfo["segment_height_m"],
+            height_fallback_reason=hinfo["height_fallback_reason"],
+            height_validated=hinfo["height_validated"],
+            height_validation_reason=hinfo["height_validation_reason"],
+            quality_status=target_scan.get("quality_status") or "ok",
+            root_to_shoot_ratio=carbon_result["root_to_shoot_ratio"],
+            co2e_uncertainty_pct=carbon_result["co2e_uncertainty_pct"],
+            co2e_low_kg=carbon_result["co2e_low_kg"],
+            co2e_high_kg=carbon_result["co2e_high_kg"],
         )
         print(f"[ADJUST GEOMETRY] Successfully updated D1 record id {scan_id} for {tree_code} via manual adjustment.")
 
@@ -1880,7 +2083,14 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
             "height_m": float(round(height_m, 2)),
             "biomassa_kg": carbon_result["total_biomass_kg"],
             "karbon_kg": carbon_result["carbon_kg"],
-            "co2e_kg": carbon_result["co2e_kg"]
+            "co2e_kg": carbon_result["co2e_kg"],
+            "scale_status": (target_scan.get("scale_status") or ("calibrated" if _is_cal3 else "uncalibrated")),
+            "height_used": hinfo["height_used"],
+            "total_height_used_m": hinfo["total_height_used_m"],
+            "segment_height_m": hinfo["segment_height_m"],
+            "height_fallback_reason": hinfo["height_fallback_reason"],
+            "height_validated": hinfo["height_validated"],
+            "height_validation_reason": hinfo["height_validation_reason"],
         }
 
     except Exception as exc:
