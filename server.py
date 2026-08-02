@@ -816,7 +816,17 @@ def _reconstruct_thread(
             try:
                 pts3d = np.load(points3d_all_path)
                 N, H_crop, W_crop, _ = pts3d.shape
-                repr_idx = N // 2
+                # Pick the representative frame by valid-pixel coverage
+                # (non-zero, non-NaN entries) — more robust than N//2 because N can
+                # vary between runs and the midpoint frame isn't always the most
+                # informative one. Falls back to 0 (first frame) if all are equal.
+                valid_counts = np.array([
+                    np.sum(~np.all(pts3d[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d[i]), axis=-1))
+                    for i in range(N)
+                ])
+                repr_idx = int(np.argmax(valid_counts))
+                print(f"[RECONSTRUCT] Representative frame: idx={repr_idx}/{N} "
+                      f"({valid_counts[repr_idx]:,} valid pixels vs N//2={N//2} w/ {valid_counts[N//2]:,})")
                 pointmap = pts3d[repr_idx]
                 
                 u1_crop, v1_crop = map_pixel_to_cropped(p1[0], p1[1], width, height, W_crop, H_crop)
@@ -1753,7 +1763,13 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
         # 6. Load pointmap and perform coordinate mapping
         pts3d = np.load(local_npy_path)
         N, H_crop, W_crop, _ = pts3d.shape
-        repr_idx = N // 2
+        # Pick the representative frame by valid-pixel coverage (same logic as _reconstruct_thread)
+        valid_counts = np.array([
+            np.sum(~np.all(pts3d[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d[i]), axis=-1))
+            for i in range(N)
+        ])
+        repr_idx = int(np.argmax(valid_counts))
+        print(f"[RECALCULATE] Representative frame: idx={repr_idx}/{N} ({valid_counts[repr_idx]:,} valid pixels)")
         pointmap = pts3d[repr_idx]
 
         u1_crop, v1_crop = map_pixel_to_cropped(body.p1[0], body.p1[1], body.width, body.height, W_crop, H_crop)
