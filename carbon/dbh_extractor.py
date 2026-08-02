@@ -149,6 +149,149 @@ def fit_circle_robust(points_2d, max_iters=5, outlier_threshold_ratio=0.15):
         return xc, yc, R, mean_err, inlier_mask
     return None, None, None, None, None
 
+def is_full_tree_height(points, vertical_axis_idx=2, scale=1.0, breast_height=1.3,
+                        min_full_height_m=4.0, ground_band_m=1.3, canopy_ratio=0.8):
+    """
+    Heuristically validates whether a reconstructed point cloud represents the FULL
+    tree height (base-at-ground up to canopy), as opposed to only a mid-trunk segment.
+
+    A reliable full-height estimate requires BOTH:
+      1. Ground coverage — a meaningful number of points near the base of the trunk
+         (the lower part of the stem is present, so height is anchored at the ground).
+      2. Canopy signal — the horizontal spread grows towards the top (branches/crown),
+         instead of the cloud remaining a cylindrical "trunk segment" all the way up.
+
+    Returns:
+      (is_full: bool, reason: str)
+    """
+    import numpy as np
+
+    if points is None or len(points) < 10:
+        return False, "point cloud terlalu sedikit untuk memvalidasi tinggi total"
+
+    z = np.asarray(points[:, vertical_axis_idx], dtype=float)
+    z_min = float(np.percentile(z, 1))
+    z_max = float(np.percentile(z, 99))
+    phys_height_m = (z_max - z_min) * scale
+
+    proj_axes = [i for i in range(3) if i != vertical_axis_idx]
+    reasons = []
+
+    # 1. Ground / base coverage
+    ground_band_units = ground_band_m / scale
+    ground_frac = float(np.mean(z <= z_min + ground_band_units))
+    if ground_frac < 0.01:
+        reasons.append(
+            f"tidak ada titik dekat pangkal batang (ground coverage {ground_frac:.2%}), "
+            "kemungkinan batang terpotong bagian bawah"
+        )
+    else:
+        pass  # ground present
+
+    # 2. Canopy signal: top horizontal spread vs mid-trunk spread
+    canopy_signal = False
+    if phys_height_m >= min_full_height_m:
+        span = z_max - z_min
+        mid_mask = np.abs(z - (z_min + 0.5 * span)) <= 0.1 * span
+        top_mask = z >= z_min + 0.75 * span
+        if mid_mask.sum() >= 5 and top_mask.sum() >= 5:
+            def _spread(m):
+                m = np.asarray(points[m], dtype=float)
+                return float(np.sqrt(
+                    np.var(m[:, proj_axes[0]]) + np.var(m[:, proj_axes[1]])
+                ))
+            mid_spread = _spread(mid_mask)
+            top_spread = _spread(top_mask)
+            if mid_spread > 0 and top_spread >= mid_spread * canopy_ratio:
+                canopy_signal = True
+            else:
+                reasons.append(
+                    "ujung atas tidak menunjukkan percabangan tajuk (masih berbentuk "
+                    "silinder batang tipikal segmen batang tengah)"
+                )
+        else:
+            reasons.append("tidak cukup titik di bagian tengah/atas untuk memvalidasi tajuk")
+    else:
+        reasons.append(
+            f"tinggi terekam {phys_height_m:.2f}m < {min_full_height_m:.1f}m minimum "
+            "(hanya segmen batang, bukan tinggi total)"
+        )
+
+    is_full = (len(reasons) == 0) and canopy_signal
+    if is_full:
+        reason = f"point cloud mencakup pangkal–tajuk (tinggi {phys_height_m:.2f}m): tinggi total valid"
+    else:
+        reason = "; ".join(reasons)
+    return is_full, reason
+
+
+def resolve_height_usage(points3d_path, raw_height_m, height_input_source="system", scale_factor=1.0):
+    """
+    Shared, single source of truth for deciding whether a given height may be used
+    in the height-based Chave formula — used by BOTH the automatic pipeline and all
+    the manual-override endpoints, so the response fields stay consistent everywhere.
+
+    height_input_source:
+      - "system": height was derived automatically from the point cloud (the DBH
+        extractors). It MUST pass is_full_tree_height() before being used; otherwise
+        we force the DBH-only fallback (identical to the automatic pipeline).
+      - "manual": the user explicitly supplied the height (e.g. 3D transform
+        controls). We honour the user's value but mark it height_validated=False —
+        never silently treat it as auto-verified.
+
+    Returns a dict with the standard, endpoint-agnostic keys:
+      height_used, total_height_used_m, segment_height_m, height_fallback_reason,
+      height_validated, height_validation_reason, height_for_formula
+    """
+    height_used = "dbh_only_fallback"
+    total_height_used = None
+    segment_height_m = raw_height_m
+    height_fallback_reason = None
+    height_validated = False
+    height_validation_reason = None
+
+    if height_input_source == "manual":
+        height_used = "user_manual_height"
+        total_height_used = raw_height_m
+        height_validated = False
+        height_validation_reason = (
+            "height diinput manual oleh user, tidak divalidasi otomatis terhadap point cloud"
+        )
+    elif points3d_path and os.path.exists(points3d_path):
+        try:
+            points = parse_ply_points(points3d_path)
+            ranges = points.max(axis=0) - points.min(axis=0)
+            vertical_axis_idx = int(np.argmax(ranges))
+            is_full, h_reason = is_full_tree_height(points, vertical_axis_idx, scale_factor)
+            if is_full:
+                height_used = "full_height"
+                total_height_used = raw_height_m
+                height_validated = True
+                height_validation_reason = "lolos validasi is_full_tree_height terhadap point cloud"
+            else:
+                height_fallback_reason = (
+                    f"hanya batang bagian bawah terekam, tinggi tidak representatif: {h_reason}"
+                )
+                height_validation_reason = height_fallback_reason
+        except Exception as h_err:
+            height_fallback_reason = f"gagal memvalidasi tinggi point cloud: {h_err}"
+            height_validation_reason = height_fallback_reason
+    else:
+        height_fallback_reason = "point cloud untuk validasi tinggi tidak tersedia"
+        height_validation_reason = height_fallback_reason
+
+    height_for_formula = total_height_used if height_used in ("full_height", "user_manual_height") else None
+    return {
+        "height_used":              height_used,
+        "total_height_used_m":      total_height_used,
+        "segment_height_m":         segment_height_m,
+        "height_fallback_reason":   height_fallback_reason,
+        "height_validated":         height_validated,
+        "height_validation_reason": height_validation_reason,
+        "height_for_formula":       height_for_formula,
+    }
+
+
 def extract_dbh(ply_path, scale_factor=1.0, vertical_axis='z', breast_height=1.3, tolerance=0.05):
     scale = load_scale_factor(scale_factor)
     try:
