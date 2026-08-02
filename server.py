@@ -839,9 +839,24 @@ def _reconstruct_thread(
                     print(f"[RECONSTRUCT] Z-depth deviation ({abs(z_diff):.3f}m) > 1.5m. Background hit detected. Clamping Z2 to Z1.")
                     P2_np[2] = P1_np[2]
                     
-                P1_3d = P1_np.tolist()
-                P2_3d = P2_np.tolist()
-                print(f"[RECONSTRUCT] Coordinate mapping successful: P1_3d={P1_3d}, P2_3d={P2_3d}")
+                # Align camera space to world space using ICP
+                if points3d_path and os.path.exists(points3d_path):
+                    from carbon.dbh_extractor import register_pointmap_to_world, parse_ply_points
+                    try:
+                        pts_world = parse_ply_points(points3d_path)
+                        R, t = register_pointmap_to_world(pointmap, pts_world)
+                        P1_aligned = P1_np @ R.T + t
+                        P2_aligned = P2_np @ R.T + t
+                        P1_3d = P1_aligned.tolist()
+                        P2_3d = P2_aligned.tolist()
+                        print(f"[RECONSTRUCT] ICP Alignment successful: P1_3d={P1_3d}, P2_3d={P2_3d}")
+                    except Exception as align_err:
+                        print(f"[RECONSTRUCT ERROR] ICP Alignment failed: {align_err}. Using camera-space fallback.")
+                        P1_3d = P1_np.tolist()
+                        P2_3d = P2_np.tolist()
+                else:
+                    P1_3d = P1_np.tolist()
+                    P2_3d = P2_np.tolist()
             except Exception as map_err:
                 print(f"[RECONSTRUCT ERROR] Failed to map pixel coordinates to 3D: {map_err}")
 
@@ -1675,93 +1690,23 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                 detail=f"Failed to download dense pointmap: {npy_err}"
             )
 
-        # 5. Regenerate points3d.ply from points3D_all.npy using the updated CROP_RADIUS
-        print(f"[RECALCULATE] Regenerating points3d.ply from {local_npy_path}")
+        # 5. Download the existing points3d.ply from R2
+        print(f"[RECALCULATE] Downloading existing points3d.ply from {points3d_url}")
         try:
-            # Load and reshape
-            pts3d = np.load(local_npy_path)
-            N, H_crop, W_crop, _ = pts3d.shape
-            xyz = pts3d.reshape(-1, 3)
-            
-            # Remove invalid/zero points
-            mask_valid = ~np.all(xyz == 0, axis=1) & ~np.any(np.isnan(xyz), axis=1)
-            xyz = xyz[mask_valid]
-            
-            if len(xyz) >= 30:
-                # Find rough vertical axis
-                ranges = xyz.max(axis=0) - xyz.min(axis=0)
-                rough_axis_idx = int(np.argmax(ranges))
-                proj_axes = [i for i in [0, 1, 2] if i != rough_axis_idx]
-
-                h1 = xyz[:, proj_axes[0]]
-                h2 = xyz[:, proj_axes[1]]
-
-                # Crop horizontally around peak (trunk cluster)
-                hist, xedges, yedges = np.histogram2d(h1, h2, bins=30)
-                max_idx = np.unravel_index(np.argmax(hist), hist.shape)
-                peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
-                peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
-
-                dist_sq = (h1 - peak_h1)**2 + (h2 - peak_h2)**2
-                CROP_RADIUS = 1.0  # Heal crop to full height bounds
-                crop_mask = dist_sq <= CROP_RADIUS**2
-                
-                if np.sum(crop_mask) >= 20:
-                    xyz = xyz[crop_mask]
-                
-                # SOR outlier removal using KDTree
-                if len(xyz) >= 20:
-                    from scipy.spatial import KDTree
-                    tree = KDTree(xyz)
-                    nb_neighbors = 20
-                    std_ratio = 2.0
-                    distances, _ = tree.query(xyz, k=nb_neighbors + 1, workers=-1)
-                    mean_dists = distances[:, 1:].mean(axis=1)
-
-                    global_mean = mean_dists.mean()
-                    global_std  = mean_dists.std()
-                    threshold   = global_mean + std_ratio * global_std
-
-                    inlier_mask = mean_dists <= threshold
-                    xyz = xyz[inlier_mask]
-            
-            # Write to PLY
-            n = len(xyz)
-            with open(local_ply_path, "w") as f:
-                f.write("ply\n")
-                f.write("format ascii 1.0\n")
-                f.write(f"element vertex {n}\n")
-                f.write("property float x\n")
-                f.write("property float y\n")
-                f.write("property float z\n")
-                f.write("end_header\n")
-                for p in xyz:
-                    f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
-            
-            print(f"[RECALCULATE] Successfully regenerated local points3d.ply with {n} points")
-            
-            # Upload the new points3d.ply back to Cloudflare R2
-            from storage.r2_client import upload_splat
-            upload_splat(local_ply_path, tree_code, custom_timestamp=timestamp)
-            print(f"[RECALCULATE] Uploaded regenerated points3d.ply to R2")
-            
-        except Exception as regen_err:
-            print(f"[RECALCULATE] Failed to regenerate points3d.ply: {regen_err}. Falling back to downloading existing PLY.")
-            # Fallback: download the existing points3d.ply from R2
-            try:
-                res_ply = requests.get(points3d_url, timeout=30)
-                if res_ply.status_code != 200:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Failed to download points3d.ply: HTTP {res_ply.status_code}"
-                    )
-                with open(local_ply_path, "wb") as f:
-                    f.write(res_ply.content)
-            except Exception as ply_err:
+            res_ply = requests.get(points3d_url, timeout=30)
+            if res_ply.status_code != 200:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Failed to download points3d.ply: {ply_err}"
+                    detail=f"Failed to download points3d.ply: HTTP {res_ply.status_code}"
                 )
+            with open(local_ply_path, "wb") as f:
+                f.write(res_ply.content)
+            print(f"[RECALCULATE] Successfully downloaded existing points3d.ply from R2")
+        except Exception as ply_err:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to download points3d.ply: {ply_err}"
+            )
 
         # 6. Load pointmap and perform coordinate mapping
         pts3d = np.load(local_npy_path)
@@ -1778,21 +1723,34 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
         u1_crop, v1_crop = map_pixel_to_cropped(body.p1[0], body.p1[1], body.width, body.height, W_crop, H_crop)
         u2_crop, v2_crop = map_pixel_to_cropped(body.p2[0], body.p2[1], body.width, body.height, W_crop, H_crop)
 
-        P1 = get_robust_3d_point(pointmap, u1_crop, v1_crop)
-        P2 = get_robust_3d_point(pointmap, u2_crop, v2_crop)
+        P1_cam = get_robust_3d_point(pointmap, u1_crop, v1_crop)
+        P2_cam = get_robust_3d_point(pointmap, u2_crop, v2_crop)
         
         # Hybrid depth constraint: clamp depth only if deviation is > 1.5m (background hit)
-        z_diff = P2[2] - P1[2]
+        z_diff = P2_cam[2] - P1_cam[2]
         if abs(z_diff) > 1.5:
             print(f"[RECALCULATE] Z-depth deviation ({abs(z_diff):.3f}m) > 1.5m. Background hit detected. Clamping Z2 to Z1.")
-            P2[2] = P1[2]
+            P2_cam[2] = P1_cam[2]
+
+        # Align camera space to world space using ICP
+        from carbon.dbh_extractor import register_pointmap_to_world, parse_ply_points
+        try:
+            pts_world = parse_ply_points(local_ply_path)
+            R, t = register_pointmap_to_world(pointmap, pts_world)
+            P1 = (P1_cam @ R.T + t).tolist()
+            P2 = (P2_cam @ R.T + t).tolist()
+            print(f"[RECALCULATE] ICP Alignment successful. P1_world={P1}, P2_world={P2}")
+        except Exception as align_err:
+            print(f"[RECALCULATE ERROR] ICP Alignment failed: {align_err}. Using camera-space fallback.")
+            P1 = P1_cam.tolist()
+            P2 = P2_cam.tolist()
 
         # 7. Perform DBH extraction with 2D clicks
         scale_factor, _is_cal2, _src2 = _load_scale_factor_for_scan(tree_code)
         res_override = extract_dbh_with_2d_clicks(
             ply_path=local_ply_path,
-            P1=P1,
-            P2=P2,
+            P1=np.array(P1),
+            P2=np.array(P2),
             scale=scale_factor
         )
 

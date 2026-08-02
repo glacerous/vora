@@ -848,6 +848,10 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
         return {"error": "P1 and P2 are identical or too close"}
     v = v / v_norm
 
+    # Force direction to point upwards (positive Z axis)
+    if v[2] < 0:
+        v = -v
+
     # 2. Filter point cloud within cylinder around the axis v
     # w is the vector from P1 to each point Q
     w = points - P1
@@ -988,3 +992,80 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
             "slice_points_3d": [[float(round(p[0], 4)), float(round(p[1], 4)), float(round(p[2], 4))] for p in slice_points_all],
         }
     }
+
+
+def register_pointmap_to_world(pointmap: np.ndarray, pts_world: np.ndarray, max_iterations: int = 25, subsample: int = 1500) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Registers camera-space pointmap (shape [H, W, 3] or [K, 3]) to world-space point cloud pts_world (shape [M, 3])
+    using Iterative Closest Point (ICP) and Kabsch algorithm.
+    Returns:
+      R: 3x3 rotation matrix
+      t: 3-element translation vector
+      such that: P_world = P_cam @ R.T + t
+    """
+    from scipy.spatial import KDTree
+    
+    # 1. Extract valid (non-zero, non-NaN) points from pointmap
+    if len(pointmap.shape) == 3:
+        valid_mask = ~np.all(pointmap == 0, axis=-1) & ~np.any(np.isnan(pointmap), axis=-1)
+        pts_cam = pointmap[valid_mask]
+    else:
+        pts_cam = pointmap
+        
+    if len(pts_cam) < 10 or len(pts_world) < 10:
+        logger.warning("[ICP] Points too sparse for registration. Returning Identity.")
+        return np.eye(3), np.zeros(3)
+        
+    # 2. Subsample source points for speed
+    if len(pts_cam) > subsample:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(pts_cam), size=subsample, replace=False)
+        src = pts_cam[idx]
+    else:
+        src = pts_cam
+        
+    dst = pts_world
+    
+    # 3. Build KDTree on destination points
+    tree = KDTree(dst)
+    
+    # Kabsch algorithm implementation
+    def kabsch(A, B):
+        centroid_A = np.mean(A, axis=0)
+        centroid_B = np.mean(B, axis=0)
+        AA = A - centroid_A
+        BB = B - centroid_B
+        H = AA.T @ BB
+        U, S, Vt = np.linalg.svd(H)
+        R_fit = Vt.T @ U.T
+        if np.linalg.det(R_fit) < 0:
+            Vt[2, :] *= -1
+            R_fit = Vt.T @ U.T
+        t_fit = centroid_B - R_fit @ centroid_A
+        return R_fit, t_fit
+        
+    # 4. ICP Loop
+    R = np.eye(3)
+    t = np.mean(dst, axis=0) - np.mean(src, axis=0) # initial translation based on centroids
+    
+    dist_threshold = 0.25 # maximum correspondence distance in meters
+    
+    for iter_idx in range(max_iterations):
+        src_transformed = src @ R.T + t
+        distances, indices = tree.query(src_transformed, k=1, workers=-1)
+        
+        # Filter correspondences by distance
+        valid = distances < dist_threshold
+        if np.sum(valid) < 10:
+            logger.warning(f"[ICP] Too few correspondences ({np.sum(valid)}) at iteration {iter_idx}. Aborting ICP.")
+            break
+            
+        src_corr = src[valid]
+        dst_corr = dst[indices[valid]]
+        
+        # SVD fit
+        R, t = kabsch(src_corr, dst_corr)
+        
+    logger.info(f"[ICP] Completed alignment. Final R: {R.tolist()}, t: {t.tolist()}")
+    return R, t
+
