@@ -927,6 +927,7 @@
 
         // Globals for TransformControls and cylinder manual adjustment
         let transformControls = null;
+        let syncGroup = null;       // scene-root group that mirrors splatMesh.matrix for CAD/PC objects
         let cadGeomGroup = null;
         let currentScanId = null;
         let currentTreeCode = null;
@@ -996,6 +997,15 @@
 
                 // Start the render loop FIRST so viewer.controls is initialized
                 viewer.start();
+
+                // Create the scene-root sync group for CAD/point cloud objects.
+                // Its matrix is kept in sync with splatMesh every frame so that
+                // scene rotations from the rotation panel propagate correctly
+                // to the overlay and PLY point cloud without double-transforming.
+                syncGroup = new THREE.Group();
+                syncGroup.name = 'vora_sync_group';
+                syncGroup.matrixAutoUpdate = false;
+                viewer.threeScene.add(syncGroup);
 
                 // Initialize TransformControls
                 if (viewer.camera && viewer.renderer) {
@@ -1096,20 +1106,12 @@
 
                     if (!viewer.camera) return;
 
-                    // Sync CAD overlay and point cloud transforms with splatMesh every frame
-                    if (viewer.splatMesh) {
-                        const sm = viewer.splatMesh;
-                        const cadOverlay = viewer.threeScene ? viewer.threeScene.getObjectByName('cad_measurement_overlay') : null;
-                        if (cadOverlay) {
-                            cadOverlay.position.copy(sm.position);
-                            cadOverlay.quaternion.copy(sm.quaternion);
-                            cadOverlay.scale.copy(sm.scale);
-                        }
-                        if (pointCloudObj) {
-                            pointCloudObj.position.copy(sm.position);
-                            pointCloudObj.quaternion.copy(sm.quaternion);
-                            pointCloudObj.scale.copy(sm.scale);
-                        }
+                    // Sync the scene-root syncGroup matrix with splatMesh every frame.
+                    // cadGroup and pointCloudObj are children of syncGroup, so they automatically
+                    // inherit scene rotations (rotation panel) without double-transforming.
+                    if (viewer.splatMesh && syncGroup) {
+                        syncGroup.matrix.copy(viewer.splatMesh.matrix);
+                        syncGroup.matrixWorldNeedsUpdate = true;
                     }
 
                     let dx = 0, dy = 0, dz = 0;
@@ -1181,8 +1183,9 @@
                 pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
             }
             
-            // Look for cadOverlay in the scene root (not as a splatMesh child)
-            const cadOverlay = scene ? scene.getObjectByName('cad_measurement_overlay') : null;
+            // Look for cadOverlay in syncGroup first, then fall back to scene root
+            const cadOverlay = (syncGroup ? syncGroup.getObjectByName('cad_measurement_overlay') : null)
+                             || (scene ? scene.getObjectByName('cad_measurement_overlay') : null);
             if (cadOverlay) {
                 if (cadOverlayMode === 'disabled') {
                     cadOverlay.visible = false;
@@ -1241,9 +1244,10 @@
                         const g3d = metrics.geometry_3d;
                         const scene = window.viewer.threeScene;
                         
-                        // Remove existing overlay if present
-                        const prevOverlay = scene.getObjectByName('cad_measurement_overlay');
-                        if (prevOverlay) scene.remove(prevOverlay);
+                        // Remove existing overlay if present (check syncGroup and scene root)
+                        const prevOverlay = (syncGroup ? syncGroup.getObjectByName('cad_measurement_overlay') : null)
+                                         || scene.getObjectByName('cad_measurement_overlay');
+                        if (prevOverlay && prevOverlay.parent) prevOverlay.parent.remove(prevOverlay);
 
                         const cadGroup = new THREE.Group();
                         cadGroup.name = 'cad_measurement_overlay';
@@ -1270,68 +1274,14 @@
                         let center_3d = center_cyl;
                         dir_3d = new THREE.Vector3(dx, dy, dz).normalize();
 
-                        // Recalculate center/direction from slice_points_3d if available (per user instruction)
-                        if (g3d.slice_points_3d && g3d.slice_points_3d.length >= 2) {
-                            try {
-                                const N_pts = g3d.slice_points_3d.length;
-                                // 1. Compute Centroid
-                                let sumX = 0, sumY = 0, sumZ = 0;
-                                g3d.slice_points_3d.forEach(pt => {
-                                    sumX += pt[0];
-                                    sumY += pt[1];
-                                    sumZ += pt[2];
-                                });
-                                const centroid = new THREE.Vector3(sumX / N_pts, sumY / N_pts, sumZ / N_pts);
-
-                                // 2. Compute Covariance Matrix
-                                let cxx = 0, cxy = 0, cxz = 0;
-                                let cyy = 0, cyz = 0, czz = 0;
-                                g3d.slice_points_3d.forEach(pt => {
-                                    const dx_pt = pt[0] - centroid.x;
-                                    const dy_pt = pt[1] - centroid.y;
-                                    const dz_pt = pt[2] - centroid.z;
-                                    cxx += dx_pt * dx_pt;
-                                    cxy += dx_pt * dy_pt;
-                                    cxz += dx_pt * dz_pt;
-                                    cyy += dy_pt * dy_pt;
-                                    cyz += dy_pt * dz_pt;
-                                    czz += dz_pt * dz_pt;
-                                });
-                                cxx /= N_pts;
-                                cxy /= N_pts;
-                                cxz /= N_pts;
-                                cyy /= N_pts;
-                                cyz /= N_pts;
-                                czz /= N_pts;
-
-                                // 3. Power Iteration to find principal component (dominant eigenvector)
-                                let b_vec = dir_3d.clone(); // start with current normalized direction
-                                if (b_vec.lengthSq() < 1e-4) {
-                                    b_vec.set(0, 1, 0);
-                                }
-                                for (let iter = 0; iter < 15; iter++) {
-                                    const nextX = cxx * b_vec.x + cxy * b_vec.y + cxz * b_vec.z;
-                                    const nextY = cxy * b_vec.x + cyy * b_vec.y + cyz * b_vec.z;
-                                    const nextZ = cxz * b_vec.x + cyz * b_vec.y + czz * b_vec.z;
-                                    const nextB = new THREE.Vector3(nextX, nextY, nextZ);
-                                    const len = nextB.length();
-                                    if (len < 1e-9) break;
-                                    b_vec.copy(nextB).multiplyScalar(1 / len);
-                                }
-                                b_vec.normalize();
-
-                                // Maintain direction orientation relative to original vector
-                                if (b_vec.dot(dir_3d) < 0) {
-                                    b_vec.multiplyScalar(-1);
-                                }
-
-                                center_cyl.copy(centroid);
-                                dir_3d.copy(b_vec);
-                                console.log('Successfully recalculated CAD center and direction from slice_points_3d PCA:', center_cyl, dir_3d);
-                            } catch (pcaErr) {
-                                console.warn('Failed to compute PCA direction from slice_points_3d:', pcaErr);
-                            }
-                        }
+                        // NOTE: Do NOT recompute center/direction via PCA on slice_points_3d.
+                        // slice_points_3d are the inlier ring points at breast height (a thin cross-
+                        // section circle). PCA on a ring finds the direction with MAXIMUM variance
+                        // which lies IN the ring plane (perpendicular to the trunk axis), not along
+                        // the trunk. Using it as dir_3d would orient the cylinder 90° wrong, making
+                        // it appear as a horizontal arc instead of a vertical cylinder.
+                        // g3d.dir_x/y/z from Python's PCA over the full trunk segment is correct.
+                        console.log('[CAD] Using Python-computed trunk axis from geometry_3d:', center_cyl, dir_3d);
 
                         // Default Camera Orientation (PCA / trunk direction & center)
                         if (!cameraOriented) {
@@ -1372,25 +1322,12 @@
                             }
                         }
 
-                        // Project slice_points_3d points onto dir_3d to find their actual range relative to center_3d
-                        // (actualHMin, actualHMax, actualHTarget, actualHeight are already declared and initialized)
-
-                        if (g3d.slice_points_3d && g3d.slice_points_3d.length > 0) {
-                            let minProj = Infinity;
-                            let maxProj = -Infinity;
-                            g3d.slice_points_3d.forEach(pt => {
-                                const pVec = new THREE.Vector3(pt[0] - center_3d.x, pt[1] - center_3d.y, pt[2] - center_3d.z);
-                                const proj = pVec.dot(dir_3d);
-                                if (proj < minProj) minProj = proj;
-                                if (proj > maxProj) maxProj = proj;
-                            });
-                            if (maxProj > minProj) {
-                                actualHMin = minProj;
-                                actualHMax = maxProj;
-                                actualHTarget = 0;
-                                actualHeight = Math.abs(maxProj - minProj);
-                            }
-                        }
+                        // NOTE: Do NOT re-derive h_min/h_max from slice_points_3d.
+                        // slice_points_3d only span the thin breast-height slice; projecting them
+                        // onto dir_3d gives a range of ~2*tol (nearly zero), collapsing the cylinder
+                        // to a disc. g3d.h_min/h_max from Python already span the full trunk height
+                        // (all trunk points projected onto v_pass2) — use those directly.
+                        console.log('[CAD] Cylinder extents from Python geometry_3d: h_min=' + actualHMin.toFixed(4) + ' h_max=' + actualHMax.toFixed(4) + ' h_target=' + actualHTarget.toFixed(4) + ' height=' + actualHeight.toFixed(4));
 
                         // Calculate base, top, and center coordinates of trunk cylinder
                         const base_3d = center_3d.clone().addScaledVector(dir_3d, actualHMin - actualHTarget);
@@ -1475,18 +1412,10 @@
                             console.log('Rendered ' + pointsArr.length + ' trunk circle-fitting highlight points.');
                         }
 
-                        // Add CAD Group to scene root (not splatMesh) so splatMesh.visible can be toggled cleanly
-                        // Transforms are synced every frame in the updateMovement rAF loop
-                        scene.add(cadGroup);
-                        
-                        // Immediately sync transform from splatMesh if available to avoid race condition/timing issues
-                        const sm = window.viewer ? window.viewer.splatMesh : null;
-                        if (sm) {
-                            cadGroup.position.copy(sm.position);
-                            cadGroup.quaternion.copy(sm.quaternion);
-                            cadGroup.scale.copy(sm.scale);
-                            cadGroup.updateMatrix();
-                        }
+                        // Add CAD Group under syncGroup (which mirrors splatMesh.matrix each frame).
+                        // This ensures scene rotations (rotation panel) propagate correctly without
+                        // double-transforming, and CAD visibility is independent of splatMesh.visible.
+                        (syncGroup || scene).add(cadGroup);
                         console.log('Successfully rendered 3D CAD Wireframe Overlay:', g3d);
 
                     } catch (overlayErr) {
@@ -1545,18 +1474,9 @@
                     pointCloudObj = new THREE.Points(geometry, material);
                     pointCloudObj.name = 'laser_scan_points';
 
-                    // Add Point Cloud to scene root (not splatMesh) so splatMesh.visible can be toggled cleanly
-                    // Transforms are synced every frame in the updateMovement rAF loop
-                    window.viewer.threeScene.add(pointCloudObj);
-
-                    // Sync initial transform from splatMesh immediately if available to avoid race condition/timing issues
-                    const sm = window.viewer ? window.viewer.splatMesh : null;
-                    if (sm) {
-                        pointCloudObj.position.copy(sm.position);
-                        pointCloudObj.quaternion.copy(sm.quaternion);
-                        pointCloudObj.scale.copy(sm.scale);
-                        pointCloudObj.updateMatrix();
-                    }
+                    // Add Point Cloud under syncGroup (which mirrors splatMesh.matrix each frame).
+                    // Visibility is independent of splatMesh.visible.
+                    (syncGroup || window.viewer.threeScene).add(pointCloudObj);
 
                     // Enable Laser Scan / Hybrid options now that point cloud is available
                     const sel = document.getElementById('view-mode-select');
