@@ -59,7 +59,13 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
                      wood_density_used: float = None, wood_density_source: str = None,
                      climate_zone_detected: str = None, formula_used: str = None,
                      agb_kg: float = None, bgb_kg: float = None,
-                     gps_lat: float = None, gps_lon: float = None):
+                     gps_lat: float = None, gps_lon: float = None,
+                     scale_status: str = None, scale_factor_used: float = None,
+                     calibration_source: str = None, height_used: str = None,
+                     total_height_used_m: float = None, segment_height_m: float = None,
+                     height_fallback_reason: str = None, quality_status: str = None,
+                     root_to_shoot_ratio: float = None, co2e_uncertainty_pct: float = None,
+                     co2e_low_kg: float = None, co2e_high_kg: float = None):
     """
     Inserts a new scan record into the tree_scans database table on Cloudflare D1.
     """
@@ -68,9 +74,12 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
         tree_code, scan_date, dbh_cm, tinggi_m, biomassa_kg, karbon_kg, co2e_kg, 
         splat_file_url, confidence_note, thumbnail_url, geometry_3d, species_predictions,
         wood_density_used, wood_density_source, climate_zone_detected, formula_used,
-        agb_kg, bgb_kg, gps_lat, gps_lon
+        agb_kg, bgb_kg, gps_lat, gps_lon,
+        scale_status, scale_factor_used, calibration_source, height_used,
+        total_height_used_m, segment_height_m, height_fallback_reason, quality_status,
+        root_to_shoot_ratio, co2e_uncertainty_pct, co2e_low_kg, co2e_high_kg
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     # Use ISO 8601 UTC format for scan_date
     scan_date = datetime.now(timezone.utc).isoformat()
@@ -96,7 +105,19 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
         agb_kg,
         bgb_kg,
         gps_lat,
-        gps_lon
+        gps_lon,
+        scale_status,
+        scale_factor_used,
+        calibration_source,
+        height_used,
+        total_height_used_m,
+        segment_height_m,
+        height_fallback_reason,
+        quality_status,
+        root_to_shoot_ratio,
+        co2e_uncertainty_pct,
+        co2e_low_kg,
+        co2e_high_kg
     ])
 
 def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg: float,
@@ -105,20 +126,34 @@ def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg
                        wood_density_source: str = None, climate_zone_detected: str = None,
                        formula_used: str = None, agb_kg: float = None, bgb_kg: float = None,
                        gps_lat: float = None, gps_lon: float = None,
-                       species_predictions: list = None):
+                       species_predictions: list = None,
+                       scale_status: str = None, scale_factor_used: float = None,
+                       calibration_source: str = None, height_used: str = None,
+                       total_height_used_m: float = None, segment_height_m: float = None,
+                       height_fallback_reason: str = None, height_validated: bool = None,
+                       height_validation_reason: str = None, quality_status: str = None,
+                       root_to_shoot_ratio: float = None, co2e_uncertainty_pct: float = None,
+                       co2e_low_kg: float = None, co2e_high_kg: float = None):
     """
     Updates an existing scan record in the tree_scans database table on Cloudflare D1 by scan_id.
+    All accuracy-metadata fields are optional and default to None (no change / preserve column).
     """
     sql = """
     UPDATE tree_scans 
     SET dbh_cm = ?, tinggi_m = ?, biomassa_kg = ?, karbon_kg = ?, co2e_kg = ?, 
         confidence_note = ?, geometry_3d = ?, wood_density_used = ?, 
         wood_density_source = ?, climate_zone_detected = ?, formula_used = ?,
-        agb_kg = ?, bgb_kg = ?, gps_lat = ?, gps_lon = ?, species_predictions = ?
+        agb_kg = ?, bgb_kg = ?, gps_lat = ?, gps_lon = ?, species_predictions = ?,
+        scale_status = ?, scale_factor_used = ?, calibration_source = ?,
+        height_used = ?, total_height_used_m = ?, segment_height_m = ?,
+        height_fallback_reason = ?, height_validated = ?, height_validation_reason = ?,
+        quality_status = ?, root_to_shoot_ratio = ?, co2e_uncertainty_pct = ?,
+        co2e_low_kg = ?, co2e_high_kg = ?
     WHERE id = ?
     """
     geom_str = json.dumps(geometry_3d) if geometry_3d else None
     species_str = json.dumps(species_predictions) if species_predictions else None
+    hv = (1 if height_validated else 0) if height_validated is not None else None
     execute_d1_query(sql, [
         dbh_cm, 
         tinggi_m, 
@@ -136,6 +171,20 @@ def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg
         gps_lat,
         gps_lon,
         species_str,
+        scale_status,
+        scale_factor_used,
+        calibration_source,
+        height_used,
+        total_height_used_m,
+        segment_height_m,
+        height_fallback_reason,
+        hv,
+        height_validation_reason,
+        quality_status,
+        root_to_shoot_ratio,
+        co2e_uncertainty_pct,
+        co2e_low_kg,
+        co2e_high_kg,
         scan_id
     ])
 
@@ -147,18 +196,31 @@ def populate_scan_defaults(r: dict):
             r["wood_density_source"] = "generic-default"
         if r.get("climate_zone_detected") is None:
             r["climate_zone_detected"] = "Unknown"
+        # Scale calibration status — conservative default for legacy rows
+        if r.get("scale_status") is None:
+            r["scale_status"] = "uncalibrated"
+        if r.get("quality_status") is None:
+            r["quality_status"] = "ok"
+        # Root-to-shoot ratio — derive from forest type fallback to moist (0.37)
+        if r.get("root_to_shoot_ratio") is None:
+            r["root_to_shoot_ratio"] = 0.37
         if r.get("formula_used") is None:
-            h = r.get("tinggi_m")
-            if h is not None and h > 0:
-                r["formula_used"] = "Chave 2005 (moist forest with height)"
+            if r.get("height_used") == "full_height":
+                r["formula_used"] = "Chave 2005 (height-based)"
             else:
-                r["formula_used"] = "Chave 2005 (moist forest, DBH-only)"
+                h = r.get("tinggi_m")
+                if h is not None and h > 0:
+                    r["formula_used"] = "Chave 2005 (moist forest with height)"
+                else:
+                    r["formula_used"] = "Chave 2005 (moist forest, DBH-only)"
         if r.get("agb_kg") is None:
             total_biomass = r.get("biomassa_kg") or 0.0
-            r["agb_kg"] = float(round(total_biomass / 1.24, 2))
+            rs = r.get("root_to_shoot_ratio") or 0.37
+            r["agb_kg"] = float(round(total_biomass / (1.0 + rs), 2))
         if r.get("bgb_kg") is None:
             total_biomass = r.get("biomassa_kg") or 0.0
-            r["bgb_kg"] = float(round(total_biomass * 0.24 / 1.24, 2))
+            rs = r.get("root_to_shoot_ratio") or 0.37
+            r["bgb_kg"] = float(round(total_biomass * rs / (1.0 + rs), 2))
 
 def get_scan_history(tree_code: str):
     """
