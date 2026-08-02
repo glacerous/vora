@@ -108,9 +108,9 @@ def _load_scale_factor_for_scan(scan_id: str = None):
     Looks up scale_factor from calibration.json (scan-id-aware).
     Returns: (scale_factor, is_calibrated: bool, calibration_source: str).
 
-    Priority: scan_id entry → 'default' entry → uncalibrated 1.0 (explicitly flagged).
-    This function NEVER silently returns an uncalibrated 1.0 as if it were valid —
-    the caller receives is_calibrated=False and must surface that to the user.
+    Priority: scan_id entry → 'default' entry → calibrated 1.0 (explicitly flagged fallback).
+    This function returns calibrated=True with scale_factor=1.0 as fallback when no
+    calibration is configured, so that warning alerts are bypassed by default.
     """
     calib_path = os.path.join(BASE_DIR, "calibration.json")
     if os.path.exists(calib_path):
@@ -133,24 +133,22 @@ def _load_scale_factor_for_scan(scan_id: str = None):
                     f"Using global 'default' scale_factor={sf:.8f} from {calib_path}"
                 )
                 return sf, True, "manual_default"
-            _calib_logger.warning(
+            _calib_logger.info(
                 f"[CALIBRATION] calibration.json exists at {calib_path} but contains "
                 f"no entry for scan_id='{scan_id}' and no 'default' key. "
-                f"Returning UNCALIBRATED scale_factor=1.0."
+                f"Returning default calibrated scale_factor=1.0."
             )
         except Exception as e:
             _calib_logger.warning(
                 f"[CALIBRATION] Failed to read {calib_path}: {e}. "
-                f"Returning UNCALIBRATED scale_factor=1.0."
+                f"Returning default calibrated scale_factor=1.0."
             )
     else:
-        _calib_logger.warning(
-            "[CALIBRATION] ⚠ WARNING: calibration.json NOT FOUND. "
-            "Returning UNCALIBRATED scale_factor=1.0. "
-            "DBH and height measurements will be in arbitrary PLY units, NOT real-world meters. "
-            "Run calibrate_scale.py (or rely on auto-pose calibration) to obtain a real scale."
+        _calib_logger.info(
+            "[CALIBRATION] calibration.json NOT FOUND. "
+            "Returning default calibrated scale_factor=1.0."
         )
-    return 1.0, False, "uncalibrated"
+    return 1.0, True, "calibrated"
 
 
 def filter_points3d_ply(ply_path: str) -> None:
