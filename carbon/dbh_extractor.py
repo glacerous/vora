@@ -455,7 +455,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     total_h_pass1 = h_max_pass1 - h_min_pass1
     
     h_target_pass1 = h_min_pass1 + (breast_height / scale)
-    if h_target_pass1 >= h_max_pass1 * 0.90:
+    if (h_target_pass1 - h_min_pass1) >= total_h_pass1 * 0.90:
         h_target_pass1 = h_min_pass1 + total_h_pass1 * 0.30
 
     if abs(v_pass1[0]) < 0.9:
@@ -559,7 +559,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     estimated_height_m = float(total_h_pass2 * scale)
 
     h_target_pass2 = h_min_pass2 + (breast_height / scale)
-    if h_target_pass2 >= h_max_pass2 * 0.90:
+    if (h_target_pass2 - h_min_pass2) >= total_h_pass2 * 0.90:
         h_target_pass2 = h_min_pass2 + total_h_pass2 * 0.30
 
     if abs(v_pass2[0]) < 0.9:
