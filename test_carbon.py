@@ -40,7 +40,7 @@ def test_carbon_pipeline(ply_path, scale_factor):
         return
         
     print("[2/2] Running allometric calculation...")
-    # Calculate carbon. We pass height_m as well to utilize the Chave et al. (2014) equation
+    # Calculate carbon. We pass height_m as well to utilize the Chave et al. (2005) height-based equation
     carbon_result = estimate_carbon(
         dbh_cm=dbh_result['dbh_cm'], 
         height_m=dbh_result['height_m'], 
