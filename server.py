@@ -108,9 +108,9 @@ def _load_scale_factor_for_scan(scan_id: str = None):
     Looks up scale_factor from calibration.json (scan-id-aware).
     Returns: (scale_factor, is_calibrated: bool, calibration_source: str).
 
-    Priority: scan_id entry → 'default' entry → calibrated 1.0 (explicitly flagged fallback).
-    This function returns calibrated=True with scale_factor=1.0 as fallback when no
-    calibration is configured, so that warning alerts are bypassed by default.
+    Priority: scan_id entry → 'default' entry → uncalibrated 1.0 fallback.
+    When no calibration is configured the fallback is (1.0, False, "uncalibrated_default"):
+    results are flagged uncalibrated so downstream consumers show the warning badge.
     """
     calib_path = os.path.join(BASE_DIR, "calibration.json")
     if os.path.exists(calib_path):
@@ -136,19 +136,19 @@ def _load_scale_factor_for_scan(scan_id: str = None):
             _calib_logger.info(
                 f"[CALIBRATION] calibration.json exists at {calib_path} but contains "
                 f"no entry for scan_id='{scan_id}' and no 'default' key. "
-                f"Returning default calibrated scale_factor=1.0."
+                f"Falling back to uncalibrated scale_factor=1.0 (uncalibrated_default)."
             )
         except Exception as e:
             _calib_logger.warning(
                 f"[CALIBRATION] Failed to read {calib_path}: {e}. "
-                f"Returning default calibrated scale_factor=1.0."
+                f"Falling back to uncalibrated scale_factor=1.0 (uncalibrated_default)."
             )
     else:
         _calib_logger.info(
             "[CALIBRATION] calibration.json NOT FOUND. "
-            "Returning default calibrated scale_factor=1.0."
+            "Falling back to uncalibrated scale_factor=1.0 (uncalibrated_default)."
         )
-    return 1.0, True, "calibrated"
+    return 1.0, False, "uncalibrated_default"
 
 
 def filter_points3d_ply(ply_path: str) -> None:
@@ -1465,6 +1465,11 @@ async def manual_override(body: ManualOverrideRequest):
             confidence_note += (
                 f" | {hinfo['height_validation_reason'] or hinfo['height_fallback_reason']}"
             )
+        if not _is_cal:
+            confidence_note += (
+                " | UNKALIBRASI: skala default (PLY unit) dipakai — hasil TIDAK dapat "
+                "diandalkan tanpa kalibrasi skala (auto-pose atau calibrate_scale.py)"
+            )
         
         species_preds = None
         sp_str = latest_scan.get("species_predictions")
@@ -1494,9 +1499,9 @@ async def manual_override(body: ManualOverrideRequest):
             gps_lat=latest_scan.get("gps_lat"),
             gps_lon=latest_scan.get("gps_lon"),
             species_predictions=species_preds,
-            scale_status=(latest_scan.get("scale_status") or ("calibrated" if _is_cal else "uncalibrated")),
+            scale_status=("calibrated" if _is_cal else "uncalibrated"),
             scale_factor_used=scale_factor,
-            calibration_source=(latest_scan.get("calibration_source") or _src),
+            calibration_source=_src,
             height_used=hinfo["height_used"],
             total_height_used_m=hinfo["total_height_used_m"],
             segment_height_m=hinfo["segment_height_m"],
@@ -1524,7 +1529,7 @@ async def manual_override(body: ManualOverrideRequest):
             "karbon_kg": carbon_result["carbon_kg"],
             "co2e_kg": carbon_result["co2e_kg"],
             "formula_used": carbon_result["formula_used"],
-            "scale_status": (latest_scan.get("scale_status") or ("calibrated" if _is_cal else "uncalibrated")),
+            "scale_status": ("calibrated" if _is_cal else "uncalibrated"),
             "height_used": hinfo["height_used"],
             "total_height_used_m": hinfo["total_height_used_m"],
             "segment_height_m": hinfo["segment_height_m"],
@@ -1880,6 +1885,11 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             recalc_conf_note += (
                 f" | {hinfo['height_validation_reason'] or hinfo['height_fallback_reason']}"
             )
+        if not _is_cal2:
+            recalc_conf_note += (
+                " | UNKALIBRASI: skala default (PLY unit) dipakai — hasil TIDAK dapat "
+                "diandalkan tanpa kalibrasi skala (auto-pose atau calibrate_scale.py)"
+            )
         update_scan_result(
             scan_id=scan_id,
             dbh_cm=res_override["dbh_cm"],
@@ -1898,9 +1908,9 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             gps_lat=target_scan.get("gps_lat"),
             gps_lon=target_scan.get("gps_lon"),
             species_predictions=species_preds,
-            scale_status=(target_scan.get("scale_status") or ("calibrated" if _is_cal2 else "uncalibrated")),
+            scale_status=("calibrated" if _is_cal2 else "uncalibrated"),
             scale_factor_used=scale_factor,
-            calibration_source=(target_scan.get("calibration_source") or _src2),
+            calibration_source=_src2,
             height_used=hinfo["height_used"],
             total_height_used_m=hinfo["total_height_used_m"],
             segment_height_m=hinfo["segment_height_m"],
@@ -1933,7 +1943,7 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             "karbon_kg": carbon_result["carbon_kg"],
             "co2e_kg": carbon_result["co2e_kg"],
             "confidence_note": recalc_conf_note,
-            "scale_status": (target_scan.get("scale_status") or ("calibrated" if _is_cal2 else "uncalibrated")),
+            "scale_status": ("calibrated" if _is_cal2 else "uncalibrated"),
             "height_used": hinfo["height_used"],
             "total_height_used_m": hinfo["total_height_used_m"],
             "segment_height_m": hinfo["segment_height_m"],
@@ -2055,6 +2065,11 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
         adj_conf_note = "Manually adjusted via 3D Transform Controls"
         if not hinfo["height_validated"]:
             adj_conf_note += f" | {hinfo['height_validation_reason']}"
+        if not _is_cal3:
+            adj_conf_note += (
+                " | UNKALIBRASI: skala default (PLY unit) dipakai — hasil TIDAK dapat "
+                "diandalkan tanpa kalibrasi skala (auto-pose atau calibrate_scale.py)"
+            )
         update_scan_result(
             scan_id=scan_id,
             dbh_cm=float(round(dbh_cm, 2)),
@@ -2073,9 +2088,9 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
             gps_lat=target_scan.get("gps_lat"),
             gps_lon=target_scan.get("gps_lon"),
             species_predictions=species_preds,
-            scale_status=(target_scan.get("scale_status") or ("calibrated" if _is_cal3 else "uncalibrated")),
+            scale_status=("calibrated" if _is_cal3 else "uncalibrated"),
             scale_factor_used=scale_factor,
-            calibration_source=(target_scan.get("calibration_source") or _src3),
+            calibration_source=_src3,
             height_used=hinfo["height_used"],
             total_height_used_m=hinfo["total_height_used_m"],
             segment_height_m=hinfo["segment_height_m"],
@@ -2098,7 +2113,7 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
             "biomassa_kg": carbon_result["total_biomass_kg"],
             "karbon_kg": carbon_result["carbon_kg"],
             "co2e_kg": carbon_result["co2e_kg"],
-            "scale_status": (target_scan.get("scale_status") or ("calibrated" if _is_cal3 else "uncalibrated")),
+            "scale_status": ("calibrated" if _is_cal3 else "uncalibrated"),
             "height_used": hinfo["height_used"],
             "total_height_used_m": hinfo["total_height_used_m"],
             "segment_height_m": hinfo["segment_height_m"],

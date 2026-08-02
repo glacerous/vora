@@ -217,10 +217,10 @@ def test_server_scale_loading():
         os.remove(calib_path)
 
     try:
-        # No calibration file -> default calibrated 1.0
+        # No calibration file -> uncalibrated default fallback (scale 1.0, NOT calibrated)
         sf, is_cal, src = server._load_scale_factor_for_scan("POHON-TEST")
-        check("no calibration.json -> default calibrated",
-              is_cal is True and sf == 1.0 and src == "calibrated", f"({is_cal},{src})")
+        check("no calibration.json -> uncalibrated_default",
+              is_cal is False and sf == 1.0 and src == "uncalibrated_default", f"({is_cal},{src})")
 
         # Manual default calibration -> calibrated
         with open(calib_path, "w") as fh:

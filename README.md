@@ -28,9 +28,11 @@ Modal) → ekstraksi DBH & tinggi dari point cloud → kalkulasi allometrik.
 **Akurasi & kualitas output**
 1. **Scale calibration wajib & eksplisit.** `_load_scale_factor_for_scan()` tidak lagi
    diam-diam memakai 1.0; mengembalikan `(scale_factor, is_calibrated, source)`.
-   Response menandai `scale_status` = `calibrated` / `uncalibrated`. Jika tidak
-   dikalibrasi, hasil **tetap ditampilkan untuk preview tetapi ditandai jelas**
-   (`confidence` + badge merah di frontend) dan `calibrated=false`.
+   Tanpa kalibrasi apa pun, fallback-nya `(1.0, False, "uncalibrated_default")` —
+   hasil TIDAK pernah ditandai `calibrated`. Response menandai `scale_status` =
+   `calibrated` / `uncalibrated`. Jika tidak dikalibrasi, hasil **tetap ditampilkan
+   untuk preview tetapi ditandai jelas** (`confidence` + badge merah di frontend)
+   dan `calibrated=false`.
 2. **Auto-kalibrasi pose.** Jika orang terdeteksi di frame (MediaPipe) dengan confidence
    cukup dan terlokalisasi di point cloud, `scale_factor` diturunkan otomatis
    (`calibration_source = "auto_pose"`). Kalibrasi manual (`calibration.json`) selalu
