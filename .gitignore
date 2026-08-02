@@ -25,3 +25,7 @@ instantsplat_repo/
 
 # Scale calibration (local per-deployment measurement data)
 calibration.json
+
+# Windows tool crashes/dumps
+*.stackdump
+
