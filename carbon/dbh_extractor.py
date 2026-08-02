@@ -377,7 +377,11 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     proj_axes = [i for i in [0, 1, 2] if i != rough_axis_idx]
     
     # ── 2. Stage 1 (Coarse Crop) ──────────────────────────────────────────────
-    # Density peak 2D + crop radius 0.45 units for initial isolation
+    # Density peak 2D + crop radius for initial isolation.
+    # CROP_RADIUS is scale-adaptive: target ~0.40 m in real-world units.
+    #   - For calibrated scans (scale ≈ 0.3):  0.40 / 0.3 ≈ 1.33 → capped at 0.60 PLY units
+    #   - For uncalibrated scans (scale = 1.0): 0.40 / 1.0 = 0.40 PLY units
+    #   - Absolute floor 0.10 PLY units so we never get a degenerate crop
     h1 = points[:, proj_axes[0]]
     h2 = points[:, proj_axes[1]]
     
@@ -386,8 +390,13 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     max_idx = np.unravel_index(np.argmax(hist), hist.shape)
     peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
     peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
-    
-    CROP_RADIUS = 0.45
+
+    # Scale-adaptive coarse crop: ~0.40 m in real-world units, capped at 0.60 PLY units
+    CROP_RADIUS_TARGET_M = 0.40          # generous initial capture (one-sided)
+    CROP_RADIUS = float(np.clip(CROP_RADIUS_TARGET_M / scale, 0.10, 0.60))
+    logger.info(f"[MAST3R DBH] Adaptive CROP_RADIUS = {CROP_RADIUS:.4f} PLY units "
+                f"({CROP_RADIUS * scale * 100:.1f} cm real-world, scale={scale})")
+
     dist_sq = (h1 - peak_h1)**2 + (h2 - peak_h2)**2
     coarse_trunk_mask = dist_sq <= CROP_RADIUS**2
     coarse_trunk_points = points[coarse_trunk_mask]
@@ -395,6 +404,24 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     if len(coarse_trunk_points) < 20:
         coarse_trunk_points = points
         logger.warning("[MAST3R DBH] Coarse crop yielded too few points, using full cloud.")
+
+    # ── 2b. Secondary radial rejection ────────────────────────────────────────
+    # Remove points whose horizontal distance from the peak exceeds the expected
+    # maximum trunk radius (~0.35 m = 70 cm DBH, an extremely large tree).
+    # This strips soil / root / debris that slipped into the coarse crop.
+    MAX_TRUNK_RADIUS_M = 0.35           # one-sided; DBH ≤ 70 cm catches 99%+ of trees
+    max_trunk_radius_ply = float(np.clip(MAX_TRUNK_RADIUS_M / scale, 0.05, CROP_RADIUS))
+    horiz_dist = np.sqrt((coarse_trunk_points[:, proj_axes[0]] - peak_h1)**2 +
+                         (coarse_trunk_points[:, proj_axes[1]] - peak_h2)**2)
+    inlier_radial_mask = horiz_dist <= max_trunk_radius_ply
+    if inlier_radial_mask.sum() >= 20:
+        coarse_trunk_points = coarse_trunk_points[inlier_radial_mask]
+        logger.info(f"[MAST3R DBH] Radial rejection kept {inlier_radial_mask.sum()} / "
+                    f"{len(inlier_radial_mask)} coarse points "
+                    f"(max_r={max_trunk_radius_ply:.4f} PLY = {MAX_TRUNK_RADIUS_M*100:.0f} cm)")
+    else:
+        logger.warning("[MAST3R DBH] Radial rejection too aggressive, keeping original coarse crop.")
+
 
     # ── 3. PCA + Circle Fitting (Pass 1 - Coarse) ─────────────────────────────
     rough_z = coarse_trunk_points[:, rough_axis_idx]
@@ -458,7 +485,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
             continue
         pts_2d = np.column_stack((np.dot(pts_slice, u1_pass1), np.dot(pts_slice, u2_pass1)))
         xc, yc, R, _, _ = fit_circle_2d(pts_2d)
-        if R is not None and R > 0 and R < CROP_RADIUS * 1.5:
+        if R is not None and R > 0 and R < max_trunk_radius_ply * 1.5:
             radii_pass1.append(R)
             centers_2d_pass1.append((xc, yc))
 
@@ -468,7 +495,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
         if len(pts_trunk) >= 5:
             pts_2d = np.column_stack((np.dot(pts_trunk, u1_pass1), np.dot(pts_trunk, u2_pass1)))
             xc, yc, R, _, _ = fit_circle_robust(pts_2d)
-            if R is None or R > CROP_RADIUS * 2.0:
+            if R is None or R > max_trunk_radius_ply * 2.0:
                 R = 0.15 / scale
                 xc, yc = 0.0, 0.0
             radii_pass1 = [R]
