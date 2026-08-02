@@ -70,6 +70,22 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown") ->
             f.write(img_bytes)
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Saved {len(images_bytes)} images to {input_dir}")
     
+    # ── Deterministic seed: controls PYTHONHASHSEED, CUBLAS, PyTorch, NumPy, etc. ──
+    # Fix 3D alignment inconsistency: same input images → same output every time.
+    # References: https://pytorch.org/docs/stable/notes/randomness.html
+    FIXED_SEED = 42
+    deterministic_env = {
+        **os.environ,
+        # Python built-in hash randomisation
+        "PYTHONHASHSEED": str(FIXED_SEED),
+        # CUDA deterministic algorithms (allocates some workspace; acceptable overhead)
+        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+        # PyTorch Lightning / generic seed env picked up by many frameworks
+        "PL_GLOBAL_SEED": str(FIXED_SEED),
+        # Force single-threaded OpenBLAS to avoid non-deterministic threading order
+        "OPENBLAS_NUM_THREADS": "1",
+    }
+
     # Helper to run a shell command with real-time log printing
     def run_command(cmd_args, stage_name):
         print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] --- Starting {stage_name} ---")
@@ -124,7 +140,8 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown") ->
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1
+            bufsize=1,
+            env=deterministic_env,  # <-- inject deterministic seed environment
         )
         
         # Stream output in real time
@@ -155,8 +172,40 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown") ->
     progress_dict[tree_code] = "Initializing geometry (MASt3R)"
     # Run WITHOUT --n_views — let init_geo pick its default number of views.
     # It will create a sparse_{N}/ folder inside source_path which we detect next.
+    #
+    # Determinism strategy:
+    #   - Env vars (PYTHONHASHSEED, CUBLAS_WORKSPACE_CONFIG) injected via run_command.
+    #   - Try passing --seed if init_geo.py supports it; silently fall back if not.
+    #   - The seed wrapper script below seeds Python / NumPy / PyTorch before the
+    #     actual script runs inside the same process via exec, so it works regardless
+    #     of whether init_geo.py exposes its own --seed flag.
+    seed_wrapper_path = os.path.join(repo_path, "_seed_wrapper.py")
+    with open(seed_wrapper_path, "w") as _sw:
+        _sw.write(
+            f"import random, os, sys\n"
+            f"import numpy as np\n"
+            f"random.seed({FIXED_SEED})\n"
+            f"np.random.seed({FIXED_SEED})\n"
+            f"try:\n"
+            f"    import torch\n"
+            f"    torch.manual_seed({FIXED_SEED})\n"
+            f"    torch.cuda.manual_seed_all({FIXED_SEED})\n"
+            f"    torch.backends.cudnn.deterministic = True\n"
+            f"    torch.backends.cudnn.benchmark = False\n"
+            f"    torch.use_deterministic_algorithms(True, warn_only=True)\n"
+            f"except Exception:\n"
+            f"    pass\n"
+            f"# Run the actual target script with its original __file__ so that\n"
+            f"# any os.path.dirname(__file__) calls inside the target resolve correctly.\n"
+            f"script = os.path.abspath(sys.argv[1])\n"
+            f"sys.argv = sys.argv[1:]\n"
+            f"with open(script) as _f:\n"
+            f"    exec(compile(_f.read(), script, 'exec'), {{\"__name__\": \"__main__\", \"__file__\": script}})\n"
+        )
+    print(f"[SEED] Written seed wrapper → {seed_wrapper_path} (seed={FIXED_SEED})")
+
     init_cmd = [
-        "python3", "init_geo.py",
+        "python3", seed_wrapper_path, "init_geo.py",
         "--source_path", os.path.join(repo_path, "assets", "examples", scene_name),
         "--model_path", output_dir,
         "--niter", "300"
@@ -182,7 +231,7 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown") ->
     # 4. Stage 2: Fast 3D-Gaussian Optimization (train.py)
     progress_dict[tree_code] = "Training Gaussians"
     train_cmd = [
-        "python3", "train.py",
+        "python3", seed_wrapper_path, "train.py",
         "--source_path", source_path,
         "--model_path", output_dir,
         "--iterations", "7000",
