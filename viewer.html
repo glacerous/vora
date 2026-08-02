@@ -1577,16 +1577,16 @@
                 const new_radius = radius * scl.x;
                 const new_height = actualHeight * scl.y;
 
-                // Center is absolute position in cadGroup space
-                const new_center = pos.clone();
-
                 // Direction is the local Y axis rotated by cadGeomGroup.quaternion
                 const new_dir = new THREE.Vector3(0, 1, 0).applyQuaternion(rot).normalize();
+
+                // Center is the absolute position of the top end (breast height target) of the cylinder in cadGroup space
+                const new_center = pos.clone().addScaledVector(new_dir, new_height / 2);
 
                 // Compute h_min and h_max centered around the group position
                 const new_h_min = -new_height / 2;
                 const new_h_max = new_height / 2;
-                const new_h_target = 0;
+                const new_h_target = new_height / 2; // target/breast-height is exactly the top of the cylinder!
 
                 const payload = {
                     center_x: new_center.x,
