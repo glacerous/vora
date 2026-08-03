@@ -66,7 +66,8 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
                      height_fallback_reason: str = None, quality_status: str = None,
                      root_to_shoot_ratio: float = None, co2e_uncertainty_pct: float = None,
                      co2e_low_kg: float = None, co2e_high_kg: float = None,
-                     plot_id: int = None, claimed_by_user_id: int = None):
+                     plot_id: int = None, claimed_by_user_id: int = None,
+                     grid_position_x: int = None, grid_position_y: int = None):
     """
     Inserts a new scan record into the tree_scans database table on Cloudflare D1.
     """
@@ -79,9 +80,9 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
         scale_status, scale_factor_used, calibration_source, height_used,
         total_height_used_m, segment_height_m, height_fallback_reason, quality_status,
         root_to_shoot_ratio, co2e_uncertainty_pct, co2e_low_kg, co2e_high_kg,
-        plot_id, claimed_by_user_id
+        plot_id, claimed_by_user_id, grid_position_x, grid_position_y
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     # Use ISO 8601 UTC format for scan_date
     scan_date = datetime.now(timezone.utc).isoformat()
@@ -121,7 +122,9 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
         co2e_low_kg,
         co2e_high_kg,
         plot_id,
-        claimed_by_user_id
+        claimed_by_user_id,
+        grid_position_x,
+        grid_position_y
     ])
 
 def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg: float,

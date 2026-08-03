@@ -129,10 +129,70 @@ def run_test():
     print(f"  - claimed_by_user_id: {scan['claimed_by_user_id']} (Expected: {login_data['user']['id']})")
     
     if scan['plot_id'] == plot_id and scan['claimed_by_user_id'] == login_data['user']['id']:
-        print("\n=== E2E TEST PASSED SUCCESSFULLY! ===")
+        print("SUCCESS: Scan auto-associated correctly!")
     else:
-        print("\n=== E2E TEST FAILED: Association IDs mismatch ===")
+        print("FAIL: Association IDs mismatch")
         sys.exit(1)
+
+    # 7. Test save grid layout positions API
+    print("Testing grid layout save API...")
+    layout_payload = {
+        "layout": [
+            {
+                "tree_code": test_tree_code,
+                "grid_position_x": 3,
+                "grid_position_y": 4
+            }
+        ]
+    }
+    
+    layout_res = session.post(f"{BACKEND_URL}/plots/{plot_id}/layout", json=layout_payload)
+    if layout_res.status_code != 200:
+        print(f"FAIL: Grid layout save failed with status {layout_res.status_code}: {layout_res.text}")
+        sys.exit(1)
+        
+    print("SUCCESS: Grid layout positions saved successfully!")
+    
+    # 8. Verify coordinates in database
+    print("Verifying coordinates in D1 database...")
+    db_scans_updated = execute_d1_query(
+        "SELECT grid_position_x, grid_position_y FROM tree_scans WHERE tree_code = ?",
+        [test_tree_code]
+    )
+    if not db_scans_updated:
+        print("FAIL: Scan not found after coordinate save!")
+        sys.exit(1)
+        
+    updated_scan = db_scans_updated[0]
+    print(f"Updated scan coordinate in D1: x={updated_scan['grid_position_x']}, y={updated_scan['grid_position_y']}")
+    if updated_scan['grid_position_x'] != 3 or updated_scan['grid_position_y'] != 4:
+        print("FAIL: Grid coordinates mismatch in D1!")
+        sys.exit(1)
+        
+    print("SUCCESS: Grid coordinates verified in database!")
+    
+    # 9. Verify coordinates in get plot details API
+    print("Verifying coordinates returned in plot details API...")
+    details_res = session.get(f"{BACKEND_URL}/plots/{plot_code}")
+    if details_res.status_code != 200:
+        print(f"FAIL: Get plot details failed: {details_res.text}")
+        sys.exit(1)
+        
+    details_data = details_res.json()
+    scans_list = details_data.get("scans", [])
+    matched_scan = next((s for s in scans_list if s["tree_code"] == test_tree_code), None)
+    if not matched_scan:
+        print("FAIL: Matching scan not found in API response scans list!")
+        sys.exit(1)
+        
+    print(f"Coordinates returned from API: x={matched_scan.get('grid_position_x')}, y={matched_scan.get('grid_position_y')}")
+    if matched_scan.get('grid_position_x') != 3 or matched_scan.get('grid_position_y') != 4:
+        print("FAIL: Coordinates from API mismatch!")
+        sys.exit(1)
+        
+    print("SUCCESS: Grid coordinates returned correctly in API get plot details!")
+    
+    print("\n=== E2E TEST PASSED SUCCESSFULLY! ===")
 
 if __name__ == "__main__":
     # Wait 2 seconds for server to reload changes if needed

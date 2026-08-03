@@ -2156,6 +2156,14 @@ class RegisterRequest(BaseModel):
     password: str
     display_name: Optional[str] = None
 
+class GridPositionItem(BaseModel):
+    tree_code: str
+    grid_position_x: int
+    grid_position_y: int
+
+class SaveLayoutRequest(BaseModel):
+    layout: list[GridPositionItem]
+
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -2501,6 +2509,28 @@ async def stop_plot_session(plot_id: int, current_user: dict = Depends(get_curre
     execute_d1_query("UPDATE plots SET session_active = 0 WHERE id = ?", [plot_id])
     
     return {"success": True, "message": "Scan session stopped"}
+
+
+@app.post("/plots/{plot_id}/layout", summary="Save visual tree grid positions layout for a plot")
+async def save_plot_layout(plot_id: int, body: SaveLayoutRequest, current_user: dict = Depends(get_current_user)):
+    from storage.d1_client import execute_d1_query
+    
+    # 1. Fetch plot & verify ownership
+    plots = execute_d1_query("SELECT * FROM plots WHERE id = ?", [plot_id])
+    if not plots:
+        raise HTTPException(status_code=404, detail="Plot not found")
+    plot = plots[0]
+    if plot["owner_user_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
+    # 2. Update positions in batch
+    for item in body.layout:
+        execute_d1_query(
+            "UPDATE tree_scans SET grid_position_x = ?, grid_position_y = ? WHERE plot_id = ? AND tree_code = ?",
+            [item.grid_position_x, item.grid_position_y, plot_id, item.tree_code]
+        )
+        
+    return {"success": True, "message": "Layout saved successfully"}
 
 
 # ── Dev entry point ───────────────────────────────────────────────────────────
