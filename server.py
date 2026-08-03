@@ -2163,6 +2163,10 @@ class GridPositionItem(BaseModel):
 
 class SaveLayoutRequest(BaseModel):
     layout: list[GridPositionItem]
+    area_x1: Optional[int] = None
+    area_y1: Optional[int] = None
+    area_x2: Optional[int] = None
+    area_y2: Optional[int] = None
 
 class LoginRequest(BaseModel):
     username: str
@@ -2175,6 +2179,10 @@ class CreatePlotRequest(BaseModel):
     gps_centroid_lat: Optional[float] = None
     gps_centroid_lon: Optional[float] = None
     target_co2e_kg: Optional[float] = None
+    area_x1: Optional[int] = None
+    area_y1: Optional[int] = None
+    area_x2: Optional[int] = None
+    area_y2: Optional[int] = None
 
 class UpdatePlotRequest(BaseModel):
     name: Optional[str] = None
@@ -2183,6 +2191,10 @@ class UpdatePlotRequest(BaseModel):
     gps_centroid_lat: Optional[float] = None
     gps_centroid_lon: Optional[float] = None
     target_co2e_kg: Optional[float] = None
+    area_x1: Optional[int] = None
+    area_y1: Optional[int] = None
+    area_x2: Optional[int] = None
+    area_y2: Optional[int] = None
 
 class ClaimScanRequest(BaseModel):
     tree_code: str
@@ -2304,8 +2316,8 @@ async def create_plot(body: CreatePlotRequest, current_user: dict = Depends(get_
             
     created_at = datetime.now(timezone.utc).isoformat()
     sql = """
-    INSERT INTO plots (plot_code, owner_user_id, name, description, privacy, gps_centroid_lat, gps_centroid_lon, session_active, created_at, updated_at, target_co2e_kg)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+    INSERT INTO plots (plot_code, owner_user_id, name, description, privacy, gps_centroid_lat, gps_centroid_lon, session_active, created_at, updated_at, target_co2e_kg, area_x1, area_y1, area_x2, area_y2)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
     """
     execute_d1_query(sql, [
         code,
@@ -2317,7 +2329,11 @@ async def create_plot(body: CreatePlotRequest, current_user: dict = Depends(get_
         body.gps_centroid_lon,
         created_at,
         created_at,
-        body.target_co2e_kg
+        body.target_co2e_kg,
+        body.area_x1,
+        body.area_y1,
+        body.area_x2,
+        body.area_y2
     ])
     
     return {"success": True, "plot_code": code}
@@ -2390,6 +2406,10 @@ async def get_plot(plot_code: str, optional_user: Optional[dict] = Depends(get_o
             "created_at": plot["created_at"],
             "updated_at": plot["updated_at"],
             "target_co2e_kg": plot["target_co2e_kg"],
+            "area_x1": plot.get("area_x1"),
+            "area_y1": plot.get("area_y1"),
+            "area_x2": plot.get("area_x2"),
+            "area_y2": plot.get("area_y2"),
             "owner": owner_info
         },
         "scans_count": len(valid_scans),
@@ -2423,14 +2443,19 @@ async def update_plot_details(plot_id: int, body: UpdatePlotRequest, current_use
     if target_co2e is not None and target_co2e <= 0:
         target_co2e = None
     
+    area_x1 = body.area_x1 if body.area_x1 is not None else plot["area_x1"]
+    area_y1 = body.area_y1 if body.area_y1 is not None else plot["area_y1"]
+    area_x2 = body.area_x2 if body.area_x2 is not None else plot["area_x2"]
+    area_y2 = body.area_y2 if body.area_y2 is not None else plot["area_y2"]
+    
     updated_at = datetime.now(timezone.utc).isoformat()
     
     sql = """
     UPDATE plots
-    SET name = ?, description = ?, privacy = ?, gps_centroid_lat = ?, gps_centroid_lon = ?, target_co2e_kg = ?, updated_at = ?
+    SET name = ?, description = ?, privacy = ?, gps_centroid_lat = ?, gps_centroid_lon = ?, target_co2e_kg = ?, area_x1 = ?, area_y1 = ?, area_x2 = ?, area_y2 = ?, updated_at = ?
     WHERE id = ?
     """
-    execute_d1_query(sql, [name, description, privacy, gps_lat, gps_lon, target_co2e, updated_at, plot_id])
+    execute_d1_query(sql, [name, description, privacy, gps_lat, gps_lon, target_co2e, area_x1, area_y1, area_x2, area_y2, updated_at, plot_id])
     
     return {"success": True, "message": "Plot updated successfully"}
 
@@ -2597,6 +2622,12 @@ async def save_plot_layout(plot_id: int, body: SaveLayoutRequest, current_user: 
             "UPDATE tree_scans SET grid_position_x = ?, grid_position_y = ? WHERE plot_id = ? AND tree_code = ?",
             [item.grid_position_x, item.grid_position_y, plot_id, item.tree_code]
         )
+        
+    # 3. Update plot bounds
+    execute_d1_query(
+        "UPDATE plots SET area_x1 = ?, area_y1 = ?, area_x2 = ?, area_y2 = ?, updated_at = ? WHERE id = ?",
+        [body.area_x1, body.area_y1, body.area_x2, body.area_y2, datetime.now(timezone.utc).isoformat(), plot_id]
+    )
         
     return {"success": True, "message": "Layout saved successfully"}
 
