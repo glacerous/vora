@@ -2445,7 +2445,68 @@ async def list_user_plots(user_id: int, optional_user: Optional[dict] = Depends(
     else:
         plots = execute_d1_query("SELECT * FROM plots WHERE owner_user_id = ? AND privacy = 'public' ORDER BY created_at DESC", [user_id])
         
-    return {"success": True, "plots": plots}
+    result_plots = []
+    for p in plots:
+        scans = execute_d1_query("SELECT thumbnail_url, co2e_kg FROM tree_scans WHERE plot_id = ?", [p["id"]])
+        scans_count = len(scans)
+        total_co2e = sum((r.get("co2e_kg") or 0.0) for r in scans)
+        thumbnails = [r.get("thumbnail_url") for r in scans if r.get("thumbnail_url")]
+        thumbnails = thumbnails[:3]
+        
+        p_dict = dict(p)
+        p_dict["scans_count"] = scans_count
+        p_dict["total_co2e_kg"] = float(round(total_co2e, 2))
+        p_dict["thumbnails"] = thumbnails
+        result_plots.append(p_dict)
+        
+    return {"success": True, "plots": result_plots}
+
+
+@app.get("/plots", summary="List all public plots")
+async def list_public_plots():
+    from storage.d1_client import execute_d1_query
+    plots = execute_d1_query("SELECT * FROM plots WHERE privacy = 'public' ORDER BY created_at DESC")
+    
+    result_plots = []
+    for p in plots:
+        scans = execute_d1_query("SELECT thumbnail_url, co2e_kg FROM tree_scans WHERE plot_id = ?", [p["id"]])
+        scans_count = len(scans)
+        total_co2e = sum((r.get("co2e_kg") or 0.0) for r in scans)
+        thumbnails = [r.get("thumbnail_url") for r in scans if r.get("thumbnail_url")]
+        thumbnails = thumbnails[:3]
+        
+        p_dict = dict(p)
+        p_dict["scans_count"] = scans_count
+        p_dict["total_co2e_kg"] = float(round(total_co2e, 2))
+        p_dict["thumbnails"] = thumbnails
+        result_plots.append(p_dict)
+        
+    return {"success": True, "plots": result_plots}
+
+
+@app.get("/users/{user_id}/scans", summary="List all scans claimed by a user")
+async def list_user_scans(user_id: int, optional_user: Optional[dict] = Depends(get_optional_user)):
+    from storage.d1_client import execute_d1_query, populate_scan_defaults
+    is_owner = optional_user and optional_user["id"] == user_id
+    if not is_owner:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
+    scans = execute_d1_query("SELECT * FROM tree_scans WHERE claimed_by_user_id = ? ORDER BY scan_date DESC", [user_id])
+    
+    for r in scans:
+        if r.get("geometry_3d"):
+            try:
+                r["geometry_3d"] = json.loads(r["geometry_3d"])
+            except Exception:
+                pass
+        if r.get("species_predictions"):
+            try:
+                r["species_predictions"] = json.loads(r["species_predictions"])
+            except Exception:
+                pass
+        populate_scan_defaults(r)
+        
+    return {"success": True, "scans": scans}
 
 
 @app.post("/plots/{plot_id}/claim-scan", summary="Claim an anonymous scan into a user plot")
