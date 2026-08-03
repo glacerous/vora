@@ -698,6 +698,8 @@ def _reconstruct_thread(
     p2: list[float] = None,
     width: int = None,
     height: int = None,
+    plot_id: int = None,
+    claimed_by_user_id: int = None,
 ) -> None:
     import modal
     progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
@@ -1029,6 +1031,8 @@ def _reconstruct_thread(
                     co2e_uncertainty_pct=carbon_est.get("co2e_uncertainty_pct"),
                     co2e_low_kg=carbon_est.get("co2e_low_kg"),
                     co2e_high_kg=carbon_est.get("co2e_high_kg"),
+                    plot_id=plot_id,
+                    claimed_by_user_id=claimed_by_user_id,
                 )
                 upd("done", f"✓ Done in {elapsed:.0f}s — {mb:.1f} MB Gaussian Splat ready! (Tree code: {tree_code})")
             except Exception as exc:
@@ -1089,13 +1093,51 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    # Using wildcard because this API is credential-free (no cookies / auth headers).
-    # Switch to the explicit `origins` list above if you add credential-based auth.
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+from fastapi import Cookie, Depends, HTTPException, status
+import secrets
+import json
+
+async def get_optional_user(session_token: Optional[str] = Cookie(None)):
+    if not session_token:
+        return None
+    try:
+        from storage.d1_client import execute_d1_query
+        sql = "SELECT * FROM sessions WHERE token = ?"
+        sessions = execute_d1_query(sql, [session_token])
+        if not sessions:
+            return None
+        
+        session = sessions[0]
+        # Replace Z with +00:00 for backward compatibility in Python fromisoformat
+        expires_str = session["expires_at"].replace('Z', '+00:00')
+        expires_at = datetime.fromisoformat(expires_str)
+        if expires_at < datetime.now(timezone.utc):
+            execute_d1_query("DELETE FROM sessions WHERE token = ?", [session_token])
+            return None
+        
+        users = execute_d1_query("SELECT id, username, display_name, is_demo_account, created_at FROM users WHERE id = ?", [session["user_id"]])
+        if not users:
+            return None
+        return users[0]
+    except Exception as e:
+        print(f"[AUTH ERROR] Failed checking optional user session: {e}")
+        return None
+
+async def get_current_user(session_token: Optional[str] = Cookie(None)):
+    user = await get_optional_user(session_token)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication credentials were not provided or are invalid."
+        )
+    return user
 
 
 # ── Static / file-serving routes ─────────────────────────────────────────────
@@ -1225,6 +1267,7 @@ async def reconstruct(
     remove_bg_query: Optional[bool] = Query(default=None, alias="remove_background"),
     gps_lat_query: Optional[float] = Query(default=None, alias="gps_lat"),
     gps_lon_query: Optional[float] = Query(default=None, alias="gps_lon"),
+    optional_user: Optional[dict] = Depends(get_optional_user),
 ):
     """
     Dispatches the GPU reconstruction job (via Modal) as a background task.
@@ -1255,6 +1298,20 @@ async def reconstruct(
     width = body.width if body else None
     height = body.height if body else None
 
+    # Resolve active plot session for auto-association
+    plot_id = None
+    claimed_by_user_id = None
+    if optional_user:
+        from storage.d1_client import execute_d1_query
+        active_plots = execute_d1_query(
+            "SELECT id FROM plots WHERE owner_user_id = ? AND session_active = 1 LIMIT 1",
+            [optional_user["id"]]
+        )
+        if active_plots:
+            plot_id = active_plots[0]["id"]
+            claimed_by_user_id = optional_user["id"]
+            print(f"[RECONSTRUCT] Auto-associating scan with active plot ID {plot_id} for user ID {claimed_by_user_id}")
+
     state["error"] = None
     state["tree_code"] = final_code
     upd("reconstructing", "Queuing reconstruction…")
@@ -1267,7 +1324,9 @@ async def reconstruct(
         p1,
         p2,
         width,
-        height
+        height,
+        plot_id,
+        claimed_by_user_id
     )
     return {"started": True, "tree_code": final_code}
 
@@ -2084,6 +2143,364 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Auth & Plot Endpoints ─────────────────────────────────────────────────────
+from fastapi import Response
+
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() == "true"
+COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "none").lower()
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    display_name: Optional[str] = None
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class CreatePlotRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    privacy: Optional[str] = "private"
+    gps_centroid_lat: Optional[float] = None
+    gps_centroid_lon: Optional[float] = None
+
+class UpdatePlotRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    privacy: Optional[str] = None
+    gps_centroid_lat: Optional[float] = None
+    gps_centroid_lon: Optional[float] = None
+
+class ClaimScanRequest(BaseModel):
+    tree_code: str
+
+# ── Auth Endpoints ────────────────────────────────────────────────────────────
+
+@app.post("/auth/register", summary="Register a new user")
+async def register_user(body: RegisterRequest):
+    username = body.username.strip().lower()
+    if not username or not body.password:
+        raise HTTPException(status_code=400, detail="Username and password are required")
+    
+    from storage.d1_client import execute_d1_query
+    # Check if username exists
+    existing = execute_d1_query("SELECT id FROM users WHERE username = ?", [username])
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already exists")
+    
+    # Hash password
+    from storage.auth_utils import hash_password
+    pwd_hash, pwd_salt = hash_password(body.password)
+    
+    created_at = datetime.now(timezone.utc).isoformat()
+    display_name = body.display_name or body.username
+    
+    sql = """
+    INSERT INTO users (username, password_hash, password_salt, display_name, is_demo_account, created_at)
+    VALUES (?, ?, ?, ?, 0, ?)
+    """
+    execute_d1_query(sql, [username, pwd_hash, pwd_salt, display_name, created_at])
+    
+    return {"success": True, "message": "User registered successfully"}
+
+
+@app.post("/auth/login", summary="Login and establish httpOnly session cookie")
+async def login_user(body: LoginRequest, response: Response):
+    username = body.username.strip().lower()
+    from storage.d1_client import execute_d1_query
+    users = execute_d1_query("SELECT * FROM users WHERE username = ?", [username])
+    if not users:
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+    
+    user = users[0]
+    from storage.auth_utils import verify_password
+    if not verify_password(body.password, user["password_hash"], user["password_salt"]):
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+    
+    # Create session
+    token = secrets.token_urlsafe(32)
+    created_at = datetime.now(timezone.utc).isoformat()
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    
+    execute_d1_query(
+        "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        [token, user["id"], created_at, expires_at]
+    )
+    
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=7 * 24 * 60 * 60, # 7 days
+        path="/"
+    )
+    
+    return {
+        "success": True,
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "display_name": user["display_name"],
+            "is_demo_account": bool(user["is_demo_account"])
+        }
+    }
+
+
+@app.post("/auth/logout", summary="Logout and invalidate session token")
+async def logout_user(response: Response, session_token: Optional[str] = Cookie(None)):
+    if session_token:
+        from storage.d1_client import execute_d1_query
+        execute_d1_query("DELETE FROM sessions WHERE token = ?", [session_token])
+    
+    response.delete_cookie(
+        key="session_token",
+        path="/",
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE
+    )
+    return {"success": True, "message": "Logged out successfully"}
+
+
+@app.get("/auth/me", summary="Get logged-in user profile")
+async def me_profile(current_user: dict = Depends(get_current_user)):
+    return {
+        "id": current_user["id"],
+        "username": current_user["username"],
+        "display_name": current_user["display_name"],
+        "is_demo_account": bool(current_user["is_demo_account"])
+    }
+
+
+# ── Plot Endpoints ────────────────────────────────────────────────────────────
+
+@app.post("/plots", summary="Create a new plot")
+async def create_plot(body: CreatePlotRequest, current_user: dict = Depends(get_current_user)):
+    from storage.d1_client import execute_d1_query
+    
+    # Generate PLOT-XXXX
+    import string
+    chars = string.ascii_uppercase + string.digits
+    while True:
+        code = "PLOT-" + "".join(secrets.choice(chars) for _ in range(4))
+        # check uniqueness
+        existing = execute_d1_query("SELECT id FROM plots WHERE plot_code = ?", [code])
+        if not existing:
+            break
+            
+    created_at = datetime.now(timezone.utc).isoformat()
+    sql = """
+    INSERT INTO plots (plot_code, owner_user_id, name, description, privacy, gps_centroid_lat, gps_centroid_lon, session_active, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+    """
+    execute_d1_query(sql, [
+        code,
+        current_user["id"],
+        body.name,
+        body.description,
+        body.privacy or "private",
+        body.gps_centroid_lat,
+        body.gps_centroid_lon,
+        created_at,
+        created_at
+    ])
+    
+    return {"success": True, "plot_code": code}
+
+
+@app.get("/plots/{plot_code}", summary="Get plot details, owner info, and statistics aggregation")
+async def get_plot(plot_code: str, optional_user: Optional[dict] = Depends(get_optional_user)):
+    import math
+    from storage.d1_client import execute_d1_query, populate_scan_defaults
+    
+    # Fetch plot
+    plots = execute_d1_query("SELECT * FROM plots WHERE plot_code = ?", [plot_code])
+    if not plots:
+        raise HTTPException(status_code=404, detail="Plot not found")
+        
+    plot = plots[0]
+    is_owner = optional_user and optional_user["id"] == plot["owner_user_id"]
+    
+    if plot["privacy"] == "private" and not is_owner:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
+    # Fetch owner info
+    owners = execute_d1_query("SELECT username, display_name FROM users WHERE id = ?", [plot["owner_user_id"]])
+    owner_info = owners[0] if owners else {"username": "unknown", "display_name": "Unknown User"}
+    
+    # Fetch scans in this plot
+    scans = execute_d1_query("SELECT * FROM tree_scans WHERE plot_id = ?", [plot["id"]])
+    
+    total_co2e_kg = 0.0
+    sum_sigma_sq = 0.0
+    valid_scans = []
+    
+    for r in scans:
+        if r.get("geometry_3d"):
+            try:
+                r["geometry_3d"] = json.loads(r["geometry_3d"])
+            except Exception:
+                pass
+        if r.get("species_predictions"):
+            try:
+                r["species_predictions"] = json.loads(r["species_predictions"])
+            except Exception:
+                pass
+        populate_scan_defaults(r)
+        valid_scans.append(r)
+        
+        co2e = r.get("co2e_kg") or 0.0
+        unc_pct = r.get("co2e_uncertainty_pct")
+        if unc_pct is None:
+            unc_pct = 15.0 # fallback default uncertainty
+            
+        total_co2e_kg += co2e
+        sigma = co2e * (unc_pct / 100.0)
+        sum_sigma_sq += sigma ** 2
+        
+    combined_uncertainty_kg = math.sqrt(sum_sigma_sq)
+    combined_uncertainty_pct = (100.0 * combined_uncertainty_kg / total_co2e_kg) if total_co2e_kg > 0 else 0.0
+    
+    return {
+        "success": True,
+        "plot": {
+            "id": plot["id"],
+            "plot_code": plot["plot_code"],
+            "name": plot["name"],
+            "description": plot["description"],
+            "privacy": plot["privacy"],
+            "gps_centroid_lat": plot["gps_centroid_lat"],
+            "gps_centroid_lon": plot["gps_centroid_lon"],
+            "session_active": bool(plot["session_active"]),
+            "created_at": plot["created_at"],
+            "updated_at": plot["updated_at"],
+            "owner": owner_info
+        },
+        "scans_count": len(valid_scans),
+        "scans": valid_scans,
+        "aggregation": {
+            "total_co2e_kg": float(round(total_co2e_kg, 2)),
+            "combined_uncertainty_kg": float(round(combined_uncertainty_kg, 2)),
+            "combined_uncertainty_pct": float(round(combined_uncertainty_pct, 1))
+        }
+    }
+
+
+@app.patch("/plots/{plot_id}", summary="Update plot metadata")
+async def update_plot_details(plot_id: int, body: UpdatePlotRequest, current_user: dict = Depends(get_current_user)):
+    from storage.d1_client import execute_d1_query
+    
+    plots = execute_d1_query("SELECT * FROM plots WHERE id = ?", [plot_id])
+    if not plots:
+        raise HTTPException(status_code=404, detail="Plot not found")
+        
+    plot = plots[0]
+    if plot["owner_user_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
+    name = body.name if body.name is not None else plot["name"]
+    description = body.description if body.description is not None else plot["description"]
+    privacy = body.privacy if body.privacy is not None else plot["privacy"]
+    gps_lat = body.gps_centroid_lat if body.gps_centroid_lat is not None else plot["gps_centroid_lat"]
+    gps_lon = body.gps_centroid_lon if body.gps_centroid_lon is not None else plot["gps_centroid_lon"]
+    
+    updated_at = datetime.now(timezone.utc).isoformat()
+    
+    sql = """
+    UPDATE plots
+    SET name = ?, description = ?, privacy = ?, gps_centroid_lat = ?, gps_centroid_lon = ?, updated_at = ?
+    WHERE id = ?
+    """
+    execute_d1_query(sql, [name, description, privacy, gps_lat, gps_lon, updated_at, plot_id])
+    
+    return {"success": True, "message": "Plot updated successfully"}
+
+
+@app.get("/users/{user_id}/plots", summary="List plots owned by a user")
+async def list_user_plots(user_id: int, optional_user: Optional[dict] = Depends(get_optional_user)):
+    from storage.d1_client import execute_d1_query
+    is_owner = optional_user and optional_user["id"] == user_id
+    
+    if is_owner:
+        plots = execute_d1_query("SELECT * FROM plots WHERE owner_user_id = ? ORDER BY created_at DESC", [user_id])
+    else:
+        plots = execute_d1_query("SELECT * FROM plots WHERE owner_user_id = ? AND privacy = 'public' ORDER BY created_at DESC", [user_id])
+        
+    return {"success": True, "plots": plots}
+
+
+@app.post("/plots/{plot_id}/claim-scan", summary="Claim an anonymous scan into a user plot")
+async def claim_scan(plot_id: int, body: ClaimScanRequest, current_user: dict = Depends(get_current_user)):
+    from storage.d1_client import execute_d1_query
+    
+    plots = execute_d1_query("SELECT * FROM plots WHERE id = ?", [plot_id])
+    if not plots:
+        raise HTTPException(status_code=404, detail="Plot not found")
+    plot = plots[0]
+    if plot["owner_user_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
+    scans = execute_d1_query("SELECT * FROM tree_scans WHERE tree_code = ?", [body.tree_code])
+    if not scans:
+        raise HTTPException(status_code=404, detail="Scan not found")
+        
+    scan = scans[0]
+    if scan.get("claimed_by_user_id") is not None:
+        raise HTTPException(status_code=409, detail="Scan has already been claimed by another user")
+        
+    execute_d1_query(
+        "UPDATE tree_scans SET plot_id = ?, claimed_by_user_id = ? WHERE tree_code = ?",
+        [plot_id, current_user["id"], body.tree_code]
+    )
+    
+    # Auto update centroid if not set
+    if plot["gps_centroid_lat"] is None and scan.get("gps_lat") is not None:
+        execute_d1_query(
+            "UPDATE plots SET gps_centroid_lat = ?, gps_centroid_lon = ? WHERE id = ?",
+            [scan["gps_lat"], scan["gps_lon"], plot_id]
+        )
+        
+    return {"success": True, "message": f"Successfully claimed scan {body.tree_code}"}
+
+
+@app.post("/plots/{plot_id}/session/start", summary="Start scan capture session for a plot")
+async def start_plot_session(plot_id: int, current_user: dict = Depends(get_current_user)):
+    from storage.d1_client import execute_d1_query
+    
+    plots = execute_d1_query("SELECT * FROM plots WHERE id = ?", [plot_id])
+    if not plots:
+        raise HTTPException(status_code=404, detail="Plot not found")
+    plot = plots[0]
+    if plot["owner_user_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
+    # Set all other user plots active = 0
+    execute_d1_query("UPDATE plots SET session_active = 0 WHERE owner_user_id = ? AND id != ?", [current_user["id"], plot_id])
+    
+    # Enable active session on this plot
+    execute_d1_query("UPDATE plots SET session_active = 1 WHERE id = ?", [plot_id])
+    
+    return {"success": True, "message": "Scan session started for this plot"}
+
+
+@app.post("/plots/{plot_id}/session/stop", summary="Stop scan capture session for a plot")
+async def stop_plot_session(plot_id: int, current_user: dict = Depends(get_current_user)):
+    from storage.d1_client import execute_d1_query
+    
+    plots = execute_d1_query("SELECT * FROM plots WHERE id = ?", [plot_id])
+    if not plots:
+        raise HTTPException(status_code=404, detail="Plot not found")
+    plot = plots[0]
+    if plot["owner_user_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
+    execute_d1_query("UPDATE plots SET session_active = 0 WHERE id = ?", [plot_id])
+    
+    return {"success": True, "message": "Scan session stopped"}
 
 
 # ── Dev entry point ───────────────────────────────────────────────────────────
