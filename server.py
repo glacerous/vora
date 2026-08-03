@@ -2174,6 +2174,7 @@ class CreatePlotRequest(BaseModel):
     privacy: Optional[str] = "private"
     gps_centroid_lat: Optional[float] = None
     gps_centroid_lon: Optional[float] = None
+    target_co2e_kg: Optional[float] = None
 
 class UpdatePlotRequest(BaseModel):
     name: Optional[str] = None
@@ -2181,6 +2182,7 @@ class UpdatePlotRequest(BaseModel):
     privacy: Optional[str] = None
     gps_centroid_lat: Optional[float] = None
     gps_centroid_lon: Optional[float] = None
+    target_co2e_kg: Optional[float] = None
 
 class ClaimScanRequest(BaseModel):
     tree_code: str
@@ -2302,8 +2304,8 @@ async def create_plot(body: CreatePlotRequest, current_user: dict = Depends(get_
             
     created_at = datetime.now(timezone.utc).isoformat()
     sql = """
-    INSERT INTO plots (plot_code, owner_user_id, name, description, privacy, gps_centroid_lat, gps_centroid_lon, session_active, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+    INSERT INTO plots (plot_code, owner_user_id, name, description, privacy, gps_centroid_lat, gps_centroid_lon, session_active, created_at, updated_at, target_co2e_kg)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
     """
     execute_d1_query(sql, [
         code,
@@ -2314,7 +2316,8 @@ async def create_plot(body: CreatePlotRequest, current_user: dict = Depends(get_
         body.gps_centroid_lat,
         body.gps_centroid_lon,
         created_at,
-        created_at
+        created_at,
+        body.target_co2e_kg
     ])
     
     return {"success": True, "plot_code": code}
@@ -2386,6 +2389,7 @@ async def get_plot(plot_code: str, optional_user: Optional[dict] = Depends(get_o
             "session_active": bool(plot["session_active"]),
             "created_at": plot["created_at"],
             "updated_at": plot["updated_at"],
+            "target_co2e_kg": plot["target_co2e_kg"],
             "owner": owner_info
         },
         "scans_count": len(valid_scans),
@@ -2415,15 +2419,18 @@ async def update_plot_details(plot_id: int, body: UpdatePlotRequest, current_use
     privacy = body.privacy if body.privacy is not None else plot["privacy"]
     gps_lat = body.gps_centroid_lat if body.gps_centroid_lat is not None else plot["gps_centroid_lat"]
     gps_lon = body.gps_centroid_lon if body.gps_centroid_lon is not None else plot["gps_centroid_lon"]
+    target_co2e = body.target_co2e_kg if body.target_co2e_kg is not None else plot["target_co2e_kg"]
+    if target_co2e is not None and target_co2e <= 0:
+        target_co2e = None
     
     updated_at = datetime.now(timezone.utc).isoformat()
     
     sql = """
     UPDATE plots
-    SET name = ?, description = ?, privacy = ?, gps_centroid_lat = ?, gps_centroid_lon = ?, updated_at = ?
+    SET name = ?, description = ?, privacy = ?, gps_centroid_lat = ?, gps_centroid_lon = ?, target_co2e_kg = ?, updated_at = ?
     WHERE id = ?
     """
-    execute_d1_query(sql, [name, description, privacy, gps_lat, gps_lon, updated_at, plot_id])
+    execute_d1_query(sql, [name, description, privacy, gps_lat, gps_lon, target_co2e, updated_at, plot_id])
     
     return {"success": True, "message": "Plot updated successfully"}
 
