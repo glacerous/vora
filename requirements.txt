@@ -7,4 +7,5 @@ python-dotenv
 opencv-python-headless
 numpy
 modal
+scipy
 
