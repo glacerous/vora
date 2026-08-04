@@ -13,7 +13,7 @@ image = (
     .run_commands(
         "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git libgl1-mesa-glx libglib2.0-0",
         "git clone --recursive https://github.com/NVlabs/InstantSplat.git /workspace/InstantSplat",
-        "/opt/conda/bin/pip install 'numpy==1.26.0' open3d plyfile icecream pyquaternion configargparse",
+        "/opt/conda/bin/pip install 'numpy==1.26.0' open3d plyfile icecream pyquaternion configargparse rembg mediapipe opencv-python-headless",
         "TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;8.9' /opt/conda/bin/pip install --no-build-isolation --no-deps /workspace/InstantSplat/submodules/simple-knn",
         "TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;8.9' /opt/conda/bin/pip install --no-build-isolation --no-deps /workspace/InstantSplat/submodules/diff-gaussian-rasterization",
         "TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;8.9' /opt/conda/bin/pip install --no-build-isolation --no-deps /workspace/InstantSplat/submodules/fused-ssim",
@@ -28,12 +28,191 @@ image = (
     )
 )
 
+def detect_person_pose(frame_path):
+    import cv2
+    import mediapipe as mp
+    try:
+        mp_pose = mp.solutions.pose
+        with mp_pose.Pose(
+            static_image_mode=True,
+            model_complexity=2,
+            enable_segmentation=False,
+            min_detection_confidence=0.5
+        ) as pose:
+            image = cv2.imread(frame_path)
+            if image is None:
+                return None
+            h, w, _ = image.shape
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            results = pose.process(image_rgb)
+            if not results.pose_landmarks:
+                return None
+            landmarks = results.pose_landmarks.landmark
+            nose = landmarks[mp_pose.PoseLandmark.NOSE]
+            left_ankle = landmarks[mp_pose.PoseLandmark.LEFT_ANKLE]
+            right_ankle = landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE]
+            VISIBILITY_THRESHOLD = 0.5
+            if nose.visibility < VISIBILITY_THRESHOLD:
+                return None
+            ankle_visible_count = 0
+            ankle_x, ankle_y = 0.0, 0.0
+            if left_ankle.visibility >= VISIBILITY_THRESHOLD:
+                ankle_x += left_ankle.x
+                ankle_y += left_ankle.y
+                ankle_visible_count += 1
+            if right_ankle.visibility >= VISIBILITY_THRESHOLD:
+                ankle_x += right_ankle.x
+                ankle_y += right_ankle.y
+                ankle_visible_count += 1
+            if ankle_visible_count == 0:
+                return None
+            foot_x = ankle_x / ankle_visible_count
+            foot_y = ankle_y / ankle_visible_count
+            avg_ankle_visibility = (left_ankle.visibility + right_ankle.visibility) / 2.0
+            confidence = (nose.visibility + avg_ankle_visibility) / 2.0
+            head_px = (int(nose.x * w), int(nose.y * h))
+            foot_px = (int(foot_x * w), int(foot_y * h))
+            return {
+                "head": head_px,
+                "foot": foot_px,
+                "confidence": float(confidence)
+            }
+    except Exception as e:
+        print(f"[MODAL-POSE] Error during pose detection: {e}")
+        return None
+
+def _find_person_scale_in_cloud(points, person_height_m: float, axis_idx: int = 2):
+    import numpy as np
+    if points is None or len(points) < 30:
+        return None
+    z = np.asarray(points[:, axis_idx], dtype=float)
+    z_min = float(z.min())
+    z_max = float(z.max())
+    total_h = z_max - z_min
+    if total_h <= 0:
+        return None
+    proj_axes = [i for i in range(3) if i != axis_idx]
+    x = np.asarray(points[:, proj_axes[0]], dtype=float)
+    y = np.asarray(points[:, proj_axes[1]], dtype=float)
+    grid = 30
+    hist, xedges, yedges = np.histogram2d(x, y, bins=grid)
+    best = None
+    for ix in range(grid):
+        for iy in range(grid):
+            if hist[ix, iy] < 25:
+                continue
+            mask = (
+                (x >= xedges[ix]) & (x < xedges[ix + 1])
+                & (y >= yedges[iy]) & (y < yedges[iy + 1])
+            )
+            pts = points[mask]
+            if len(pts) < 25:
+                continue
+            pz = np.asarray(pts[:, axis_idx], dtype=float)
+            extent = float(pz.max() - pz.min())
+            if not (0.04 * total_h < extent < 0.45 * total_h):
+                continue
+            if (pz.min() - z_min) > 0.30 * total_h:
+                continue
+            if best is None or int(hist[ix, iy]) > best[0]:
+                best = (int(hist[ix, iy]), extent)
+    if best is None:
+        return None
+    _, extent_units = best
+    if extent_units <= 0:
+        return None
+    return float(person_height_m / extent_units)
+
+def auto_calibrate_scale_from_frames(frame_paths, points_3d=None, person_height_m: float = 1.65,
+                                     vertical_axis_idx: int = 2, min_confidence: float = 0.6,
+                                     max_frames: int = 8):
+    import os
+    if not frame_paths:
+        return None
+    frames = [p for p in frame_paths if os.path.exists(p)][:max_frames]
+    if not frames:
+        return None
+    best_confidence = 0.0
+    for p in frames:
+        try:
+            det = detect_person_pose(p)
+        except Exception as e:
+            print(f"[MODAL-CALIB] Pose detection failed for {p}: {e}")
+            det = None
+        if det and det.get("confidence", 0.0) > best_confidence:
+            best_confidence = det["confidence"]
+    if best_confidence < min_confidence:
+        return {
+            "detected": False,
+            "is_calibrated": False,
+            "source": "uncalibrated",
+            "scale_factor": 1.0,
+            "reason": f"tidak ada orang terdeteksi dengan confidence cukup (best={best_confidence:.2f} < {min_confidence})",
+        }
+    if points_3d is None or len(points_3d) == 0:
+        return {
+            "detected": True,
+            "is_calibrated": False,
+            "source": "uncalibrated",
+            "scale_factor": 1.0,
+            "reason": "orang terdeteksi di frame tetapi point cloud untuk kalibrasi tidak tersedia",
+        }
+    sf = _find_person_scale_in_cloud(points_3d, person_height_m, vertical_axis_idx)
+    if sf is None or sf <= 0:
+        return {
+            "detected": True,
+            "is_calibrated": False,
+            "source": "uncalibrated",
+            "scale_factor": 1.0,
+            "reason": "orang terdeteksi di frame tetapi tidak ditemukan klaster orang yang valid di point cloud",
+        }
+    return {
+        "detected": True,
+        "is_calibrated": True,
+        "source": "auto_pose",
+        "scale_factor": sf,
+        "reason": f"auto-kalibrasi via pose (tinggi asumsi {person_height_m}m, confidence={best_confidence:.2f})",
+    }
+
+def parse_ply_coords(ply_path):
+    import numpy as np
+    try:
+        with open(ply_path, "rb") as f:
+            num_vertices = 0
+            is_binary = False
+            raw_props = []
+            while True:
+                line = f.readline().decode("ascii", errors="ignore").strip()
+                if line.startswith("format binary_little_endian"):
+                    is_binary = True
+                elif line.startswith("element vertex"):
+                    num_vertices = int(line.split()[-1])
+                elif line.startswith("property"):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        raw_props.append((parts[1], parts[2]))
+                elif line == "end_header":
+                    break
+            if num_vertices <= 0 or not is_binary:
+                return None
+            dtype_map = []
+            for p_type, p_name in raw_props:
+                if p_type in ("float", "float32"):   dtype_map.append((p_name, "<f4"))
+                elif p_type in ("int", "int32", "uint"): dtype_map.append((p_name, "<i4"))
+                elif p_type in ("uchar", "uint8"):   dtype_map.append((p_name, "u1"))
+                else:                                 dtype_map.append((p_name, "<f4"))
+            vertex_data = np.fromfile(f, dtype=np.dtype(dtype_map), count=num_vertices)
+            return np.column_stack((vertex_data["x"], vertex_data["y"], vertex_data["z"])).astype(np.float64)
+    except Exception as e:
+        print(f"[MODAL-CALIB-ERROR] Failed to parse PLY: {e}")
+        return None
+
 @app.function(
     gpu=GPU_CONFIG,
     timeout=1800,  # 30 minutes
     image=image
 )
-def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown") -> dict:
+def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", remove_background: bool = False) -> dict:
     import os
     import time
     import shutil
@@ -63,6 +242,30 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown") ->
         shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     
+    # ── Background removal on Modal ──
+    if remove_background:
+        try:
+            from rembg import remove
+            from PIL import Image
+            import io
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Running background removal using rembg on {len(images_bytes)} frames...")
+            processed_bytes = []
+            for idx, img_bytes in enumerate(images_bytes):
+                input_img = Image.open(io.BytesIO(img_bytes))
+                output_img = remove(input_img)
+                if output_img.mode == "RGBA":
+                    background = Image.new("RGBA", output_img.size, (0, 0, 0, 255))
+                    composited = Image.alpha_composite(background, output_img).convert("RGB")
+                else:
+                    composited = output_img.convert("RGB")
+                out_io = io.BytesIO()
+                composited.save(out_io, format="JPEG", quality=95)
+                processed_bytes.append(out_io.getvalue())
+            images_bytes = processed_bytes
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Background removal complete on Modal.")
+        except Exception as bg_err:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Background removal failed on Modal: {bg_err}")
+
     # Write incoming images to the input directory
     for i, img_bytes in enumerate(images_bytes):
         img_path = os.path.join(input_dir, f"{i:03d}.jpg")
@@ -475,11 +678,32 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown") ->
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Found dense pointmap: {candidate} ({len(points3d_all_data)/1024/1024:.1f} MB)")
             break
 
+    # 7. Auto-pose scale calibration on Modal
+    scale_calibration = None
+    if points3d_data and output_file_path:
+        if len(mast3r_candidates) > 0 and os.path.exists(mast3r_candidates[0]):
+            pts_3d = parse_ply_coords(mast3r_candidates[0])
+            if pts_3d is not None:
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Running auto-pose scale calibration on {len(pts_3d):,} points...")
+                try:
+                    frame_files = sorted([
+                        os.path.join(input_dir, f) for f in os.listdir(input_dir)
+                        if f.lower().endswith(('.jpg', '.jpeg', '.png'))
+                    ])
+                    scale_calibration = auto_calibrate_scale_from_frames(
+                        frame_paths=frame_files,
+                        points_3d=pts_3d
+                    )
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Scale calibration result: {scale_calibration}")
+                except Exception as cal_err:
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Scale calibration failed: {cal_err}")
+
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] --- Export completed successfully ---")
     return {
         "splat": splat_data,
         "points3d": points3d_data,        # None if not found
         "points3d_all": points3d_all_data, # None if not found
+        "scale_calibration": scale_calibration,
     }
 
 

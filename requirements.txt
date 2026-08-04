@@ -7,7 +7,4 @@ python-dotenv
 opencv-python-headless
 numpy
 modal
-rembg
-onnxruntime
-mediapipe
 

@@ -281,6 +281,7 @@ def run_carbon_analysis(
     climate_zone: str = "Unknown",
     P1: list[float] = None,
     P2: list[float] = None,
+    scale_calibration: dict = None,
 ) -> dict:
     try:
         from carbon.allometric import estimate_carbon, get_root_to_shoot_ratio
@@ -296,23 +297,31 @@ def run_carbon_analysis(
         # reconstructed point cloud, use that as the scale factor instead of the raw
         # uncalibrated default. Manual calibration (calibration.json) always wins.
         auto_calib_note = None
-        if (not is_calibrated) and points3d_path and os.path.exists(points3d_path):
-            try:
-                from carbon.height_calibration import auto_calibrate_scale_from_frames
-                from carbon.dbh_extractor import parse_ply_points
-                frames = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
-                pts_3d = parse_ply_points(points3d_path)
-                auto = auto_calibrate_scale_from_frames(frames, pts_3d)
-                if auto and auto.get("is_calibrated") and auto.get("scale_factor", 0) > 0:
-                    scale_factor = float(auto["scale_factor"])
-                    is_calibrated = True
-                    calibration_source = "auto_pose"
-                    auto_calib_note = f"auto-kalibrasi pose diterapkan: {auto['reason']}"
-                    print(f"[CARBON-AUTOCALIB] {auto_calib_note} scale_factor={scale_factor:.6f}")
-                else:
-                    print(f"[CARBON-AUTOCALIB] Pose auto-calibration did not succeed: {auto}")
-            except Exception as auto_err:
-                print(f"[CARBON-AUTOCALIB ERROR] Auto pose calibration failed: {auto_err}")
+        if not is_calibrated:
+            if scale_calibration and scale_calibration.get("is_calibrated"):
+                scale_factor = float(scale_calibration["scale_factor"])
+                is_calibrated = True
+                calibration_source = scale_calibration["source"]
+                auto_calib_note = f"auto-kalibrasi pose diterapkan (offloaded ke Modal): {scale_calibration['reason']}"
+                print(f"[CARBON-AUTOCALIB] {auto_calib_note} scale_factor={scale_factor:.6f}")
+            elif points3d_path and os.path.exists(points3d_path):
+                # Fallback to local auto-calibration if no scale_calibration was provided (e.g. historical scans recalculate)
+                try:
+                    from carbon.height_calibration import auto_calibrate_scale_from_frames
+                    from carbon.dbh_extractor import parse_ply_points
+                    frames = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
+                    pts_3d = parse_ply_points(points3d_path)
+                    auto = auto_calibrate_scale_from_frames(frames, pts_3d)
+                    if auto and auto.get("is_calibrated") and auto.get("scale_factor", 0) > 0:
+                        scale_factor = float(auto["scale_factor"])
+                        is_calibrated = True
+                        calibration_source = "auto_pose"
+                        auto_calib_note = f"auto-kalibrasi pose diterapkan (lokal): {auto['reason']}"
+                        print(f"[CARBON-AUTOCALIB] {auto_calib_note} scale_factor={scale_factor:.6f}")
+                    else:
+                        print(f"[CARBON-AUTOCALIB] Pose auto-calibration did not succeed: {auto}")
+                except Exception as auto_err:
+                    print(f"[CARBON-AUTOCALIB ERROR] Local auto pose calibration failed: {auto_err}")
 
         scale_status = "calibrated" if is_calibrated else "uncalibrated"
 
@@ -678,6 +687,14 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
 
         state["frame_count"] = n
         
+        # Free memory immediately by deleting candidates list and running garbage collection
+        try:
+            del candidates
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+            
         # Pose detection for calibration has been deprecated as MASt3R native metric scale is correct
         state["calibration_frame"] = None
 
@@ -714,56 +731,22 @@ def _reconstruct_thread(
             raise ValueError("No frames found in test_images/")
 
         imgs = []
-        if remove_background:
-            try:
-                from rembg import remove
-                from PIL import Image
-                import io
-                print(f"[RECONSTRUCT] Running background removal using rembg on {len(files)} frames...")
-                for idx, f in enumerate(files):
-                    upd("reconstructing", f"Removing background: frame {idx+1}/{len(files)}...")
-                    with open(f, "rb") as fh:
-                        file_bytes = fh.read()
-                    
-                    # Process with rembg
-                    input_img = Image.open(io.BytesIO(file_bytes))
-                    output_img = remove(input_img)
-                    
-                    # Composite on a solid black background
-                    if output_img.mode == "RGBA":
-                        background = Image.new("RGBA", output_img.size, (0, 0, 0, 255))
-                        composited = Image.alpha_composite(background, output_img).convert("RGB")
-                    else:
-                        composited = output_img.convert("RGB")
-                    
-                    # Convert back to jpeg bytes
-                    out_io = io.BytesIO()
-                    composited.save(out_io, format="JPEG", quality=95)
-                    imgs.append(out_io.getvalue())
-                print(f"[RECONSTRUCT] Background removal complete.")
-            except Exception as bg_err:
-                print(f"[RECONSTRUCT ERROR] Background removal failed: {bg_err}. Falling back to original frames.")
-                imgs = []
-                for f in files:
-                    with open(f, "rb") as fh:
-                        imgs.append(fh.read())
-        else:
-            for f in files:
-                with open(f, "rb") as fh:
-                    imgs.append(fh.read())
+        for f in files:
+            with open(f, "rb") as fh:
+                imgs.append(fh.read())
 
         upd("reconstructing", f"Sending {len(imgs)} frames to Modal A10G GPU…")
         
         t0 = time.time()
         print(f"[RECONSTRUCT] Connecting to Modal pipeline for tree_code '{tree_code}' at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t0))}")
-        print(f"[RECONSTRUCT] Uploading {len(imgs)} frames to GPU cloud (background removed: {remove_background})...")
+        print(f"[RECONSTRUCT] Uploading {len(imgs)} frames to GPU cloud (background removed on Modal: {remove_background})...")
         
         if state.get("cancel_requested", False):
             raise RuntimeError("Job cancelled by user")
         fn     = modal.Function.from_name("instantsplat-app", "run_reconstruction")
         
         t_remote_start = time.time()
-        result = fn.remote(imgs, tree_code)
+        result = fn.remote(imgs, tree_code, remove_background)
         t_remote_end = time.time()
         
         elapsed_remote = t_remote_end - t_remote_start
@@ -771,10 +754,12 @@ def _reconstruct_thread(
         print(f"[RECONSTRUCT] Remote duration: {elapsed_remote:.2f} seconds")
 
         # ── Unpack result (new dict format: {splat, points3d}) ──────────────
+        scale_calibration = None
         if isinstance(result, dict):
             splat_bytes    = result.get("splat", b"")
             points3d_bytes = result.get("points3d")   # may be None
             points3d_all_bytes = result.get("points3d_all") # may be None
+            scale_calibration = result.get("scale_calibration") # may be None
         else:
             # Backward compat: old Modal version returned raw bytes
             splat_bytes    = result
@@ -949,7 +934,8 @@ def _reconstruct_thread(
             wood_density_source=wood_density_source,
             climate_zone=climate_zone,
             P1=P1_3d,
-            P2=P2_3d
+            P2=P2_3d,
+            scale_calibration=scale_calibration,
         )
         
         # Append fallback message to confidence note if GPS not available
