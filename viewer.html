@@ -915,9 +915,10 @@
         // =========================================================================
         const urlParams = new URLSearchParams(window.location.search);
         let splatPath = urlParams.get('url') || urlParams.get('file') || 'output/result.ply';
+        const useProxy = urlParams.get('proxy') !== 'false';
 
         // Rewrite R2 URLs to use the local server streaming proxy (bypasses ISP blocks and CORS policies)
-        if (splatPath.includes('.r2.dev') && splatPath.includes('/tree_scans/') && (splatPath.startsWith('http://') || splatPath.startsWith('https://')) && !splatPath.includes('localhost') && !splatPath.includes('127.0.0.1')) {
+        if (useProxy && splatPath.includes('.r2.dev') && splatPath.includes('/tree_scans/') && (splatPath.startsWith('http://') || splatPath.startsWith('https://')) && !splatPath.includes('localhost') && !splatPath.includes('127.0.0.1')) {
             const parts = splatPath.split('/tree_scans/');
             if (parts.length === 2) {
                 const subParts = parts[1].split('/');
