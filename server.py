@@ -1126,7 +1126,31 @@ async def get_current_user(session_token: Optional[str] = Cookie(None)):
     return user
 
 
-# ── Static / file-serving routes ─────────────────────────────────────────────
+@app.get("/metrics", summary="Get server memory usage metrics")
+async def get_metrics():
+    import os
+    max_rss_mb = 0.0
+    current_rss_mb = 0.0
+    try:
+        import resource
+        # ru_maxrss is in KB on Linux
+        max_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    except Exception:
+        pass
+    try:
+        with open("/proc/self/status", "r") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    current_rss_mb = int(line.split()[1]) / 1024
+                    break
+    except Exception:
+        pass
+    return {
+        "max_rss_mb": max_rss_mb,
+        "current_rss_mb": current_rss_mb,
+        "pid": os.getpid()
+    }
+
 
 @app.get("/", include_in_schema=False)
 async def index():
