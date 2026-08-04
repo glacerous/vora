@@ -1134,7 +1134,7 @@ async def get_current_user(session_token: Optional[str] = Cookie(None)):
     user = await get_optional_user(session_token)
     if not user:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=401,
             detail="Authentication credentials were not provided or are invalid."
         )
     return user
@@ -2161,12 +2161,21 @@ class GridPositionItem(BaseModel):
     grid_position_x: int
     grid_position_y: int
 
+class PlotAreaItem(BaseModel):
+    id: Optional[int] = None
+    name: Optional[str] = None
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
 class SaveLayoutRequest(BaseModel):
     layout: list[GridPositionItem]
     area_x1: Optional[int] = None
     area_y1: Optional[int] = None
     area_x2: Optional[int] = None
     area_y2: Optional[int] = None
+    areas: Optional[list[PlotAreaItem]] = None
 
 class LoginRequest(BaseModel):
     username: str
@@ -2197,6 +2206,9 @@ class UpdatePlotRequest(BaseModel):
     area_y2: Optional[int] = None
 
 class ClaimScanRequest(BaseModel):
+    tree_code: str
+
+class RemoveScanRequest(BaseModel):
     tree_code: str
 
 # ── Auth Endpoints ────────────────────────────────────────────────────────────
@@ -2392,6 +2404,17 @@ async def get_plot(plot_code: str, optional_user: Optional[dict] = Depends(get_o
     combined_uncertainty_kg = math.sqrt(sum_sigma_sq)
     combined_uncertainty_pct = (100.0 * combined_uncertainty_kg / total_co2e_kg) if total_co2e_kg > 0 else 0.0
     
+    # Fetch plot areas
+    areas = execute_d1_query("SELECT id, name, x1, y1, x2, y2 FROM plot_areas WHERE plot_id = ?", [plot["id"]])
+    areas_list = [{
+        "id": a["id"],
+        "name": a.get("name"),
+        "x1": a["x1"],
+        "y1": a["y1"],
+        "x2": a["x2"],
+        "y2": a["y2"]
+    } for a in areas]
+    
     return {
         "success": True,
         "plot": {
@@ -2410,6 +2433,7 @@ async def get_plot(plot_code: str, optional_user: Optional[dict] = Depends(get_o
             "area_y1": plot.get("area_y1"),
             "area_x2": plot.get("area_x2"),
             "area_y2": plot.get("area_y2"),
+            "areas": areas_list,
             "owner": owner_info
         },
         "scans_count": len(valid_scans),
@@ -2568,6 +2592,29 @@ async def claim_scan(plot_id: int, body: ClaimScanRequest, current_user: dict = 
     return {"success": True, "message": f"Successfully claimed scan {body.tree_code}"}
 
 
+@app.post("/plots/{plot_id}/remove-scan", summary="Remove a scan from a plot")
+async def remove_scan(plot_id: int, body: RemoveScanRequest, current_user: dict = Depends(get_current_user)):
+    from storage.d1_client import execute_d1_query
+    
+    plots = execute_d1_query("SELECT * FROM plots WHERE id = ?", [plot_id])
+    if not plots:
+        raise HTTPException(status_code=404, detail="Plot not found")
+    plot = plots[0]
+    if plot["owner_user_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
+    scans = execute_d1_query("SELECT * FROM tree_scans WHERE tree_code = ? AND plot_id = ?", [body.tree_code, plot_id])
+    if not scans:
+        raise HTTPException(status_code=404, detail="Scan not found in this plot")
+        
+    execute_d1_query(
+        "UPDATE tree_scans SET plot_id = NULL, grid_position_x = NULL, grid_position_y = NULL WHERE tree_code = ?",
+        [body.tree_code]
+    )
+    
+    return {"success": True, "message": f"Successfully removed scan {body.tree_code} from plot"}
+
+
 @app.post("/plots/{plot_id}/session/start", summary="Start scan capture session for a plot")
 async def start_plot_session(plot_id: int, current_user: dict = Depends(get_current_user)):
     from storage.d1_client import execute_d1_query
@@ -2628,6 +2675,17 @@ async def save_plot_layout(plot_id: int, body: SaveLayoutRequest, current_user: 
         "UPDATE plots SET area_x1 = ?, area_y1 = ?, area_x2 = ?, area_y2 = ?, updated_at = ? WHERE id = ?",
         [body.area_x1, body.area_y1, body.area_x2, body.area_y2, datetime.now(timezone.utc).isoformat(), plot_id]
     )
+    
+    # 4. Update plot areas list
+    if body.areas is not None:
+        # Delete existing plot areas
+        execute_d1_query("DELETE FROM plot_areas WHERE plot_id = ?", [plot_id])
+        # Insert the new list of areas
+        for a in body.areas:
+            execute_d1_query(
+                "INSERT INTO plot_areas (plot_id, name, x1, y1, x2, y2) VALUES (?, ?, ?, ?, ?, ?)",
+                [plot_id, a.name, a.x1, a.y1, a.x2, a.y2]
+            )
         
     return {"success": True, "message": "Layout saved successfully"}
 
@@ -2635,4 +2693,4 @@ async def save_plot_layout(plot_id: int, body: SaveLayoutRequest, current_user: 
 # ── Dev entry point ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=False)
