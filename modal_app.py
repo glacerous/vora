@@ -321,11 +321,13 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
                 input_img = Image.open(io.BytesIO(img_bytes))
                 output_img = remove(input_img, session=bg_session)
                 if output_img.mode == "RGBA":
-                    # Use a neutral light-gray background (220,220,220) instead of black.
-                    # Black backgrounds confuse MASt3R feature matching because the
-                    # algorithm treats large uniform dark regions as valid geometry.
-                    # Light gray is photogrammetry-neutral and doesn't add false structure.
-                    background = Image.new("RGBA", output_img.size, (220, 220, 220, 255))
+                    # Use pure black (0,0,0) — must match InstantSplat train.py's default
+                    # renderer background color. train.py line 119:
+                    #   bg_color = [1,1,1] if dataset.white_background else [0,0,0]
+                    # Since we don't pass --white_background, the renderer uses black.
+                    # A mismatch (e.g. gray image vs black renderer) causes wrong
+                    # photometric loss on background pixels → floater artifacts.
+                    background = Image.new("RGBA", output_img.size, (0, 0, 0, 255))
                     composited = Image.alpha_composite(background, output_img).convert("RGB")
                 else:
                     composited = output_img.convert("RGB")
