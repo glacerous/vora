@@ -308,22 +308,32 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
     # ── Background removal on Modal ──
     if remove_background:
         try:
-            from rembg import remove
+            from rembg import remove, new_session
             from PIL import Image
             import io
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Initialising rembg session (u2net)...")
+            # Create the session ONCE — avoids re-downloading the model for every frame
+            # which was extremely slow (25 separate model loads).
+            bg_session = new_session("u2net")
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Running background removal using rembg on {len(images_bytes)} frames...")
             processed_bytes = []
             for idx, img_bytes in enumerate(images_bytes):
                 input_img = Image.open(io.BytesIO(img_bytes))
-                output_img = remove(input_img)
+                output_img = remove(input_img, session=bg_session)
                 if output_img.mode == "RGBA":
-                    background = Image.new("RGBA", output_img.size, (0, 0, 0, 255))
+                    # Use a neutral light-gray background (220,220,220) instead of black.
+                    # Black backgrounds confuse MASt3R feature matching because the
+                    # algorithm treats large uniform dark regions as valid geometry.
+                    # Light gray is photogrammetry-neutral and doesn't add false structure.
+                    background = Image.new("RGBA", output_img.size, (220, 220, 220, 255))
                     composited = Image.alpha_composite(background, output_img).convert("RGB")
                 else:
                     composited = output_img.convert("RGB")
                 out_io = io.BytesIO()
                 composited.save(out_io, format="JPEG", quality=95)
                 processed_bytes.append(out_io.getvalue())
+                if (idx + 1) % 5 == 0:
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]   rembg: processed {idx + 1}/{len(images_bytes)} frames")
             images_bytes = processed_bytes
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Background removal complete on Modal.")
         except Exception as bg_err:
