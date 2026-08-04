@@ -1298,19 +1298,9 @@ async def reconstruct(
     width = body.width if body else None
     height = body.height if body else None
 
-    # Resolve active plot session for auto-association
+    # Resolve active plot session for auto-association has been deprecated and removed.
     plot_id = None
-    claimed_by_user_id = None
-    if optional_user:
-        from storage.d1_client import execute_d1_query
-        active_plots = execute_d1_query(
-            "SELECT id FROM plots WHERE owner_user_id = ? AND session_active = 1 LIMIT 1",
-            [optional_user["id"]]
-        )
-        if active_plots:
-            plot_id = active_plots[0]["id"]
-            claimed_by_user_id = optional_user["id"]
-            print(f"[RECONSTRUCT] Auto-associating scan with active plot ID {plot_id} for user ID {claimed_by_user_id}")
+    claimed_by_user_id = optional_user["id"] if optional_user else None
 
     state["error"] = None
     state["tree_code"] = final_code
@@ -2614,41 +2604,6 @@ async def remove_scan(plot_id: int, body: RemoveScanRequest, current_user: dict 
     
     return {"success": True, "message": f"Successfully removed scan {body.tree_code} from plot"}
 
-
-@app.post("/plots/{plot_id}/session/start", summary="Start scan capture session for a plot")
-async def start_plot_session(plot_id: int, current_user: dict = Depends(get_current_user)):
-    from storage.d1_client import execute_d1_query
-    
-    plots = execute_d1_query("SELECT * FROM plots WHERE id = ?", [plot_id])
-    if not plots:
-        raise HTTPException(status_code=404, detail="Plot not found")
-    plot = plots[0]
-    if plot["owner_user_id"] != current_user["id"]:
-        raise HTTPException(status_code=403, detail="Access denied")
-        
-    # Set all other user plots active = 0
-    execute_d1_query("UPDATE plots SET session_active = 0 WHERE owner_user_id = ? AND id != ?", [current_user["id"], plot_id])
-    
-    # Enable active session on this plot
-    execute_d1_query("UPDATE plots SET session_active = 1 WHERE id = ?", [plot_id])
-    
-    return {"success": True, "message": "Scan session started for this plot"}
-
-
-@app.post("/plots/{plot_id}/session/stop", summary="Stop scan capture session for a plot")
-async def stop_plot_session(plot_id: int, current_user: dict = Depends(get_current_user)):
-    from storage.d1_client import execute_d1_query
-    
-    plots = execute_d1_query("SELECT * FROM plots WHERE id = ?", [plot_id])
-    if not plots:
-        raise HTTPException(status_code=404, detail="Plot not found")
-    plot = plots[0]
-    if plot["owner_user_id"] != current_user["id"]:
-        raise HTTPException(status_code=403, detail="Access denied")
-        
-    execute_d1_query("UPDATE plots SET session_active = 0 WHERE id = ?", [plot_id])
-    
-    return {"success": True, "message": "Scan session stopped"}
 
 
 @app.post("/plots/{plot_id}/layout", summary="Save visual tree grid positions layout for a plot")
