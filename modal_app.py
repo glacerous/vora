@@ -787,6 +787,23 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
         except Exception as r2_err:
             print(f"[MODAL-R2-ERROR] Direct R2 uploads failed: {r2_err}")
 
+        # Write completion marker to Modal Dict so the server can recover even
+        # if its fn.remote() connection was dropped (e.g. Render restart mid-job).
+        # Key: "{tree_code}_complete", TTL ~1 hour (server reads it once then deletes it).
+        try:
+            completion_payload = {
+                "splat_url": splat_url,
+                "points3d_url": points3d_url,
+                "points3d_all_url": points3d_all_url,
+                "thumbnail_url": thumbnail_url,
+                "timestamp": ts,
+                "scale_calibration": scale_calibration,
+            }
+            progress_dict[f"{tree_code}_complete"] = completion_payload
+            print(f"[MODAL-COMPLETE] Wrote completion marker for {tree_code} to Modal Dict.")
+        except Exception as dict_err:
+            print(f"[MODAL-COMPLETE] Failed to write completion marker: {dict_err}")
+
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] --- Export completed successfully ---")
     return {
         "splat": splat_data if not r2_config else b"",

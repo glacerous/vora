@@ -795,7 +795,32 @@ def _reconstruct_thread(
         }
 
         t_remote_start = time.time()
-        result = fn.remote(imgs, tree_code, remove_background, r2_config)
+        try:
+            result = fn.remote(imgs, tree_code, remove_background, r2_config)
+        except Exception as remote_exc:
+            # fn.remote() failed — this typically happens when the Render server
+            # restarted while the Modal job was still running (connection reset).
+            # The Modal job may have finished and written its completion marker to
+            # the shared Dict. Poll for it for up to 20 minutes before giving up.
+            print(f"[RECONSTRUCT] fn.remote() raised: {remote_exc}")
+            print(f"[RECONSTRUCT] Checking Modal Dict for crash-recovery completion marker…")
+            result = None
+            import modal as _modal
+            _prog_dict = _modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
+            complete_key = f"{tree_code}_complete"
+            for _attempt in range(120):  # poll up to 20 min (10s intervals)
+                try:
+                    if complete_key in _prog_dict:
+                        result = {**_prog_dict[complete_key], "uploaded": True}
+                        del _prog_dict[complete_key]  # consume it
+                        print(f"[RECONSTRUCT] Crash-recovery: found completion marker after {_attempt * 10}s. URLs restored.")
+                        break
+                except Exception:
+                    pass
+                upd("reconstructing", f"Server restarted mid-job — waiting for Modal to finish… ({_attempt * 10}s)")
+                time.sleep(10)
+            if result is None:
+                raise RuntimeError(f"fn.remote() failed and Modal did not complete within 20 min: {remote_exc}") from remote_exc
         t_remote_end = time.time()
         
         elapsed_remote = t_remote_end - t_remote_start
