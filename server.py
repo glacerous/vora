@@ -512,29 +512,29 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
             i += 1
             continue
 
-        # Get frame matrices (handling both numpy array and encoded jpeg bytes)
+        # Get grayscale frame matrices directly
         raw_a = candidates[idx_a][2]
         raw_b = candidates[idx_b][2]
 
         if isinstance(raw_a, np.ndarray) and raw_a.ndim > 1:
-            frame_a = raw_a
+            gray_a = raw_a if (len(raw_a.shape) == 2 or raw_a.shape[2] == 1) else cv2.cvtColor(raw_a, cv2.COLOR_BGR2GRAY)
+        elif isinstance(raw_a, str) and os.path.exists(raw_a):
+            gray_a = cv2.imread(raw_a, cv2.IMREAD_GRAYSCALE)
         else:
-            frame_a = cv2.imdecode(raw_a, cv2.IMREAD_COLOR)
+            gray_a = cv2.imdecode(raw_a, cv2.IMREAD_GRAYSCALE)
 
         if isinstance(raw_b, np.ndarray) and raw_b.ndim > 1:
-            frame_b = raw_b
+            gray_b = raw_b if (len(raw_b.shape) == 2 or raw_b.shape[2] == 1) else cv2.cvtColor(raw_b, cv2.COLOR_BGR2GRAY)
+        elif isinstance(raw_b, str) and os.path.exists(raw_b):
+            gray_b = cv2.imread(raw_b, cv2.IMREAD_GRAYSCALE)
         else:
-            frame_b = cv2.imdecode(raw_b, cv2.IMREAD_COLOR)
-
-        # Convert to grayscale safely
-        gray_a = frame_a if (len(frame_a.shape) == 2 or frame_a.shape[2] == 1) else cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY)
-        gray_b = frame_b if (len(frame_b.shape) == 2 or frame_b.shape[2] == 1) else cv2.cvtColor(frame_b, cv2.COLOR_BGR2GRAY)
+            gray_b = cv2.imdecode(raw_b, cv2.IMREAD_GRAYSCALE)
 
         # Downscale for performance during overlap matching
-        h_a, w_a = gray_a.shape
+        h_a, w_a = gray_a.shape[:2]
         if w_a > 640:
             gray_a = cv2.resize(gray_a, (640, int(h_a * 640 / w_a)))
-        h_b, w_b = gray_b.shape
+        h_b, w_b = gray_b.shape[:2]
         if w_b > 640:
             gray_b = cv2.resize(gray_b, (640, int(h_b * 640 / w_b)))
 
@@ -596,9 +596,24 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         def _blur(frame):
             h, w = frame.shape[:2]
             if w > 960:
-                frame = cv2.resize(frame, (960, int(h * 960 / w)), interpolation=cv2.INTER_NEAREST)
-            gray = frame if (len(frame.shape) == 2 or frame.shape[2] == 1) else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            return cv2.Laplacian(gray, cv2.CV_64F).var()
+                f_resized = cv2.resize(frame, (960, int(h * 960 / w)), interpolation=cv2.INTER_NEAREST)
+            else:
+                f_resized = frame
+            gray = f_resized if (len(f_resized.shape) == 2 or f_resized.shape[2] == 1) else cv2.cvtColor(f_resized, cv2.COLOR_BGR2GRAY)
+            val = cv2.Laplacian(gray, cv2.CV_64F).var()
+            del gray
+            if f_resized is not frame:
+                del f_resized
+            return val
+
+        # Create a temporary directory for candidates to keep RAM usage at zero
+        temp_candidates_dir = os.path.join(os.path.dirname(video_path), "temp_candidates")
+        if os.path.exists(temp_candidates_dir):
+            try:
+                shutil.rmtree(temp_candidates_dir)
+            except Exception:
+                pass
+        os.makedirs(temp_candidates_dir, exist_ok=True)
 
         candidates, fi = [], 0
         while True:
@@ -624,7 +639,15 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
             if blur_score >= blur_thresh:
                 ok_enc, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
                 if ok_enc:
-                    candidates.append((fi, blur_score, encoded_img))
+                    temp_path = os.path.join(temp_candidates_dir, f"frame_{fi:04d}.jpg")
+                    with open(temp_path, "wb") as f_out:
+                        f_out.write(encoded_img.tobytes() if hasattr(encoded_img, "tobytes") else bytes(encoded_img))
+                    candidates.append((fi, blur_score, temp_path))
+            
+            del frame
+            if fi % 150 == 0:
+                import gc
+                gc.collect()
             fi += 1
             
     except Exception as exc:
@@ -670,6 +693,7 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         for f in glob.glob(os.path.join(FRAMES_DIR, "*")):
             os.remove(f)
 
+        import shutil
         for j, (_, _score, raw_frame) in enumerate([candidates[i] for i in resampled_idxs]):
             if state.get("cancel_requested", False):
                 print("[EXTRACT] Cancel requested by user. Aborting...")
@@ -678,11 +702,21 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
                 return
             
             img_path = os.path.join(FRAMES_DIR, f"{j:04d}.jpg")
-            with open(img_path, "wb") as fh:
-                fh.write(raw_frame.tobytes() if hasattr(raw_frame, "tobytes") else bytes(raw_frame))
+            if isinstance(raw_frame, str) and os.path.exists(raw_frame):
+                try:
+                    shutil.copy(raw_frame, img_path)
+                except Exception as copy_err:
+                    print(f"[EXTRACT ERROR] Failed to copy {raw_frame} to {img_path}: {copy_err}")
+                    # Fallback to write bytes if copy fails
+                    with open(raw_frame, "rb") as rf_fh:
+                        with open(img_path, "wb") as fh:
+                            fh.write(rf_fh.read())
+            else:
+                with open(img_path, "wb") as fh:
+                    fh.write(raw_frame.tobytes() if hasattr(raw_frame, "tobytes") else bytes(raw_frame))
                 
             if j == 0 or j == n - 1 or j == n // 2:
-                print(f"[EXTRACT] Saved frame {j:04d}.jpg directly from encoded JPEG bytes")
+                print(f"[EXTRACT] Saved frame {j:04d}.jpg from source: {raw_frame if isinstance(raw_frame, str) else 'bytes'}")
 
         state["frame_count"] = n
         
@@ -703,6 +737,13 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
     except Exception as exc:
         print(f"[EXTRACT ERROR] During frame processing: {exc}")
         upd("error", str(exc), error=str(exc))
+    finally:
+        try:
+            temp_candidates_dir = os.path.join(os.path.dirname(video_path), "temp_candidates")
+            if os.path.exists(temp_candidates_dir):
+                shutil.rmtree(temp_candidates_dir)
+        except Exception:
+            pass
 
 # ── Background thread: GPU reconstruction + R2/D1 persistence (sync, IO heavy) ─
 def _reconstruct_thread(
