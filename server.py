@@ -815,10 +815,13 @@ def _reconstruct_thread(
         elif splat_bytes:
             with open(out, "wb") as f:
                 f.write(splat_bytes)
-            mb = len(splat_bytes) / 1024 / 1024
-            print(f"[RECONSTRUCT] Saved splat PLY: {out} ({mb:.2f} MB)")
         else:
             print("[RECONSTRUCT] WARNING: No Gaussian splat PLY received!")
+
+        mb = 0.0
+        if os.path.exists(out):
+            mb = os.path.getsize(out) / 1024 / 1024
+        print(f"[RECONSTRUCT] Saved splat PLY: {out} ({mb:.2f} MB)")
 
         # Save points3d.ply
         if uploaded and points3d_url:
