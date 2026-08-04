@@ -1286,8 +1286,12 @@ async def reconstruct(
     if state["stage"] not in ("extracted", "done", "error"):
         raise HTTPException(status_code=400, detail="Not ready — extract frames first")
 
-    # Force remove_background to False as requested by user
-    remove_bg = False
+    # Resolve remove_background
+    remove_bg = True
+    if remove_bg_query is not None:
+        remove_bg = remove_bg_query
+    elif body and body.remove_background is not None:
+        remove_bg = body.remove_background
 
     # Reset cancellation request
     state["cancel_requested"] = False
