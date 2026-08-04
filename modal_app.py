@@ -594,17 +594,9 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
         combined_mask = np.ones(num_vertices, dtype=bool)
 
         # Pass 1: Spatial statistical outlier removal (KNN-based)
-        NB_NEIGHBORS = 20
-        STD_RATIO    = 2.0
-        xyz = np.column_stack((vertex_data["x"], vertex_data["y"], vertex_data["z"])).astype(np.float64)
-        tree = KDTree(xyz)
-        distances, _ = tree.query(xyz, k=NB_NEIGHBORS + 1, workers=-1)
-        mean_dists = distances[:, 1:].mean(axis=1)
-        threshold_spatial = mean_dists.mean() + STD_RATIO * mean_dists.std()
-        spatial_mask = mean_dists <= threshold_spatial
-        combined_mask &= spatial_mask
-        n_spatial = int((~spatial_mask).sum())
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 1 (spatial): removed {n_spatial:,} outliers | remaining {combined_mask.sum():,}")
+        # Skipped for Splat PLY to save ~3-5 minutes of CPU execution.
+        # (Already handled on the sparse measurement point cloud points3d.ply).
+        n_spatial = 0
 
         # Pass 2: Low-opacity removal (logit threshold — keep sigmoid >= ~0.018)
         MIN_OPACITY_LOGIT = -4.0
