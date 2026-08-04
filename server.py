@@ -45,6 +45,7 @@ state: dict = {
     "cancel_requested":  False,
     "calibration_frame":  None,
     "tree_code":         None,
+    "started_at":        None,
 }
 
 def upd(stage: str, msg: str, **kw: Any) -> None:
@@ -74,6 +75,7 @@ class StatusResponse(BaseModel):
     has_result: bool
     calibration_frame: Optional[Any] = None
     tree_code: Optional[str] = None
+    started_at: Optional[float] = None
 
 class HistoryResponse(BaseModel):
     success: bool
@@ -1311,6 +1313,8 @@ async def reconstruct(
 
     state["error"] = None
     state["tree_code"] = final_code
+    import time
+    state["started_at"] = time.time()
     upd("reconstructing", "Queuing reconstruction…")
     background_tasks.add_task(
         _reconstruct_thread,
