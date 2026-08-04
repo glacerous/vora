@@ -594,7 +594,7 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         def _blur(frame):
             h, w = frame.shape[:2]
             if w > 960:
-                frame = cv2.resize(frame, (960, int(h * 960 / w)))
+                frame = cv2.resize(frame, (960, int(h * 960 / w)), interpolation=cv2.INTER_NEAREST)
             gray = frame if (len(frame.shape) == 2 or frame.shape[2] == 1) else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             return cv2.Laplacian(gray, cv2.CV_64F).var()
 
@@ -602,21 +602,27 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         while True:
             if state.get("cancel_requested", False):
                 break
+            
+            if fi % step != 0:
+                ok = cap.grab()
+                if not ok:
+                    break
+                fi += 1
+                continue
+                
             ok, frame = cap.read()
             if not ok:
                 break
             
-            # Resize 4K to 1920px immediately after reading to free up memory
             h, w = frame.shape[:2]
             if w > 1920:
                 frame = cv2.resize(frame, (1920, int(h * 1920 / w)))
 
-            if fi % step == 0:
-                blur_score = _blur(frame)
-                if blur_score >= blur_thresh:
-                    ok_enc, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                    if ok_enc:
-                        candidates.append((fi, blur_score, encoded_img))
+            blur_score = _blur(frame)
+            if blur_score >= blur_thresh:
+                ok_enc, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                if ok_enc:
+                    candidates.append((fi, blur_score, encoded_img))
             fi += 1
             
     except Exception as exc:
@@ -669,21 +675,12 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
                 state["cancel_requested"] = False
                 return
             
-            if isinstance(raw_frame, np.ndarray) and raw_frame.ndim > 1:
-                frame = raw_frame
-            else:
-                frame = cv2.imdecode(raw_frame, cv2.IMREAD_COLOR)
-
-            h, w = frame.shape[:2]
-            if w > 1920:
-                frame = cv2.resize(frame, (1920, int(h * 1920 / w)))
-            cv2.imwrite(
-                os.path.join(FRAMES_DIR, f"{j:04d}.jpg"),
-                frame,
-                [cv2.IMWRITE_JPEG_QUALITY, 95],
-            )
+            img_path = os.path.join(FRAMES_DIR, f"{j:04d}.jpg")
+            with open(img_path, "wb") as fh:
+                fh.write(raw_frame.tobytes() if hasattr(raw_frame, "tobytes") else bytes(raw_frame))
+                
             if j == 0 or j == n - 1 or j == n // 2:
-                print(f"[EXTRACT] Saved frame {j:04d}.jpg - Output resolution: {frame.shape[1]}x{frame.shape[0]}")
+                print(f"[EXTRACT] Saved frame {j:04d}.jpg directly from encoded JPEG bytes")
 
         state["frame_count"] = n
         
