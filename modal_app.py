@@ -207,7 +207,7 @@ def parse_ply_coords(ply_path):
         print(f"[MODAL-CALIB-ERROR] Failed to parse PLY: {e}")
         return None
 
-def upload_to_r2(file_path: str, tree_code: str, custom_timestamp: int = None, is_thumbnail: bool = False) -> str:
+def upload_to_r2(file_path: str, tree_code: str, custom_timestamp: int = None, is_thumbnail: bool = False, custom_filename: str = None) -> str:
     import os
     import time
     import boto3
@@ -232,7 +232,7 @@ def upload_to_r2(file_path: str, tree_code: str, custom_timestamp: int = None, i
         region_name="auto"
     )
     
-    file_name = os.path.basename(file_path)
+    file_name = custom_filename if custom_filename is not None else os.path.basename(file_path)
     ts = custom_timestamp if custom_timestamp is not None else int(time.time())
     
     if is_thumbnail:
@@ -772,16 +772,16 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Uploading files directly to Cloudflare R2 from Modal...")
         try:
             if output_file_path and os.path.exists(output_file_path):
-                splat_url = upload_to_r2(output_file_path, tree_code, custom_timestamp=ts)
+                splat_url = upload_to_r2(output_file_path, tree_code, custom_timestamp=ts, custom_filename="result.ply")
             if len(mast3r_candidates) > 0 and os.path.exists(mast3r_candidates[0]):
-                points3d_url = upload_to_r2(mast3r_candidates[0], tree_code, custom_timestamp=ts)
+                points3d_url = upload_to_r2(mast3r_candidates[0], tree_code, custom_timestamp=ts, custom_filename="points3d.ply")
             npy_path = None
             for candidate in npy_candidates:
                 if os.path.exists(candidate) and os.path.getsize(candidate) >= 1024:
                     npy_path = candidate
                     break
             if npy_path:
-                points3d_all_url = upload_to_r2(npy_path, tree_code, custom_timestamp=ts)
+                points3d_all_url = upload_to_r2(npy_path, tree_code, custom_timestamp=ts, custom_filename="points3D_all.npy")
             try:
                 frame_files = sorted([
                     os.path.join(input_dir, f) for f in os.listdir(input_dir)
