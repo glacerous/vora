@@ -13,7 +13,7 @@ image = (
     .run_commands(
         "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git libgl1-mesa-glx libglib2.0-0",
         "git clone --recursive https://github.com/NVlabs/InstantSplat.git /workspace/InstantSplat",
-        "/opt/conda/bin/pip install 'numpy==1.26.0' open3d plyfile icecream pyquaternion configargparse rembg mediapipe opencv-python-headless",
+        "/opt/conda/bin/pip install 'numpy==1.26.0' open3d plyfile icecream pyquaternion configargparse rembg mediapipe opencv-python-headless boto3",
         "TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;8.9' /opt/conda/bin/pip install --no-build-isolation --no-deps /workspace/InstantSplat/submodules/simple-knn",
         "TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;8.9' /opt/conda/bin/pip install --no-build-isolation --no-deps /workspace/InstantSplat/submodules/diff-gaussian-rasterization",
         "TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;8.9' /opt/conda/bin/pip install --no-build-isolation --no-deps /workspace/InstantSplat/submodules/fused-ssim",
@@ -207,17 +207,80 @@ def parse_ply_coords(ply_path):
         print(f"[MODAL-CALIB-ERROR] Failed to parse PLY: {e}")
         return None
 
+def upload_to_r2(file_path: str, tree_code: str, custom_timestamp: int = None, is_thumbnail: bool = False) -> str:
+    import os
+    import time
+    import boto3
+    from botocore.config import Config
+    
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    access_key = os.environ.get("R2_ACCESS_KEY_ID")
+    secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
+    bucket_name = os.environ.get("R2_BUCKET_NAME")
+    
+    if not all([account_id, access_key, secret_key, bucket_name]):
+        print("[MODAL-R2-ERROR] Missing R2 configuration variables.")
+        return ""
+        
+    endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=Config(signature_version="s3v4"),
+        region_name="auto"
+    )
+    
+    file_name = os.path.basename(file_path)
+    ts = custom_timestamp if custom_timestamp is not None else int(time.time())
+    
+    if is_thumbnail:
+        object_key = f"thumbnails/{tree_code}/{ts}_{file_name}"
+    else:
+        object_key = f"tree_scans/{tree_code}/{ts}_{file_name}"
+        
+    content_type = "application/octet-stream"
+    if file_name.endswith(".ply"):
+        content_type = "application/x-ply"
+    elif file_name.endswith(".jpg") or file_name.endswith(".jpeg"):
+        content_type = "image/jpeg"
+        
+    s3.upload_file(
+        file_path,
+        bucket_name,
+        object_key,
+        ExtraArgs={"ContentType": content_type}
+    )
+    
+    public_url_prefix = os.environ.get("R2_PUBLIC_URL_PREFIX")
+    if public_url_prefix:
+        public_url_prefix = public_url_prefix.rstrip("/")
+        return f"{public_url_prefix}/{object_key}"
+        
+    presigned_url = s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket_name, "Key": object_key},
+        ExpiresIn=604800
+    )
+    return presigned_url
+
 @app.function(
     gpu=GPU_CONFIG,
     timeout=1800,  # 30 minutes
     image=image
 )
-def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", remove_background: bool = False) -> dict:
+def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", remove_background: bool = False, r2_config: dict = None) -> dict:
     import os
     import time
     import shutil
     import subprocess
     import glob
+    
+    if r2_config:
+        for k, v in r2_config.items():
+            if v:
+                os.environ[k] = str(v)
     
     # 1. Locate the repository directory
     repo_path = "/workspace/InstantSplat"
@@ -698,12 +761,52 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
                 except Exception as cal_err:
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Scale calibration failed: {cal_err}")
 
+    # 8. Upload files directly to R2 if config provided
+    splat_url = ""
+    points3d_url = ""
+    points3d_all_url = ""
+    thumbnail_url = ""
+    ts = int(time.time())
+    
+    if r2_config:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Uploading files directly to Cloudflare R2 from Modal...")
+        try:
+            if output_file_path and os.path.exists(output_file_path):
+                splat_url = upload_to_r2(output_file_path, tree_code, custom_timestamp=ts)
+            if len(mast3r_candidates) > 0 and os.path.exists(mast3r_candidates[0]):
+                points3d_url = upload_to_r2(mast3r_candidates[0], tree_code, custom_timestamp=ts)
+            npy_path = None
+            for candidate in npy_candidates:
+                if os.path.exists(candidate) and os.path.getsize(candidate) >= 1024:
+                    npy_path = candidate
+                    break
+            if npy_path:
+                points3d_all_url = upload_to_r2(npy_path, tree_code, custom_timestamp=ts)
+            try:
+                frame_files = sorted([
+                    os.path.join(input_dir, f) for f in os.listdir(input_dir)
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png'))
+                ])
+                if frame_files:
+                    mid_idx = len(frame_files) // 2
+                    thumbnail_url = upload_to_r2(frame_files[mid_idx], tree_code, custom_timestamp=ts, is_thumbnail=True)
+            except Exception as thumb_err:
+                print(f"[MODAL-R2-ERROR] Thumbnail upload failed: {thumb_err}")
+        except Exception as r2_err:
+            print(f"[MODAL-R2-ERROR] Direct R2 uploads failed: {r2_err}")
+
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] --- Export completed successfully ---")
     return {
-        "splat": splat_data,
-        "points3d": points3d_data,        # None if not found
-        "points3d_all": points3d_all_data, # None if not found
+        "splat": splat_data if not r2_config else b"",
+        "points3d": points3d_data if not r2_config else b"",
+        "points3d_all": points3d_all_data if not r2_config else b"",
         "scale_calibration": scale_calibration,
+        "splat_url": splat_url,
+        "points3d_url": points3d_url,
+        "points3d_all_url": points3d_all_url,
+        "thumbnail_url": thumbnail_url,
+        "uploaded": bool(r2_config),
+        "timestamp": ts,
     }
 
 

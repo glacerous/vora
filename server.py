@@ -744,8 +744,17 @@ def _reconstruct_thread(
             raise RuntimeError("Job cancelled by user")
         fn     = modal.Function.from_name("instantsplat-app", "run_reconstruction")
         
+        # Resolve R2 config for direct upload from Modal (prevents OOM on Render)
+        r2_config = {
+            "CLOUDFLARE_ACCOUNT_ID": os.environ.get("CLOUDFLARE_ACCOUNT_ID"),
+            "R2_ACCESS_KEY_ID": os.environ.get("R2_ACCESS_KEY_ID"),
+            "R2_SECRET_ACCESS_KEY": os.environ.get("R2_SECRET_ACCESS_KEY"),
+            "R2_BUCKET_NAME": os.environ.get("R2_BUCKET_NAME"),
+            "R2_PUBLIC_URL_PREFIX": os.environ.get("R2_PUBLIC_URL_PREFIX"),
+        }
+
         t_remote_start = time.time()
-        result = fn.remote(imgs, tree_code, remove_background)
+        result = fn.remote(imgs, tree_code, remove_background, r2_config)
         t_remote_end = time.time()
         
         elapsed_remote = t_remote_end - t_remote_start
@@ -754,45 +763,97 @@ def _reconstruct_thread(
 
         # ── Unpack result (new dict format: {splat, points3d}) ──────────────
         scale_calibration = None
+        splat_bytes = b""
+        points3d_bytes = None
+        points3d_all_bytes = None
+        
+        uploaded = False
+        splat_url = ""
+        points3d_url = ""
+        points3d_all_url = ""
+        thumbnail_url = ""
+        custom_ts = None
+
         if isinstance(result, dict):
-            splat_bytes    = result.get("splat", b"")
-            points3d_bytes = result.get("points3d")   # may be None
-            points3d_all_bytes = result.get("points3d_all") # may be None
-            scale_calibration = result.get("scale_calibration") # may be None
+            scale_calibration = result.get("scale_calibration")
+            uploaded = result.get("uploaded", False)
+            splat_url = result.get("splat_url", "")
+            points3d_url = result.get("points3d_url", "")
+            points3d_all_url = result.get("points3d_all_url", "")
+            thumbnail_url = result.get("thumbnail_url", "")
+            custom_ts = result.get("timestamp")
+            
+            if not uploaded:
+                splat_bytes = result.get("splat", b"")
+                points3d_bytes = result.get("points3d")
+                points3d_all_bytes = result.get("points3d_all")
         else:
             # Backward compat: old Modal version returned raw bytes
-            splat_bytes    = result
-            points3d_bytes = None
-            points3d_all_bytes = None
+            splat_bytes = result
 
-        # Save splat (viewer)
         out = os.path.join(OUTPUT_DIR, "result.ply")
-        with open(out, "wb") as f:
-            f.write(splat_bytes)
+        points3d_path = os.path.join(OUTPUT_DIR, "points3d.ply")
+        points3d_all_path = os.path.join(OUTPUT_DIR, "points3D_all.npy")
 
-        mb = len(splat_bytes) / 1024 / 1024
-        print(f"[RECONSTRUCT] Saved splat PLY: {out} ({mb:.2f} MB)")
+        # Clean old files to free up disk space
+        for p in (out, points3d_path, points3d_all_path):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
 
-        # Save MASt3R point cloud (measurement source)
-        points3d_path = None
-        if points3d_bytes:
-            points3d_path = os.path.join(OUTPUT_DIR, "points3d.ply")
+        # Load splat (viewer)
+        if uploaded and splat_url:
+            print(f"[RECONSTRUCT] Stream-downloading result.ply from R2 URL: {splat_url}")
+            import requests
+            res_dl = requests.get(splat_url, stream=True)
+            with open(out, "wb") as f:
+                for chunk in res_dl.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"[RECONSTRUCT] result.ply stream download completed successfully")
+        elif splat_bytes:
+            with open(out, "wb") as f:
+                f.write(splat_bytes)
+            mb = len(splat_bytes) / 1024 / 1024
+            print(f"[RECONSTRUCT] Saved splat PLY: {out} ({mb:.2f} MB)")
+        else:
+            print("[RECONSTRUCT] WARNING: No Gaussian splat PLY received!")
+
+        # Save points3d.ply
+        if uploaded and points3d_url:
+            print(f"[RECONSTRUCT] Stream-downloading points3d.ply from R2 URL: {points3d_url}")
+            import requests
+            res_dl = requests.get(points3d_url, stream=True)
+            with open(points3d_path, "wb") as f:
+                for chunk in res_dl.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"[RECONSTRUCT] points3d.ply stream download completed successfully")
+            filter_points3d_ply(points3d_path)
+        elif points3d_bytes:
             with open(points3d_path, "wb") as f:
                 f.write(points3d_bytes)
             print(f"[RECONSTRUCT] Saved raw MASt3R point cloud: {points3d_path} ({len(points3d_bytes)/1024:.1f} KB)")
-            
-            # Apply trunk cluster filtering & statistical outlier removal before analysis & upload
             filter_points3d_ply(points3d_path)
         else:
             print("[RECONSTRUCT] No MASt3R point cloud returned — measurement will use splat")
+            points3d_path = None
 
-        # Save MASt3R dense pointmap
-        points3d_all_path = None
-        if points3d_all_bytes:
-            points3d_all_path = os.path.join(OUTPUT_DIR, "points3D_all.npy")
+        # Save points3d_all.npy
+        if uploaded and points3d_all_url:
+            print(f"[RECONSTRUCT] Stream-downloading points3d_all.npy from R2 URL: {points3d_all_url}")
+            import requests
+            res_dl = requests.get(points3d_all_url, stream=True)
+            with open(points3d_all_path, "wb") as f:
+                for chunk in res_dl.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"[RECONSTRUCT] points3d_all.npy stream download completed successfully")
+        elif points3d_all_bytes:
             with open(points3d_all_path, "wb") as f:
                 f.write(points3d_all_bytes)
             print(f"[RECONSTRUCT] Saved raw MASt3R dense pointmap: {points3d_all_path} ({len(points3d_all_bytes)/1024/1024:.1f} MB)")
+        else:
+            points3d_all_path = None
 
         P1_3d = None
         P2_3d = None
@@ -950,37 +1011,42 @@ def _reconstruct_thread(
         if carbon_est and "error" not in carbon_est:
             try:
                 progress_dict[tree_code] = "Uploading results"
-                upd("reconstructing", "Uploading reconstruction files to Cloudflare R2...")
-                from storage.r2_client import upload_splat, upload_thumbnail
-                ts = int(time.time())
-                splat_url = upload_splat(out, tree_code, custom_timestamp=ts)
                 
-                 # If MASt3R points3d.ply was computed, upload it too
-                if points3d_path and os.path.exists(points3d_path):
-                    try:
-                        upload_splat(points3d_path, tree_code, custom_timestamp=ts)
-                        print(f"[RECONSTRUCT] Uploaded MASt3R points3d.ply with timestamp {ts}")
-                    except Exception as upload_err:
-                        print(f"Failed to upload points3d.ply to R2: {upload_err}")
+                if uploaded:
+                    print(f"[RECONSTRUCT] Files were uploaded directly from Modal to R2.")
+                    ts = custom_ts or int(time.time())
+                else:
+                    upd("reconstructing", "Uploading reconstruction files to Cloudflare R2...")
+                    from storage.r2_client import upload_splat, upload_thumbnail
+                    ts = int(time.time())
+                    splat_url = upload_splat(out, tree_code, custom_timestamp=ts)
+                    
+                    # If MASt3R points3d.ply was computed, upload it too
+                    if points3d_path and os.path.exists(points3d_path):
+                        try:
+                            upload_splat(points3d_path, tree_code, custom_timestamp=ts)
+                            print(f"[RECONSTRUCT] Uploaded MASt3R points3d.ply with timestamp {ts}")
+                        except Exception as upload_err:
+                            print(f"Failed to upload points3d.ply to R2: {upload_err}")
 
-                # If MASt3R points3D_all.npy was computed, upload it too
-                if points3d_all_path and os.path.exists(points3d_all_path):
-                    try:
-                        upload_splat(points3d_all_path, tree_code, custom_timestamp=ts)
-                        print(f"[RECONSTRUCT] Uploaded MASt3R points3D_all.npy with timestamp {ts}")
-                    except Exception as upload_err:
-                        print(f"Failed to upload points3D_all.npy to R2: {upload_err}")
+                    # If MASt3R points3D_all.npy was computed, upload it too
+                    if points3d_all_path and os.path.exists(points3d_all_path):
+                        try:
+                            upload_splat(points3d_all_path, tree_code, custom_timestamp=ts)
+                            print(f"[RECONSTRUCT] Uploaded MASt3R points3D_all.npy with timestamp {ts}")
+                        except Exception as upload_err:
+                            print(f"Failed to upload points3D_all.npy to R2: {upload_err}")
 
-                # Select middle representative frame as thumbnail
-                thumbnail_url = None
-                if files:
-                    mid_idx = len(files) // 2
-                    representative_frame = files[mid_idx]
-                    try:
-                        upd("reconstructing", "Uploading representative frame as thumbnail to R2...")
-                        thumbnail_url = upload_thumbnail(representative_frame, tree_code)
-                    except Exception as thumb_err:
-                        print(f"Thumbnail upload error: {thumb_err}")
+                    # Select middle representative frame as thumbnail
+                    thumbnail_url = None
+                    if files:
+                        mid_idx = len(files) // 2
+                        representative_frame = files[mid_idx]
+                        try:
+                            upd("reconstructing", "Uploading representative frame as thumbnail to R2...")
+                            thumbnail_url = upload_thumbnail(representative_frame, tree_code)
+                        except Exception as thumb_err:
+                            print(f"Thumbnail upload error: {thumb_err}")
 
                 upd("reconstructing", "Saving scan results to Cloudflare D1...")
                 from storage.d1_client import save_scan_result
