@@ -610,8 +610,12 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
         # (Already handled on the sparse measurement point cloud points3d.ply).
         n_spatial = 0
 
-        # Pass 2: Low-opacity removal (logit threshold — keep sigmoid >= ~0.018)
-        MIN_OPACITY_LOGIT = -4.0
+        # Pass 2: Low-opacity removal
+        # sigmoid(-2.2) ≈ 0.10 — removes splats with <10% effective opacity.
+        # The previous threshold of -4.0 (1.8%) left semi-transparent "smoke"
+        # Gaussians intact. Raising to -2.2 eliminates the fog/smoke artifact
+        # while preserving dense trunk/branch structure (which has opacity > 0.5).
+        MIN_OPACITY_LOGIT = -2.2
         if "opacity" in vertex_data.dtype.names:
             opacity_mask = vertex_data["opacity"] >= MIN_OPACITY_LOGIT
             combined_mask &= opacity_mask
@@ -619,7 +623,10 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 2 (opacity): removed {n_opacity:,} | remaining {combined_mask.sum():,}")
 
         # Pass 3: Oversized Gaussian removal (log-scale filter)
-        MAX_LOG_SCALE = -1.0   # exp(-1) ~0.37 units; anything larger is almost certainly a floater
+        # exp(-1.5) ≈ 0.22 units — tighter than the previous -1.0 (0.37 units).
+        # Large transparent Gaussians are the primary cause of the smoke effect:
+        # they cover large areas with little colour contribution and look like fog.
+        MAX_LOG_SCALE = -1.5
         scale_names = [n for n in vertex_data.dtype.names if n.startswith("scale_")]
         if scale_names:
             scales = np.column_stack([vertex_data[n] for n in scale_names])
@@ -628,6 +635,18 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
             combined_mask &= scale_mask
             n_scale = int((~scale_mask).sum())
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 3 (scale):   removed {n_scale:,} | remaining {combined_mask.sum():,}")
+
+        # Pass 3.5: Remove "smoke pattern" — low-opacity AND medium-large splats.
+        # Smoke Gaussians: opacity logit in (-3.0, -1.5) AND max_scale > -2.5.
+        # Even after Pass 2+3, some medium-size translucent splats slip through.
+        if "opacity" in vertex_data.dtype.names and scale_names:
+            smoke_opacity_mask = vertex_data["opacity"] < -1.5   # sigmoid < 18%
+            smoke_scale_mask   = np.column_stack([vertex_data[n] for n in scale_names]).max(axis=1) > -2.5
+            smoke_combined     = smoke_opacity_mask & smoke_scale_mask
+            combined_mask &= ~smoke_combined
+            n_smoke = int(smoke_combined.sum())
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 3.5 (smoke): removed {n_smoke:,} translucent-large splats | remaining {combined_mask.sum():,}")
+
 
         n_kept    = int(combined_mask.sum())
         n_removed = num_vertices - n_kept
