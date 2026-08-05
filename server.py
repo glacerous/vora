@@ -1336,6 +1336,11 @@ async def get_metrics():
     }
 
 
+@app.get("/ping", summary="Liveness / ping check endpoint to wake up server")
+async def ping_server():
+    return {"status": "ok", "message": "Server is running."}
+
+
 @app.get("/", include_in_schema=False)
 async def index():
     return FileResponse(os.path.join(BASE_DIR, "index.html"))
