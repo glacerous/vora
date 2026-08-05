@@ -211,21 +211,47 @@ def filter_points3d_ply(ply_path: str) -> None:
             print(f"[RECONSTRUCT-FILTER] Too few points ({len(xyz)}) to filter: {ply_path}")
             return
 
-        # 3. Determine rough vertical axis
-        ranges = xyz.max(axis=0) - xyz.min(axis=0)
-        rough_axis_idx = int(np.argmax(ranges))
-        proj_axes = [i for i in [0, 1, 2] if i != rough_axis_idx]
+        # 3. Force Y as the vertical axis (axis index 1)
+        rough_axis_idx = 1
+        proj_axes = [0, 2]
 
         # 4. Crop horizontally around peak (trunk cluster)
-        h1 = xyz[:, proj_axes[0]]
-        h2 = xyz[:, proj_axes[1]]
-
-        hist, xedges, yedges = np.histogram2d(h1, h2, bins=30)
+        # Stage 1: Rough Horizontal Peak using entire cloud
+        h1_all = xyz[:, proj_axes[0]]
+        h2_all = xyz[:, proj_axes[1]]
+        hist, xedges, yedges = np.histogram2d(h1_all, h2_all, bins=30)
         max_idx = np.unravel_index(np.argmax(hist), hist.shape)
-        peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
-        peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
+        rough_peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
+        rough_peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
 
-        dist_sq = (h1 - peak_h1)**2 + (h2 - peak_h2)**2
+        # Rough crop to remove background (2.2 meters radius in real world)
+        ROUGH_CROP_RADIUS = 2.2
+        dist_sq_rough = (xyz[:, proj_axes[0]] - rough_peak_h1)**2 + (xyz[:, proj_axes[1]] - rough_peak_h2)**2
+        rough_cropped = xyz[dist_sq_rough <= ROUGH_CROP_RADIUS**2]
+        if len(rough_cropped) < 100:
+            rough_cropped = xyz
+
+        # Stage 2: Refined Peak using lower 35% of rough cropped points (Y-down)
+        rough_y = rough_cropped[:, rough_axis_idx]
+        y_min = np.percentile(rough_y, 1)
+        y_max = np.percentile(rough_y, 99)
+        y_height = y_max - y_min
+
+        # Lower 35% height in Y-down convention: Y is close to y_max
+        lower_mask = rough_y >= (y_max - y_height * 0.35)
+        lower_xyz = rough_cropped[lower_mask]
+        if len(lower_xyz) < 100:
+            lower_xyz = rough_cropped
+
+        h1 = lower_xyz[:, proj_axes[0]]
+        h2 = lower_xyz[:, proj_axes[1]]
+
+        hist_ref, xedges_ref, yedges_ref = np.histogram2d(h1, h2, bins=30)
+        max_idx_ref = np.unravel_index(np.argmax(hist_ref), hist_ref.shape)
+        peak_h1 = 0.5 * (xedges_ref[max_idx_ref[0]] + xedges_ref[max_idx_ref[0] + 1])
+        peak_h2 = 0.5 * (yedges_ref[max_idx_ref[1]] + yedges_ref[max_idx_ref[1] + 1])
+
+        dist_sq = (xyz[:, proj_axes[0]] - peak_h1)**2 + (xyz[:, proj_axes[1]] - peak_h2)**2
         CROP_RADIUS = 1.0
         crop_mask = dist_sq <= CROP_RADIUS**2
         
@@ -421,10 +447,17 @@ def run_carbon_analysis(
 
         # ── Quality gate on the circle fit ───────────────────────────────────
         quality_status = "ok"
+        inlier_ratio = dbh_result.get("inlier_ratio", 1.0)
+        invalid_orientation = dbh_result.get("invalid_orientation", False)
+        
         if dbh_result.get("slice_points_count", 0) < 10:
             quality_status = "low_points"
+        elif invalid_orientation:
+            quality_status = "invalid_orientation"
         elif dbh_result.get("mean_fit_error_cm", 0.0) > 10.0:
             quality_status = "high_fit_error"
+        elif inlier_ratio < 0.15:
+            quality_status = "low_inlier_ratio"
 
         carbon_result = estimate_carbon(
             dbh_cm=dbh_result["dbh_cm"],
@@ -462,6 +495,7 @@ def run_carbon_analysis(
             "height_validated":        height_validated,
             "height_validation_reason": height_validation_reason,
             "quality_status":          quality_status,
+            "inlier_ratio":            inlier_ratio,
             "biomass_kg":              carbon_result["total_biomass_kg"],
             "above_ground_biomass_kg": carbon_result["above_ground_biomass_kg"],
             "below_ground_biomass_kg": carbon_result["below_ground_biomass_kg"],
@@ -1147,6 +1181,7 @@ def _reconstruct_thread(
                     segment_height_m=carbon_est.get("segment_height_m"),
                     height_fallback_reason=carbon_est.get("height_fallback_reason"),
                     quality_status=carbon_est.get("quality_status"),
+                    inlier_ratio=carbon_est.get("inlier_ratio"),
                     root_to_shoot_ratio=carbon_est.get("root_to_shoot_ratio"),
                     co2e_uncertainty_pct=carbon_est.get("co2e_uncertainty_pct"),
                     co2e_low_kg=carbon_est.get("co2e_low_kg"),
@@ -2036,6 +2071,20 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             forest_type=forest_type
         )
 
+        # ── Recalculate Quality Status ────────────────────────────────────────
+        quality_status = "ok"
+        inlier_ratio = res_override.get("inlier_ratio", 1.0)
+        invalid_orientation = res_override.get("invalid_orientation", False)
+        
+        if res_override.get("slice_points_count", 0) < 10:
+            quality_status = "low_points"
+        elif invalid_orientation:
+            quality_status = "invalid_orientation"
+        elif res_override.get("mean_fit_error_cm", 0.0) > 10.0:
+            quality_status = "high_fit_error"
+        elif inlier_ratio < 0.15:
+            quality_status = "low_inlier_ratio"
+
         # 9. Update target scan record in Cloudflare D1
         recalc_conf_note = res_override["confidence_note"]
         if not hinfo["height_validated"]:
@@ -2074,7 +2123,8 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             height_fallback_reason=hinfo["height_fallback_reason"],
             height_validated=hinfo["height_validated"],
             height_validation_reason=hinfo["height_validation_reason"],
-            quality_status=target_scan.get("quality_status") or "ok",
+            quality_status=quality_status,
+            inlier_ratio=inlier_ratio,
             root_to_shoot_ratio=carbon_result["root_to_shoot_ratio"],
             co2e_uncertainty_pct=carbon_result["co2e_uncertainty_pct"],
             co2e_low_kg=carbon_result["co2e_low_kg"],
