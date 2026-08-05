@@ -2313,6 +2313,76 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
         # Use the same scan-id-aware loader as every other endpoint for consistency.
         scale_factor, _is_cal3, _src3 = _load_scale_factor_for_scan(tree_code)
 
+        # Derive pointmap (.npy) and points3d (.ply) URLs from splat_file_url for re-slicing
+        splat_file_url = target_scan.get("splat_file_url")
+        local_ply_path = ""
+        if splat_file_url:
+            if "_result.ply" in splat_file_url:
+                base_filename = splat_file_url.rsplit("/", 1)[-1]
+                timestamp = base_filename.split("_")[0]
+                points3d_url = splat_file_url.replace("_result.ply", "_points3d.ply")
+            elif "result.ply" in splat_file_url:
+                base_filename = splat_file_url.rsplit("/", 1)[-1]
+                timestamp = base_filename.split("_")[0] if "_" in base_filename else "default"
+                points3d_url = splat_file_url.replace("result.ply", "points3d.ply")
+            else:
+                base_filename = splat_file_url.rsplit("/", 1)[-1]
+                timestamp = base_filename.split(".")[0]
+                points3d_url = splat_file_url.replace(".ply", "_points3d.ply")
+
+            local_dir = os.path.join(UPLOAD_DIR, "recalculates")
+            os.makedirs(local_dir, exist_ok=True)
+            local_ply_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d.ply")
+
+            if not os.path.exists(local_ply_path) or os.path.getsize(local_ply_path) < 1000:
+                import requests
+                print(f"[ADJUST GEOMETRY] Downloading points3d.ply from {points3d_url}")
+                try:
+                    res_ply = requests.get(points3d_url, timeout=15)
+                    if res_ply.status_code == 200:
+                        with open(local_ply_path, "wb") as f:
+                            f.write(res_ply.content)
+                except Exception as ply_err:
+                    print(f"[ADJUST GEOMETRY ERROR] Failed to download points3d.ply: {ply_err}")
+
+        # Recalculate slice points based on the new cylinder position
+        slice_points_3d = []
+        if local_ply_path and os.path.exists(local_ply_path):
+            try:
+                from carbon.dbh_extractor import parse_ply_points
+                points = parse_ply_points(local_ply_path)
+                if len(points) > 0:
+                    v = np.array([body.dir_x, body.dir_y, body.dir_z])
+                    v_norm = np.linalg.norm(v)
+                    if v_norm > 1e-6:
+                        v = v / v_norm
+                    else:
+                        v = np.array([0.0, -1.0, 0.0])
+
+                    P = np.array([body.center_x, body.center_y, body.center_z])
+                    w = points - P
+                    h_proj = np.dot(w, v)
+                    d_proj = np.linalg.norm(w - h_proj[:, np.newaxis] * v[np.newaxis, :], axis=-1)
+
+                    total_h = body.h_max - body.h_min
+                    base_tol = 0.08 / scale_factor
+                    tol = min(base_tol, total_h * 0.1)
+                    tol = max(tol, 0.02)
+
+                    # Slice at the top/center plane of the new cylinder
+                    slice_mask = (np.abs(h_proj) <= tol) & (np.abs(d_proj - body.radius_units) <= tol * 1.5)
+                    pts_slice = points[slice_mask]
+                    if len(pts_slice) > 500:
+                        import numpy as np
+                        rng = np.random.default_rng(42)
+                        idx = rng.choice(len(pts_slice), size=500, replace=False)
+                        pts_slice = pts_slice[idx]
+                    
+                    slice_points_3d = pts_slice.tolist()
+                    print(f"[ADJUST GEOMETRY] Recalculated {len(slice_points_3d)} slice points around new cylinder.")
+            except Exception as slice_err:
+                print(f"[ADJUST GEOMETRY ERROR] Failed to recalculate slice points: {slice_err}")
+
         # 2. Recalculate metrics based on manual coordinates
         dbh_m = body.radius_units * 2.0 * scale_factor
         dbh_cm = dbh_m * 100.0
@@ -2366,17 +2436,10 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
             "scale_factor":   scale_factor,
             "method":         "Manual transform controls adjustment"
         }
-
-        # 7. Preserve existing slice points if available in geometry_3d
-        raw_geom = target_scan.get("geometry_3d")
-        if raw_geom:
-            try:
-                if isinstance(raw_geom, str):
-                    raw_geom = json.loads(raw_geom)
-                if "slice_points_3d" in raw_geom:
-                    geometry_3d["slice_points_3d"] = raw_geom["slice_points_3d"]
-            except Exception:
-                pass
+        if slice_points_3d:
+            geometry_3d["slice_points_3d"] = slice_points_3d
+        else:
+            geometry_3d["slice_points_3d"] = []
 
         # 8. Safely parse species_predictions to avoid double serialization in update_scan_result
         species_preds = target_scan.get("species_predictions")
