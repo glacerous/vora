@@ -56,7 +56,7 @@ def upd(stage: str, msg: str, **kw: Any) -> None:
 class ReconstructRequest(BaseModel):
     """Optional JSON body for POST /reconstruct."""
     tree_code: Optional[str] = None
-    remove_background: Optional[bool] = True
+    remove_background: Optional[bool] = False
     gps_lat: Optional[float] = None
     gps_lon: Optional[float] = None
     p1: Optional[List[float]] = None
@@ -1468,7 +1468,7 @@ async def reconstruct(
         raise HTTPException(status_code=400, detail="Not ready — extract frames first")
 
     # Resolve remove_background
-    remove_bg = True
+    remove_bg = False
     if remove_bg_query is not None:
         remove_bg = remove_bg_query
     elif body and body.remove_background is not None:
