@@ -8,7 +8,7 @@ from storage.d1_client import execute_d1_query
 
 def main():
     try:
-        sql = "SELECT id, tree_code, scan_date, dbh_cm, tinggi_m, confidence_note, geometry_3d FROM tree_scans ORDER BY id DESC LIMIT 1"
+        sql = "SELECT id, tree_code, scan_date, dbh_cm, tinggi_m, confidence_note, splat_file_url, geometry_3d FROM tree_scans ORDER BY id DESC LIMIT 1"
         scans = execute_d1_query(sql)
         if scans:
             s = scans[0]
@@ -18,6 +18,7 @@ def main():
             print(f"DBH: {s['dbh_cm']}")
             print(f"Height: {s['tinggi_m']}")
             print(f"Confidence Note:\n{s['confidence_note']}")
+            print(f"Splat File URL: {s['splat_file_url']}")
             print(f"Geometry 3D:\n{str(s['geometry_3d'])[:400]}...")
         else:
             print("No scans found")
