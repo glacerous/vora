@@ -948,8 +948,13 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     if len(trunk_points) < 10:
         return {"error": f"Too few points within the crop cylinder ({len(trunk_points)} points)."}
 
-    # 3. Project all points in trunk cylinder column to find height range
-    proj_all = np.dot(trunk_points, v)
+    # 3. Project all points along the trunk column (without height constraint) to find true height range
+    column_mask = d_proj <= crop_radius
+    trunk_column_points = points[column_mask]
+    if len(trunk_column_points) < 10:
+        trunk_column_points = points
+        
+    proj_all = np.dot(trunk_column_points, v)
     h_min = float(np.percentile(proj_all, 2))
     h_max = float(np.percentile(proj_all, 98))
     total_h = h_max - h_min
