@@ -24,6 +24,14 @@ image = (
         "os.makedirs(p, exist_ok=True); "
         "t = os.path.join(p, fn); "
         "print('Checking/Downloading checkpoint...'); "
+        "urllib.request.urlretrieve(url, t) if not os.path.exists(t) else print('exists');\"",
+        "python3 -c \"import urllib.request, os; "
+        "url = 'https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx'; "
+        "fn = 'u2net.onnx'; "
+        "p = '/root/.u2net'; "
+        "os.makedirs(p, exist_ok=True); "
+        "t = os.path.join(p, fn); "
+        "print('Downloading u2net.onnx...'); "
         "urllib.request.urlretrieve(url, t) if not os.path.exists(t) else print('exists');\""
     )
 )
