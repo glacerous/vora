@@ -999,7 +999,27 @@ def _reconstruct_thread(
                     from carbon.dbh_extractor import register_pointmap_to_world, parse_ply_points
                     try:
                         pts_world = parse_ply_points(points3d_path)
-                        R, t = register_pointmap_to_world(pointmap, pts_world)
+                        
+                        # Crop pointmap to only keep points near the clicked trunk axis in camera space.
+                        # This ensures ICP registers trunk-to-trunk rather than trying to align
+                        # the entire background-heavy frame to the cropped world trunk.
+                        v_cam = P2_np - P1_np
+                        v_cam_norm = np.linalg.norm(v_cam)
+                        pts_cam_cropped = pointmap
+                        if v_cam_norm > 1e-6:
+                            v_cam_dir = v_cam / v_cam_norm
+                            valid_mask = ~np.all(pointmap == 0, axis=-1) & ~np.any(np.isnan(pointmap), axis=-1)
+                            pts_cam_all = pointmap[valid_mask]
+                            w_cam = pts_cam_all - P1_np
+                            h_proj_cam = np.dot(w_cam, v_cam_dir)
+                            perp_cam = w_cam - h_proj_cam[:, np.newaxis] * v_cam_dir[np.newaxis, :]
+                            perp_dist_cam = np.linalg.norm(perp_cam, axis=1)
+                            # Keep points within 0.8 units of clicked axis (generous radius in camera units)
+                            crop_mask_cam = (perp_dist_cam <= 0.8) & (h_proj_cam >= -0.5) & (h_proj_cam <= v_cam_norm + 0.5)
+                            if np.sum(crop_mask_cam) >= 20:
+                                pts_cam_cropped = pts_cam_all[crop_mask_cam]
+                                
+                        R, t = register_pointmap_to_world(pts_cam_cropped, pts_world)
                         P1_aligned = P1_np @ R.T + t
                         P2_aligned = P2_np @ R.T + t
                         P1_3d = P1_aligned.tolist()
@@ -1596,6 +1616,83 @@ async def splat_proxy(tree_code: str, filename: str):
             raise HTTPException(status_code=404, detail="File not found in storage")
         raise HTTPException(status_code=500, detail=f"Failed to fetch from R2: {err_msg}")
 
+    # If it is points3d.ply, we intercept, filter on-the-fly, and upload back to R2 in background if it changed.
+    if filename.lower().endswith("points3d.ply"):
+        try:
+            content = await asyncio.to_thread(response["Body"].read)
+            import tempfile
+            import io
+            
+            # Write to a temp file
+            with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as tmp_f:
+                tmp_f.write(content)
+                tmp_path = tmp_f.name
+                
+            # Filter it
+            try:
+                await asyncio.to_thread(filter_points3d_ply, tmp_path)
+                
+                # Read filtered bytes
+                with open(tmp_path, "rb") as tmp_f:
+                    filtered_content = tmp_f.read()
+                    
+                # Clean up temp file
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+                    
+                # If content changed (filtered out noise), upload clean version to R2 in background
+                if len(filtered_content) != len(content):
+                    print(f"[PROXY-FILTER] Filename {filename} was noisy ({len(content)} bytes) -> Cleaned ({len(filtered_content)} bytes). Uploading back to R2 in background...")
+                    
+                    async def upload_clean_back_to_r2():
+                        try:
+                            # Write clean content to a temp file to upload
+                            with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as upload_tmp:
+                                upload_tmp.write(filtered_content)
+                                upload_tmp_path = upload_tmp.name
+                            
+                            # Standardize filename to points3d.ply for upload
+                            std_upload_path = os.path.join(os.path.dirname(upload_tmp_path), "points3d.ply")
+                            import shutil
+                            shutil.copy2(upload_tmp_path, std_upload_path)
+                            
+                            ts_part = None
+                            try:
+                                if "_" in filename:
+                                    ts_part = int(filename.split("_")[0])
+                            except Exception:
+                                pass
+                                
+                            from storage.r2_client import upload_splat
+                            await asyncio.to_thread(upload_splat, std_upload_path, tree_code, ts_part)
+                            
+                            for p in (upload_tmp_path, std_upload_path):
+                                if os.path.exists(p):
+                                    os.remove(p)
+                            print(f"[PROXY-FILTER] Successfully re-uploaded cleaned {filename} to R2 bucket.")
+                        except Exception as upload_err:
+                            print(f"[PROXY-FILTER ERROR] Failed to upload clean file to R2: {upload_err}")
+                            
+                    asyncio.create_task(upload_clean_back_to_r2())
+                    
+                headers = {
+                    "Cache-Control": "public, max-age=31536000, immutable",
+                    "Content-Length": str(len(filtered_content))
+                }
+                return StreamingResponse(io.BytesIO(filtered_content), media_type="application/x-ply", headers=headers)
+                
+            except Exception as filter_err:
+                print(f"[PROXY-FILTER ERROR] Failed to run filter: {filter_err}")
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+        except Exception as read_err:
+            print(f"[PROXY-FILTER ERROR] Failed to read/filter: {read_err}")
+
+    # Fallback/standard streaming response for other files (like result.ply)
     body = response["Body"]
 
     def iter_chunks():
@@ -2021,7 +2118,27 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
         from carbon.dbh_extractor import register_pointmap_to_world, parse_ply_points
         try:
             pts_world = parse_ply_points(local_ply_path)
-            R, t = register_pointmap_to_world(pointmap, pts_world)
+            
+            # Crop pointmap to only keep points near the clicked trunk axis in camera space.
+            # This ensures ICP registers trunk-to-trunk rather than trying to align
+            # the entire background-heavy frame to the cropped world trunk.
+            v_cam = P2_cam - P1_cam
+            v_cam_norm = np.linalg.norm(v_cam)
+            pts_cam_cropped = pointmap
+            if v_cam_norm > 1e-6:
+                v_cam_dir = v_cam / v_cam_norm
+                valid_mask = ~np.all(pointmap == 0, axis=-1) & ~np.any(np.isnan(pointmap), axis=-1)
+                pts_cam_all = pointmap[valid_mask]
+                w_cam = pts_cam_all - P1_cam
+                h_proj_cam = np.dot(w_cam, v_cam_dir)
+                perp_cam = w_cam - h_proj_cam[:, np.newaxis] * v_cam_dir[np.newaxis, :]
+                perp_dist_cam = np.linalg.norm(perp_cam, axis=1)
+                # Keep points within 0.8 units of clicked axis (generous radius in camera units)
+                crop_mask_cam = (perp_dist_cam <= 0.8) & (h_proj_cam >= -0.5) & (h_proj_cam <= v_cam_norm + 0.5)
+                if np.sum(crop_mask_cam) >= 20:
+                    pts_cam_cropped = pts_cam_all[crop_mask_cam]
+                    
+            R, t = register_pointmap_to_world(pts_cam_cropped, pts_world)
             P1 = (P1_cam @ R.T + t).tolist()
             P2 = (P2_cam @ R.T + t).tolist()
             print(f"[RECALCULATE] ICP Alignment successful. P1_world={P1}, P2_world={P2}")
