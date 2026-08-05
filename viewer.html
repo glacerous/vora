@@ -918,7 +918,7 @@
         const useProxy = urlParams.get('proxy') !== 'false';
 
         // Rewrite R2 URLs to use the local server streaming proxy (bypasses ISP blocks and CORS policies)
-        if (useProxy && splatPath.includes('.r2.dev') && splatPath.includes('/tree_scans/') && (splatPath.startsWith('http://') || splatPath.startsWith('https://')) && !splatPath.includes('localhost') && !splatPath.includes('127.0.0.1')) {
+        if (useProxy && splatPath.includes('/tree_scans/') && (splatPath.startsWith('http://') || splatPath.startsWith('https://')) && !splatPath.includes('localhost') && !splatPath.includes('127.0.0.1')) {
             const parts = splatPath.split('/tree_scans/');
             if (parts.length === 2) {
                 const subParts = parts[1].split('/');
@@ -1461,7 +1461,7 @@
 
             // If path is already a proxy path (/splat-proxy/...), no rewrite needed
             // If it's an external R2 URL, rewrite to proxy
-            if (pointsPath.includes('.r2.dev') && !pointsPath.startsWith('/splat-proxy/') && pointsPath.includes('/tree_scans/') && (pointsPath.startsWith('http://') || pointsPath.startsWith('https://'))) {
+            if (!pointsPath.startsWith('/splat-proxy/') && pointsPath.includes('/tree_scans/') && (pointsPath.startsWith('http://') || pointsPath.startsWith('https://'))) {
                 const parts = pointsPath.split('/tree_scans/');
                 if (parts.length === 2) {
                     const sub = parts[1].split('/');
