@@ -2373,7 +2373,6 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
                     slice_mask = (np.abs(h_proj) <= tol) & (np.abs(d_proj - body.radius_units) <= tol * 1.5)
                     pts_slice = points[slice_mask]
                     if len(pts_slice) > 500:
-                        import numpy as np
                         rng = np.random.default_rng(42)
                         idx = rng.choice(len(pts_slice), size=500, replace=False)
                         pts_slice = pts_slice[idx]
@@ -2381,6 +2380,9 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
                     slice_points_3d = pts_slice.tolist()
                     print(f"[ADJUST GEOMETRY] Recalculated {len(slice_points_3d)} slice points around new cylinder.")
             except Exception as slice_err:
+                import traceback
+                with open("scratch/adjust_error.log", "w") as f_err:
+                    traceback.print_exc(file=f_err)
                 print(f"[ADJUST GEOMETRY ERROR] Failed to recalculate slice points: {slice_err}")
 
         # 2. Recalculate metrics based on manual coordinates
