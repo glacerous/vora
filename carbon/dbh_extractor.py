@@ -482,7 +482,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
         if v_pass1[rough_axis_idx] < 0:
             v_pass1 = -v_pass1
 
-    proj_pass1 = np.dot(points, v_pass1)
+    proj_pass1 = np.dot(coarse_trunk_points, v_pass1)
     h_min_pass1 = float(np.percentile(proj_pass1, 2))
     h_max_pass1 = float(np.percentile(proj_pass1, 98))
     total_h_pass1 = h_max_pass1 - h_min_pass1
@@ -593,7 +593,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
         if v_pass2[rough_axis_idx] < 0:
             v_pass2 = -v_pass2
 
-    proj_pass2 = np.dot(points, v_pass2)
+    proj_pass2 = np.dot(fine_trunk_points, v_pass2)
     h_min_pass2 = float(np.percentile(proj_pass2, 2))
     h_max_pass2 = float(np.percentile(proj_pass2, 98))
     total_h_pass2 = h_max_pass2 - h_min_pass2
@@ -789,8 +789,15 @@ def extract_dbh_with_manual_override(ply_path: str, cx: float, cy: float, cz: fl
 
     logger.info(f"[MANUAL DBH] Aligned trunk direction vector: {v}")
 
-    # 4. Project all points to find true height
-    proj = np.dot(points, v)
+    # 4. Project all points in trunk cylinder column to find height range
+    w_cyl = points - np.array([cx, cy, cz])
+    h_proj_cyl = np.dot(w_cyl, v)
+    perp_dist_cyl = np.linalg.norm(w_cyl - h_proj_cyl[:, np.newaxis] * v[np.newaxis, :], axis=1)
+    crop_radius_cyl = max(radius * 1.5, 0.40 / scale)
+    trunk_column_points = points[perp_dist_cyl <= crop_radius_cyl]
+    if len(trunk_column_points) < 10:
+        trunk_column_points = points
+    proj = np.dot(trunk_column_points, v)
     h_min = float(np.percentile(proj, 2))
     h_max = float(np.percentile(proj, 98))
     total_h = h_max - h_min
@@ -941,8 +948,8 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     if len(trunk_points) < 10:
         return {"error": f"Too few points within the crop cylinder ({len(trunk_points)} points)."}
 
-    # 3. Project all points in points3d.ply to find true height (overall tree height)
-    proj_all = np.dot(points, v)
+    # 3. Project all points in trunk cylinder column to find height range
+    proj_all = np.dot(trunk_points, v)
     h_min = float(np.percentile(proj_all, 2))
     h_max = float(np.percentile(proj_all, 98))
     total_h = h_max - h_min
