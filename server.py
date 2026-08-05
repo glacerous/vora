@@ -2734,6 +2734,62 @@ async def list_user_scans(user_id: int, optional_user: Optional[dict] = Depends(
     return {"success": True, "scans": scans}
 
 
+@app.delete("/scans/{tree_code}", summary="Delete a scan record and its R2 files")
+async def delete_scan(tree_code: str, current_user: dict = Depends(get_current_user)):
+    from storage.d1_client import execute_d1_query
+    
+    # 1. Fetch the scan
+    scans = execute_d1_query("SELECT * FROM tree_scans WHERE tree_code = ?", [tree_code])
+    if not scans:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    scan = scans[0]
+    
+    # 2. Check ownership/claim status
+    if scan.get("claimed_by_user_id") != current_user["id"]:
+        raise HTTPException(status_code=403, detail="You do not have permission to delete this scan")
+        
+    # 3. Clean up files on R2 storage
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    access_key = os.environ.get("R2_ACCESS_KEY_ID")
+    secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
+    bucket_name = os.environ.get("R2_BUCKET_NAME")
+    public_url_prefix = os.environ.get("R2_PUBLIC_URL_PREFIX", "").rstrip("/")
+    
+    if all([account_id, access_key, secret_key, bucket_name]):
+        endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
+        try:
+            s3 = boto3.client(
+                "s3",
+                endpoint_url=endpoint_url,
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
+                config=Config(signature_version="s3v4"),
+                region_name="auto"
+            )
+            
+            # Delete PLY/Splat file from R2
+            ply_url = scan.get("splat_file_url")
+            if ply_url:
+                key = ply_url.replace(public_url_prefix + "/", "") if public_url_prefix else ply_url
+                key = key.lstrip("/")
+                await asyncio.to_thread(s3.delete_object, Bucket=bucket_name, Key=key)
+                
+            # Delete Thumbnail file from R2
+            thumb_url = scan.get("thumbnail_url")
+            if thumb_url:
+                key = thumb_url.replace(public_url_prefix + "/", "") if public_url_prefix else thumb_url
+                key = key.lstrip("/")
+                await asyncio.to_thread(s3.delete_object, Bucket=bucket_name, Key=key)
+        except Exception as e:
+            # Log but don't fail HTTP request if R2 delete fails
+            print(f"[DELETE-SCAN] Failed to delete from R2: {e}")
+            
+    # 4. Delete database record
+    execute_d1_query("DELETE FROM tree_scans WHERE tree_code = ?", [tree_code])
+    
+    return {"success": True, "message": f"Successfully deleted scan {tree_code}"}
+
+
 @app.post("/plots/{plot_id}/claim-scan", summary="Claim an anonymous scan into a user plot")
 async def claim_scan(plot_id: int, body: ClaimScanRequest, current_user: dict = Depends(get_current_user)):
     from storage.d1_client import execute_d1_query
