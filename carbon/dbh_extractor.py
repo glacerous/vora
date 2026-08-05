@@ -948,29 +948,19 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     if len(trunk_points) < 10:
         return {"error": f"Too few points within the crop cylinder ({len(trunk_points)} points)."}
 
-    # 3. Project all points along the trunk column (without height constraint) to find true height range
-    column_mask = d_proj <= crop_radius
-    trunk_column_points = points[column_mask]
-    if len(trunk_column_points) < 10:
-        trunk_column_points = points
-        
-    proj_all = np.dot(trunk_column_points, v)
-    h_min = float(np.percentile(proj_all, 2))
-    h_max = float(np.percentile(proj_all, 98))
+    # 3. Height is defined directly by the user's manual clicks (P1 is bottom/ground, P2 is top)
+    h_min = float(np.dot(P1, v))
+    h_max = float(np.dot(P2, v))
     total_h = h_max - h_min
     estimated_height_m = float(total_h * scale)
 
-    # 4. Set target breast height target
-    # P1 is the ground, so breast height target is 1.3 meters above P1
-    h_target = float(np.dot(P1, v) + breast_height_m / scale)
+    # 4. Set target breast height target relative to P1 (ground level)
+    h_target = float(h_min + breast_height_m / scale)
 
-    # Sanity guard: kalau batang yang terekam terlalu pendek untuk mencapai breast
-    # height (1.3 m), clamp target ke dalam batang yang terlihat. Mirror dari
-    # extract_dbh_from_mast3r (dbh_extractor.py:457-459). Tanpa ini, h_target
-    # tersimpan DI ATAS seluruh point cloud dan viewer 3D menggambar cylinder/ring
-    # di ruang kosong (cylinder melayang jauh di atas batang).
+    # Sanity guard: if the clicked trunk is too short to reach standard breast height (1.3m),
+    # clamp the target to the middle of the clicked segment to prevent the ring from floating above P2.
     if (h_target - h_min) >= total_h * 0.90:
-        h_target = h_min + total_h * 0.30
+        h_target = h_min + total_h * 0.50
 
     # 5. Fit circle at slices around h_target
     if abs(v[0]) < 0.9:
