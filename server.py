@@ -624,6 +624,7 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        duration     = total_frames / fps
         # Dynamically calculate step based on target count to avoid scanning too many frames
         # targeting about 2.0x candidates of target count across the video duration.
         step = max(1, int(total_frames / (target * 2.0)))
