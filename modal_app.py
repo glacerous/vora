@@ -81,11 +81,13 @@ def detect_person_pose(frame_path):
         print(f"[MODAL-POSE] Error during pose detection: {e}")
         return None
 
-def _find_person_scale_in_cloud(points, person_height_m: float, axis_idx: int = 2):
+def _find_person_scale_in_cloud(points, person_height_m: float, axis_idx: int = 1):
     import numpy as np
     if points is None or len(points) < 30:
         return None
     z = np.asarray(points[:, axis_idx], dtype=float)
+    if axis_idx == 1:
+        z = -z
     z_min = float(z.min())
     z_max = float(z.max())
     total_h = z_max - z_min
@@ -124,7 +126,7 @@ def _find_person_scale_in_cloud(points, person_height_m: float, axis_idx: int = 
     return float(person_height_m / extent_units)
 
 def auto_calibrate_scale_from_frames(frame_paths, points_3d=None, person_height_m: float = 1.65,
-                                     vertical_axis_idx: int = 2, min_confidence: float = 0.6,
+                                     vertical_axis_idx: int = 1, min_confidence: float = 0.6,
                                      max_frames: int = 8):
     import os
     if not frame_paths:
@@ -605,10 +607,85 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
         # Combined inlier mask — start all True
         combined_mask = np.ones(num_vertices, dtype=bool)
 
-        # Pass 1: Spatial statistical outlier removal (KNN-based)
-        # Skipped for Splat PLY to save ~3-5 minutes of CPU execution.
-        # (Already handled on the sparse measurement point cloud points3d.ply).
+        # Pass 1: Horizontal crop around the trunk cluster peak
+        # Reduces point count by removing distant background/clutter, which makes KDTree processing extremely fast.
+        # Find peak using only the lower 35% of points to avoid canopy/branch bias.
+        xyz = np.column_stack((vertex_data["x"], vertex_data["y"], vertex_data["z"])).astype(np.float64)
+        # Force Y as the vertical axis (axis index 1)
+        rough_axis_idx = 1
+        proj_axes = [0, 2]
+
+        # Stage 1: Rough Horizontal Peak using entire cloud
+        h1_all = xyz[:, proj_axes[0]]
+        h2_all = xyz[:, proj_axes[1]]
+        hist, xedges, yedges = np.histogram2d(h1_all, h2_all, bins=30)
+        max_idx = np.unravel_index(np.argmax(hist), hist.shape)
+        rough_peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
+        rough_peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
+
+        # Rough crop to remove background (2.2 meters radius in real world)
+        ROUGH_CROP_RADIUS = 2.2
+        dist_sq_rough = (xyz[:, proj_axes[0]] - rough_peak_h1)**2 + (xyz[:, proj_axes[1]] - rough_peak_h2)**2
+        rough_cropped = xyz[dist_sq_rough <= ROUGH_CROP_RADIUS**2]
+        if len(rough_cropped) < 100:
+            rough_cropped = xyz
+
+        # Stage 2: Refined Peak using lower 35% of rough cropped points (Y-down)
+        rough_y = rough_cropped[:, rough_axis_idx]
+        y_min = np.percentile(rough_y, 1)
+        y_max = np.percentile(rough_y, 99)
+        y_height = y_max - y_min
+
+        # Lower 35% height in Y-down convention: Y is close to y_max
+        lower_mask = rough_y >= (y_max - y_height * 0.35)
+        lower_xyz = rough_cropped[lower_mask]
+        if len(lower_xyz) < 100:
+            lower_xyz = rough_cropped
+
+        h1 = lower_xyz[:, proj_axes[0]]
+        h2 = lower_xyz[:, proj_axes[1]]
+
+        hist_ref, xedges_ref, yedges_ref = np.histogram2d(h1, h2, bins=30)
+        max_idx_ref = np.unravel_index(np.argmax(hist_ref), hist_ref.shape)
+        peak_h1 = 0.5 * (xedges_ref[max_idx_ref[0]] + xedges_ref[max_idx_ref[0] + 1])
+        peak_h2 = 0.5 * (yedges_ref[max_idx_ref[1]] + yedges_ref[max_idx_ref[1] + 1])
+
+        dist_sq = (xyz[:, proj_axes[0]] - peak_h1)**2 + (xyz[:, proj_axes[1]] - peak_h2)**2
+        CROP_RADIUS = 2.2
+        crop_mask = dist_sq <= CROP_RADIUS**2
+        
+        # If crop yields too few points, fallback to keeping all points
+        if crop_mask.sum() < 1000:
+            crop_mask = np.ones(num_vertices, dtype=bool)
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Crop mask resulted in too few points (< 1000), skipping crop.")
+        else:
+            combined_mask &= crop_mask
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 1 (horizontal crop): removed {num_vertices - combined_mask.sum():,} points | remaining {combined_mask.sum():,}")
+
+        # Pass 1.5: Spatial Statistical Outlier Removal (KNN-based KDTree)
+        # Using std_ratio=1.5 to aggressively prune floating noise.
+        # Running on cropped subset first ensures KDTree completes in <10 seconds.
         n_spatial = 0
+        if combined_mask.sum() >= 20:
+            cropped_xyz = xyz[combined_mask]
+            tree = KDTree(cropped_xyz)
+            nb_neighbors = 20
+            std_ratio = 1.5
+            distances, _ = tree.query(cropped_xyz, k=nb_neighbors + 1, workers=-1)
+            mean_dists = distances[:, 1:].mean(axis=1)
+
+            global_mean = mean_dists.mean()
+            global_std  = mean_dists.std()
+            threshold   = global_mean + std_ratio * global_std
+
+            spatial_inliers = mean_dists <= threshold
+            # Map the inlier mask back to the global index
+            spatial_mask = np.zeros(num_vertices, dtype=bool)
+            spatial_mask[combined_mask] = spatial_inliers
+            
+            combined_mask &= spatial_mask
+            n_spatial = int((~spatial_inliers).sum())
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 1.5 (spatial KNN): removed {n_spatial:,} | remaining {combined_mask.sum():,}")
 
         # Pass 2: Low-opacity removal
         # sigmoid(-2.2) ≈ 0.10 — removes splats with <10% effective opacity.
@@ -646,6 +723,18 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
             combined_mask &= ~smoke_combined
             n_smoke = int(smoke_combined.sum())
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 3.5 (smoke): removed {n_smoke:,} translucent-large splats | remaining {combined_mask.sum():,}")
+
+        # Pass 3.6: Remove spiky needles (extreme aspect ratio scale outliers)
+        # In log-space, scale_0, scale_1, scale_2 are the log-scales.
+        # An extreme aspect ratio (needle-like) splat has max(scales) - min(scales) > 4.5 (approx 90x ratio).
+        MAX_SCALE_DIFF = 4.5
+        if scale_names:
+            scales = np.column_stack([vertex_data[n] for n in scale_names])
+            scale_diff = scales.max(axis=1) - scales.min(axis=1)
+            spiky_mask = scale_diff <= MAX_SCALE_DIFF
+            combined_mask &= spiky_mask
+            n_spiky = int((~spiky_mask).sum())
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pass 3.6 (spiky):  removed {n_spiky:,} spiky needles | remaining {combined_mask.sum():,}")
 
 
         n_kept    = int(combined_mask.sum())

@@ -112,6 +112,8 @@ def _find_person_scale_in_cloud(points, person_height_m: float, axis_idx: int = 
         return None
 
     z = np.asarray(points[:, axis_idx], dtype=float)
+    if axis_idx == 1:
+        z = -z
     z_min = float(z.min())
     z_max = float(z.max())
     total_h = z_max - z_min
@@ -157,7 +159,7 @@ def _find_person_scale_in_cloud(points, person_height_m: float, axis_idx: int = 
 
 
 def auto_calibrate_scale_from_frames(frame_paths, points_3d=None, person_height_m: float = 1.65,
-                                     vertical_axis_idx: int = 2, min_confidence: float = 0.6,
+                                     vertical_axis_idx: int = 1, min_confidence: float = 0.6,
                                      max_frames: int = 8):
     """
     Attempts an implicit (automatic) scale calibration using a person visible in the

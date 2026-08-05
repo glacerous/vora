@@ -187,6 +187,10 @@ def cleanup(
     skip_spatial: bool = False,
     skip_opacity: bool = False,
     skip_scale: bool = False,
+    crop_radius: float = 2.2,
+    skip_crop: bool = False,
+    max_scale_diff: float = 4.5,
+    skip_spiky: bool = False,
     dry_run: bool = False,
 ):
     import numpy as np
@@ -208,12 +212,71 @@ def cleanup(
     # Combined mask — start with all True
     combined_mask = np.ones(n_total, dtype=bool)
 
+    # Pass 0: Horizontal Crop Peak Detection
+    if not skip_crop:
+        print(f"Pass 0: Horizontal crop around trunk peak (radius {crop_radius}m)")
+        # Force Y as the vertical axis (axis index 1)
+        rough_axis_idx = 1
+        proj_axes = [0, 2]
+
+        # Stage 1: Rough Horizontal Peak using entire cloud
+        h1_all = xyz[:, proj_axes[0]]
+        h2_all = xyz[:, proj_axes[1]]
+        hist, xedges, yedges = np.histogram2d(h1_all, h2_all, bins=30)
+        max_idx = np.unravel_index(np.argmax(hist), hist.shape)
+        rough_peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
+        rough_peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
+
+        # Rough crop to remove background (2.2 meters radius in real world)
+        # For cleanup, we can estimate scale using point density or just use a generic 2.2 PLY units
+        ROUGH_CROP_RADIUS = 2.2
+        dist_sq_rough = (xyz[:, proj_axes[0]] - rough_peak_h1)**2 + (xyz[:, proj_axes[1]] - rough_peak_h2)**2
+        rough_cropped = xyz[dist_sq_rough <= ROUGH_CROP_RADIUS**2]
+        if len(rough_cropped) < 100:
+            rough_cropped = xyz
+
+        # Stage 2: Refined Peak using lower 35% of rough cropped points (Y-down)
+        rough_y = rough_cropped[:, rough_axis_idx]
+        y_min = np.percentile(rough_y, 1)
+        y_max = np.percentile(rough_y, 99)
+        y_height = y_max - y_min
+
+        # Lower 35% height in Y-down convention: Y is close to y_max
+        lower_mask = rough_y >= (y_max - y_height * 0.35)
+        lower_xyz = rough_cropped[lower_mask]
+        if len(lower_xyz) < 100:
+            lower_xyz = rough_cropped
+
+        h1 = lower_xyz[:, proj_axes[0]]
+        h2 = lower_xyz[:, proj_axes[1]]
+
+        hist_ref, xedges_ref, yedges_ref = np.histogram2d(h1, h2, bins=30)
+        max_idx_ref = np.unravel_index(np.argmax(hist_ref), hist_ref.shape)
+        peak_h1 = 0.5 * (xedges_ref[max_idx_ref[0]] + xedges_ref[max_idx_ref[0] + 1])
+        peak_h2 = 0.5 * (yedges_ref[max_idx_ref[1]] + yedges_ref[max_idx_ref[1] + 1])
+
+        dist_sq = (xyz[:, proj_axes[0]] - peak_h1)**2 + (xyz[:, proj_axes[1]] - peak_h2)**2
+        crop_mask = dist_sq <= crop_radius**2
+        if crop_mask.sum() < 1000:
+            print("  [Crop] Crop mask resulted in too few points (< 1000), skipping.")
+        else:
+            combined_mask &= crop_mask
+            print(f"  [Crop] Done | remaining {combined_mask.sum():,} points\n")
+
     # Pass 1: Spatial outlier removal
     if not skip_spatial:
         print("Pass 1: Spatial outlier removal (scipy KDTree)")
-        spatial_mask = remove_spatial_outliers_scipy(xyz, nb_neighbors, std_ratio)
-        combined_mask &= spatial_mask
-        print(f"  Remaining after pass 1: {combined_mask.sum():,}\n")
+        if combined_mask.sum() >= 20:
+            cropped_xyz = xyz[combined_mask]
+            spatial_mask_subset = remove_spatial_outliers_scipy(cropped_xyz, nb_neighbors, std_ratio)
+            
+            # Map back to global mask
+            spatial_mask = np.zeros(n_total, dtype=bool)
+            spatial_mask[combined_mask] = spatial_mask_subset
+            combined_mask &= spatial_mask
+            print(f"  Remaining after pass 1: {combined_mask.sum():,}\n")
+        else:
+            print("  [Spatial] Too few points to run spatial outlier removal.")
 
     # Pass 2: Low opacity removal
     if not skip_opacity:
@@ -228,6 +291,19 @@ def cleanup(
         scale_mask = remove_large_gaussians(vertex_data, max_log_scale)
         combined_mask &= scale_mask
         print(f"  Remaining after pass 3: {combined_mask.sum():,}\n")
+
+    # Pass 3.6: Spiky needles removal
+    if not skip_spiky:
+        print("Pass 3.6: Spiky needle removal (extreme aspect ratio scale filter)")
+        scale_names = [n for n in vertex_data.dtype.names if n.startswith("scale_")]
+        if scale_names:
+            scales = np.column_stack([vertex_data[n] for n in scale_names])
+            scale_diff = scales.max(axis=1) - scales.min(axis=1)
+            spiky_mask = scale_diff <= max_scale_diff
+            combined_mask &= spiky_mask
+            n_spiky = int((~spiky_mask).sum())
+            print(f"  [Spiky] threshold={max_scale_diff:.2f} | removed {n_spiky:,} spiky needles")
+            print(f"  Remaining after pass 3.6: {combined_mask.sum():,}\n")
 
     # Stats
     n_kept    = int(combined_mask.sum())
@@ -265,14 +341,16 @@ def main():
     parser.add_argument("--input",  default="output/result.ply",       help="Input PLY (default: output/result.ply)")
     parser.add_argument("--output", default=None,                        help="Output PLY (default: overwrites input with .bak backup)")
     parser.add_argument("--nb_neighbors",  type=int,   default=20,      help="KNN count for spatial outlier detection (default: 20)")
-    parser.add_argument("--std_ratio",     type=float, default=2.0,     help="Std-dev multiplier threshold (default: 2.0, lower=more aggressive)")
-    parser.add_argument("--min_opacity",   type=float, default=-4.0,    help="Min logit opacity to keep (default: -4.0 ≈ sigmoid 0.018)")
-    parser.add_argument("--max_log_scale", type=float, default=-1.0,    help="Max log-scale to keep (default: -1.0 = exp ~0.37 units; set higher to be more lenient)")
-    parser.add_argument("--scale_pct",     type=float, default=99.5,    help="Alternatively, keep only Gaussians with log-scale below this percentile (default: 99.5)")
-    parser.add_argument("--use_scale_pct", action="store_true",         help="Use percentile-based scale filter instead of fixed max_log_scale")
+    parser.add_argument("--std_ratio",     type=float, default=1.5,     help="Std-dev multiplier threshold (default: 1.5, lower=more aggressive)")
+    parser.add_argument("--min_opacity",   type=float, default=-2.2,    help="Min logit opacity to keep (default: -2.2 ≈ sigmoid 0.10)")
+    parser.add_argument("--max_log_scale", type=float, default=-1.5,    help="Max log-scale to keep (default: -1.5 = exp ~0.22 units)")
+    parser.add_argument("--crop_radius",   type=float, default=2.2,     help="Radius in meters to horizontally crop around tree trunk (default: 2.2)")
+    parser.add_argument("--max_scale_diff", type=float, default=4.5,    help="Max log-scale difference to filter needles (default: 4.5)")
+    parser.add_argument("--skip_crop",     action="store_true",         help="Skip horizontal peak-based crop")
     parser.add_argument("--skip_spatial",  action="store_true",         help="Skip spatial KNN outlier removal pass")
     parser.add_argument("--skip_opacity",  action="store_true",         help="Skip low-opacity removal pass")
     parser.add_argument("--skip_scale",    action="store_true",         help="Skip oversized-scale removal pass")
+    parser.add_argument("--skip_spiky",    action="store_true",         help="Skip spiky needle removal pass")
     parser.add_argument("--dry_run",       action="store_true",         help="Print stats but do not write output")
     parser.add_argument("--no_backup",     action="store_true",         help="Skip creating .bak backup when overwriting input")
     args = parser.parse_args()
@@ -302,9 +380,13 @@ def main():
         std_ratio=args.std_ratio,
         min_opacity=args.min_opacity,
         max_log_scale=args.max_log_scale,
+        crop_radius=args.crop_radius,
+        skip_crop=args.skip_crop,
+        max_scale_diff=args.max_scale_diff,
         skip_spatial=args.skip_spatial,
         skip_opacity=args.skip_opacity,
         skip_scale=args.skip_scale,
+        skip_spiky=args.skip_spiky,
         dry_run=args.dry_run,
     )
 
