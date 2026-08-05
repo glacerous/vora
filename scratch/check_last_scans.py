@@ -13,7 +13,7 @@ def main():
         scans = execute_d1_query(sql)
         print("Last 10 scans in D1:")
         for s in scans:
-            print(f"ID: {s['id']}, Code: {s['tree_code']}, Date: {s['scan_date']}, DBH: {s['dbh_cm']}, Height: {s['tinggi_m']}, Note: {s['confidence_note']}")
+            print(f"ID: {s['id']}, Code: {s['tree_code']}, DBH: {s['dbh_cm']}, URL: {s['splat_file_url']}")
     except Exception as e:
         print(f"Error: {e}")
 

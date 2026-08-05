@@ -1014,8 +1014,8 @@ def _reconstruct_thread(
                             h_proj_cam = np.dot(w_cam, v_cam_dir)
                             perp_cam = w_cam - h_proj_cam[:, np.newaxis] * v_cam_dir[np.newaxis, :]
                             perp_dist_cam = np.linalg.norm(perp_cam, axis=1)
-                            # Keep points within 0.8 units of clicked axis (generous radius in camera units)
-                            crop_mask_cam = (perp_dist_cam <= 0.8) & (h_proj_cam >= -0.5) & (h_proj_cam <= v_cam_norm + 0.5)
+                            # Keep points within 0.4 units of clicked axis (tighter radius for cleaner trunk focus)
+                            crop_mask_cam = (perp_dist_cam <= 0.4) & (h_proj_cam >= -0.5) & (h_proj_cam <= v_cam_norm + 0.5)
                             if np.sum(crop_mask_cam) >= 20:
                                 pts_cam_cropped = pts_cam_all[crop_mask_cam]
                                 
@@ -2030,65 +2030,71 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
         local_npy_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3D_all.npy")
         local_ply_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d.ply")
 
-        # 4. Download dense pointmap (NPY) from R2
-        print(f"[RECALCULATE] Downloading dense pointmap from {pointmap_url}")
-        try:
-            res_npy = requests.get(pointmap_url, timeout=30)
-            if res_npy.status_code != 200:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Historical scan does not have dense pointmap data. Please perform a new reconstruction."
-                )
-            with open(local_npy_path, "wb") as f:
-                f.write(res_npy.content)
-        except HTTPException as he:
-            raise he
-        except Exception as npy_err:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Failed to download dense pointmap: {npy_err}"
-            )
-
-        # 5. Download the existing points3d.ply from R2
-        print(f"[RECALCULATE] Downloading existing points3d.ply from {points3d_url}")
-        try:
-            res_ply = requests.get(points3d_url, timeout=30)
-            if res_ply.status_code != 200:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Failed to download points3d.ply: HTTP {res_ply.status_code}"
-                )
-            with open(local_ply_path, "wb") as f:
-                f.write(res_ply.content)
-            print(f"[RECALCULATE] Successfully downloaded existing points3d.ply from R2")
-            
-            # Filter and re-upload to R2 so subsequent viewer page loads get the filtered one!
-            filter_points3d_ply(local_ply_path)
+        # 4. Download dense pointmap (NPY) from R2 if not already cached locally
+        if os.path.exists(local_npy_path) and os.path.getsize(local_npy_path) > 100000:
+            print(f"[RECALCULATE] Found locally cached dense pointmap: {local_npy_path} — skipping download.")
+        else:
+            print(f"[RECALCULATE] Downloading dense pointmap from {pointmap_url}")
             try:
-                from storage.r2_client import upload_splat
-                import shutil
-                ts_part = None
+                res_npy = requests.get(pointmap_url, timeout=30)
+                if res_npy.status_code != 200:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Historical scan does not have dense pointmap data. Please perform a new reconstruction."
+                    )
+                with open(local_npy_path, "wb") as f:
+                    f.write(res_npy.content)
+            except HTTPException as he:
+                raise he
+            except Exception as npy_err:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to download dense pointmap: {npy_err}"
+                )
+
+        # 5. Download the existing points3d.ply from R2 if not already cached locally
+        if os.path.exists(local_ply_path) and os.path.getsize(local_ply_path) > 1000:
+            print(f"[RECALCULATE] Found locally cached points3d.ply: {local_ply_path} — skipping download/filter.")
+        else:
+            print(f"[RECALCULATE] Downloading existing points3d.ply from {points3d_url}")
+            try:
+                res_ply = requests.get(points3d_url, timeout=30)
+                if res_ply.status_code != 200:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to download points3d.ply: HTTP {res_ply.status_code}"
+                    )
+                with open(local_ply_path, "wb") as f:
+                    f.write(res_ply.content)
+                print(f"[RECALCULATE] Successfully downloaded existing points3d.ply from R2")
+                
+                # Filter and re-upload to R2 so subsequent viewer page loads get the filtered one!
+                filter_points3d_ply(local_ply_path)
                 try:
-                    filename = points3d_url.split("/")[-1].split("?")[0]
-                    if "_" in filename:
-                        ts_part = int(filename.split("_")[0])
-                except Exception:
-                    pass
-                tmp_upload_path = os.path.join(os.path.dirname(local_ply_path), "points3d.ply")
-                shutil.copy2(local_ply_path, tmp_upload_path)
-                upload_splat(tmp_upload_path, tree_code, custom_timestamp=ts_part)
-                try:
-                    os.remove(tmp_upload_path)
-                except Exception:
-                    pass
-                print(f"[RECALCULATE] Re-uploaded filtered points3d.ply to R2 (timestamp: {ts_part})")
-            except Exception as upload_err:
-                print(f"[RECALCULATE ERROR] Failed to re-upload filtered points3d.ply: {upload_err}")
-        except Exception as ply_err:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Failed to download points3d.ply: {ply_err}"
-            )
+                    from storage.r2_client import upload_splat
+                    import shutil
+                    ts_part = None
+                    try:
+                        filename = points3d_url.split("/")[-1].split("?")[0]
+                        if "_" in filename:
+                            ts_part = int(filename.split("_")[0])
+                    except Exception:
+                        pass
+                    tmp_upload_path = os.path.join(os.path.dirname(local_ply_path), "points3d.ply")
+                    shutil.copy2(local_ply_path, tmp_upload_path)
+                    upload_splat(tmp_upload_path, tree_code, custom_timestamp=ts_part)
+                    try:
+                        os.remove(tmp_upload_path)
+                    except Exception:
+                        pass
+                    print(f"[RECALCULATE] Re-uploaded filtered points3d.ply to R2 (timestamp: {ts_part})")
+                except Exception as upload_err:
+                    print(f"[RECALCULATE ERROR] Failed to re-upload filtered points3d.ply: {upload_err}")
+            except Exception as ply_err:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to download points3d.ply: {ply_err}"
+                )
 
         # 6. Load pointmap and perform coordinate mapping
         pts3d = np.load(local_npy_path)
@@ -2133,8 +2139,8 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                 h_proj_cam = np.dot(w_cam, v_cam_dir)
                 perp_cam = w_cam - h_proj_cam[:, np.newaxis] * v_cam_dir[np.newaxis, :]
                 perp_dist_cam = np.linalg.norm(perp_cam, axis=1)
-                # Keep points within 0.8 units of clicked axis (generous radius in camera units)
-                crop_mask_cam = (perp_dist_cam <= 0.8) & (h_proj_cam >= -0.5) & (h_proj_cam <= v_cam_norm + 0.5)
+                # Keep points within 0.4 units of clicked axis (tighter radius for cleaner trunk focus)
+                crop_mask_cam = (perp_dist_cam <= 0.4) & (h_proj_cam >= -0.5) & (h_proj_cam <= v_cam_norm + 0.5)
                 if np.sum(crop_mask_cam) >= 20:
                     pts_cam_cropped = pts_cam_all[crop_mask_cam]
                     
