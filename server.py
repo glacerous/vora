@@ -624,11 +624,12 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        duration     = total_frames / fps
-        step         = max(1, int(fps / 8))
+        # Dynamically calculate step based on target count to avoid scanning too many frames
+        # targeting about 2.0x candidates of target count across the video duration.
+        step = max(1, int(total_frames / (target * 2.0)))
         
         print(f"[EXTRACT] Start extraction from {video_path}")
-        print(f"[EXTRACT] Original Resolution: {orig_w}x{orig_h}, FPS: {fps:.2f}, Duration: {duration:.2f}s, Total Frames: {total_frames}")
+        print(f"[EXTRACT] Original Resolution: {orig_w}x{orig_h}, FPS: {fps:.2f}, Duration: {duration:.2f}s, Total Frames: {total_frames}, Step: {step}")
         
         upd("extracting", f"Scanning {total_frames} frames ({duration:.1f}s at {fps:.0f}fps)…")
 
@@ -639,7 +640,8 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
             else:
                 f_resized = frame
             gray = f_resized if (len(f_resized.shape) == 2 or f_resized.shape[2] == 1) else cv2.cvtColor(f_resized, cv2.COLOR_BGR2GRAY)
-            val = cv2.Laplacian(gray, cv2.CV_64F).var()
+            # Use CV_32F instead of CV_64F for 2-3x speedup on CPU
+            val = cv2.Laplacian(gray, cv2.CV_32F).var()
             del gray
             if f_resized is not frame:
                 del f_resized
@@ -687,6 +689,12 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
             if fi % 150 == 0:
                 import gc
                 gc.collect()
+            
+            # Send real-time progress update to frontend every 30 frames
+            if fi % 30 == 0 and total_frames > 0:
+                pct = int(fi * 100 / total_frames)
+                upd("extracting", f"Scanning frames: {fi}/{total_frames} ({pct}%)…")
+                
             fi += 1
             
     except Exception as exc:
