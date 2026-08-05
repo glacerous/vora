@@ -177,7 +177,8 @@ def test_auto_pose_scale():
     try:
         hc.detect_person_pose = fake_detect_high
         res = hc.auto_calibrate_scale_from_frames([__file__], points_3d=pts,
-                                                  person_height_m=1.65, min_confidence=0.6)
+                                                  person_height_m=1.65, min_confidence=0.6,
+                                                  vertical_axis_idx=2)
         check("auto-pose marks calibrated", res and res["is_calibrated"] is True, f"({res})")
         check("auto-pose source is auto_pose", res and res["source"] == "auto_pose")
         check("auto-pose applies person scale", res and abs(res["scale_factor"] - 1.0) < 1e-6)
@@ -264,6 +265,9 @@ def test_manual_endpoint_height_validation():
 
     # (a) system height + trunk-segment-only cloud -> forced DBH-only fallback
     seg = _trunk_segment_cloud(height_m=2.0, radius=0.25)
+    # swap Y and Z to align with vertical_axis_idx=1 in resolve_height_usage
+    seg = seg.copy()
+    seg[:, [1, 2]] = seg[:, [2, 1]]
     seg_path = os.path.join(tmp, "seg.ply")
     _write_ascii_ply(seg_path, seg)
     r1 = resolve_height_usage(seg_path, raw_height_m=2.0, height_input_source="system", scale_factor=1.0)
@@ -275,6 +279,9 @@ def test_manual_endpoint_height_validation():
 
     # (b) system height + full ground-to-canopy cloud -> full_height validated
     full = _full_tree_cloud(height_m=8.0)
+    # swap Y and Z to align with vertical_axis_idx=1 in resolve_height_usage
+    full = full.copy()
+    full[:, [1, 2]] = full[:, [2, 1]]
     full_path = os.path.join(tmp, "full.ply")
     _write_ascii_ply(full_path, full)
     r2 = resolve_height_usage(full_path, raw_height_m=8.0, height_input_source="system", scale_factor=1.0)
