@@ -691,8 +691,8 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
                 import gc
                 gc.collect()
             
-            # Send real-time progress update to frontend every 30 frames
-            if fi % 30 == 0 and total_frames > 0:
+            # Send real-time progress update to frontend every 10 frames
+            if fi % 10 == 0 and total_frames > 0:
                 pct = int(fi * 100 / total_frames)
                 upd("extracting", f"Scanning frames: {fi}/{total_frames} ({pct}%)…")
                 
