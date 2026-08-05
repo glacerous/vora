@@ -1675,6 +1675,7 @@ async def manual_override(body: ManualOverrideRequest):
         filter_points3d_ply(local_ply_path)
         try:
             from storage.r2_client import upload_splat
+            import shutil
             ts_part = None
             try:
                 filename = points3d_url.split("/")[-1].split("?")[0]
@@ -1682,7 +1683,13 @@ async def manual_override(body: ManualOverrideRequest):
                     ts_part = int(filename.split("_")[0])
             except Exception:
                 pass
-            upload_splat(local_ply_path, body.tree_code, custom_timestamp=ts_part)
+            tmp_upload_path = os.path.join(os.path.dirname(local_ply_path), "points3d.ply")
+            shutil.copy2(local_ply_path, tmp_upload_path)
+            upload_splat(tmp_upload_path, body.tree_code, custom_timestamp=ts_part)
+            try:
+                os.remove(tmp_upload_path)
+            except Exception:
+                pass
             print(f"[OVERRIDE] Re-uploaded filtered points3d.ply to R2 (timestamp: {ts_part})")
         except Exception as upload_err:
             print(f"[OVERRIDE ERROR] Failed to re-upload filtered points3d.ply: {upload_err}")
@@ -1962,6 +1969,7 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             filter_points3d_ply(local_ply_path)
             try:
                 from storage.r2_client import upload_splat
+                import shutil
                 ts_part = None
                 try:
                     filename = points3d_url.split("/")[-1].split("?")[0]
@@ -1969,7 +1977,13 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                         ts_part = int(filename.split("_")[0])
                 except Exception:
                     pass
-                upload_splat(local_ply_path, tree_code, custom_timestamp=ts_part)
+                tmp_upload_path = os.path.join(os.path.dirname(local_ply_path), "points3d.ply")
+                shutil.copy2(local_ply_path, tmp_upload_path)
+                upload_splat(tmp_upload_path, tree_code, custom_timestamp=ts_part)
+                try:
+                    os.remove(tmp_upload_path)
+                except Exception:
+                    pass
                 print(f"[RECALCULATE] Re-uploaded filtered points3d.ply to R2 (timestamp: {ts_part})")
             except Exception as upload_err:
                 print(f"[RECALCULATE ERROR] Failed to re-upload filtered points3d.ply: {upload_err}")
