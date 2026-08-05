@@ -999,12 +999,12 @@ def _reconstruct_thread(
                         pts_world_raw = parse_ply_points(points3d_path)
                         
                         # Use full pointmap and full pts_world_raw for raw-to-raw stability
-                        R, t = register_pointmap_to_world(pointmap, pts_world_raw)
-                        P1_aligned = P1_np @ R.T + t
-                        P2_aligned = P2_np @ R.T + t
+                        R, t, s = register_pointmap_to_world(pointmap, pts_world_raw)
+                        P1_aligned = s * (P1_np @ R.T) + t
+                        P2_aligned = s * (P2_np @ R.T) + t
                         P1_3d = P1_aligned.tolist()
                         P2_3d = P2_aligned.tolist()
-                        print(f"[RECONSTRUCT] ICP Alignment successful: P1_3d={P1_3d}, P2_3d={P2_3d}")
+                        print(f"[RECONSTRUCT] ICP Alignment successful: P1_3d={P1_3d}, P2_3d={P2_3d}, Scale={s:.6f}")
                         
                         # Now crop the point cloud file on disk locally around the clicked trunk center.
                         # This clean PLY will be used for the local carbon estimation.
@@ -2073,10 +2073,10 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             pts_world_raw = parse_ply_points(local_ply_path)
             
             # Use full pointmap and full pts_world_raw for raw-to-raw stability
-            R, t = register_pointmap_to_world(pointmap, pts_world_raw)
-            P1 = (P1_cam @ R.T + t).tolist()
-            P2 = (P2_cam @ R.T + t).tolist()
-            print(f"[RECALCULATE] ICP Alignment successful. P1_world={P1}, P2_world={P2}")
+            R, t, s = register_pointmap_to_world(pointmap, pts_world_raw)
+            P1 = (s * (P1_cam @ R.T) + t).tolist()
+            P2 = (s * (P2_cam @ R.T) + t).tolist()
+            print(f"[RECALCULATE] ICP Alignment successful. P1_world={P1}, P2_world={P2}, Scale={s:.6f}")
             
             # Now filter the local point cloud file on disk by cropping around the clicked trunk center.
             # This clean PLY will be passed to extract_dbh_with_2d_clicks.

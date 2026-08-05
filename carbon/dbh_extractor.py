@@ -1105,14 +1105,15 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     }
 
 
-def register_pointmap_to_world(pointmap: np.ndarray, pts_world: np.ndarray, max_iterations: int = 25, subsample: int = 1500) -> tuple[np.ndarray, np.ndarray]:
+def register_pointmap_to_world(pointmap: np.ndarray, pts_world: np.ndarray, max_iterations: int = 25, subsample: int = 1500) -> tuple[np.ndarray, np.ndarray, float]:
     """
     Registers camera-space pointmap (shape [H, W, 3] or [K, 3]) to world-space point cloud pts_world (shape [M, 3])
-    using Iterative Closest Point (ICP) and Kabsch algorithm.
+    using Iterative Closest Point (ICP) and Umeyama algorithm (estimates scale, rotation, and translation).
     Returns:
       R: 3x3 rotation matrix
       t: 3-element translation vector
-      such that: P_world = P_cam @ R.T + t
+      s: scale factor (float)
+      such that: P_world = s * (P_cam @ R.T) + t
     """
     from scipy.spatial import KDTree
     
@@ -1125,7 +1126,7 @@ def register_pointmap_to_world(pointmap: np.ndarray, pts_world: np.ndarray, max_
         
     if len(pts_cam) < 10 or len(pts_world) < 10:
         logger.warning("[ICP] Points too sparse for registration. Returning Identity.")
-        return np.eye(3), np.zeros(3)
+        return np.eye(3), np.zeros(3), 1.0
         
     # 2. Subsample source points for speed
     if len(pts_cam) > subsample:
@@ -1140,29 +1141,48 @@ def register_pointmap_to_world(pointmap: np.ndarray, pts_world: np.ndarray, max_
     # 3. Build KDTree on destination points
     tree = KDTree(dst)
     
-    # Kabsch algorithm implementation
-    def kabsch(A, B):
+    # Umeyama algorithm implementation (estimates rotation, translation, and scale)
+    def umeyama_fit(A, B):
+        n = A.shape[0]
         centroid_A = np.mean(A, axis=0)
         centroid_B = np.mean(B, axis=0)
         AA = A - centroid_A
         BB = B - centroid_B
-        H = AA.T @ BB
+        
+        # Variance of source points
+        var_A = np.mean(np.sum(AA**2, axis=1))
+        if var_A < 1e-8:
+            return np.eye(3), np.zeros(3), 1.0
+            
+        # Covariance matrix
+        H = (AA.T @ BB) / n
         U, S, Vt = np.linalg.svd(H)
+        
+        # Rotation
         R_fit = Vt.T @ U.T
         if np.linalg.det(R_fit) < 0:
             Vt[2, :] *= -1
             R_fit = Vt.T @ U.T
-        t_fit = centroid_B - R_fit @ centroid_A
-        return R_fit, t_fit
+            
+        # Scale
+        d = np.ones(3)
+        if np.linalg.det(H) < 0:
+            d[2] = -1
+        s_fit = float(np.sum(S * d) / var_A)
+        
+        # Translation
+        t_fit = centroid_B - s_fit * (R_fit @ centroid_A)
+        return R_fit, t_fit, s_fit
         
     # 4. ICP Loop
     R = np.eye(3)
-    t = np.mean(dst, axis=0) - np.mean(src, axis=0) # initial translation based on centroids
+    t = np.mean(dst, axis=0) - np.mean(src, axis=0)
+    s = 1.0
     
-    dist_threshold = 0.25 # maximum correspondence distance in meters
+    dist_threshold = 0.5  # slightly larger threshold for initial convergence of scaled models
     
     for iter_idx in range(max_iterations):
-        src_transformed = src @ R.T + t
+        src_transformed = s * (src @ R.T) + t
         distances, indices = tree.query(src_transformed, k=1, workers=-1)
         
         # Filter correspondences by distance
@@ -1174,9 +1194,9 @@ def register_pointmap_to_world(pointmap: np.ndarray, pts_world: np.ndarray, max_
         src_corr = src[valid]
         dst_corr = dst[indices[valid]]
         
-        # SVD fit
-        R, t = kabsch(src_corr, dst_corr)
+        # Umeyama SVD fit
+        R, t, s = umeyama_fit(src_corr, dst_corr)
         
-    logger.info(f"[ICP] Completed alignment. Final R: {R.tolist()}, t: {t.tolist()}")
-    return R, t
+    logger.info(f"[ICP] Completed alignment. Scale: {s:.6f}, R: {R.tolist()}, t: {t.tolist()}")
+    return R, t, s
 
