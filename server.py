@@ -153,7 +153,7 @@ def _load_scale_factor_for_scan(scan_id: str = None):
     return 1.0, False, "uncalibrated_default"
 
 
-def filter_points3d_ply(ply_path: str) -> None:
+def filter_points3d_ply(ply_path: str, center_x: float = None, center_z: float = None) -> None:
     """
     Applies the same filtering logic (horizontal crop around trunk cluster peak + statistical outlier removal)
     to points3d.ply before saving/uploading it, ensuring the point cloud shown in Laser Scan mode is clean.
@@ -216,40 +216,45 @@ def filter_points3d_ply(ply_path: str) -> None:
         proj_axes = [0, 2]
 
         # 4. Crop horizontally around peak (trunk cluster)
-        # Stage 1: Rough Horizontal Peak using entire cloud
-        h1_all = xyz[:, proj_axes[0]]
-        h2_all = xyz[:, proj_axes[1]]
-        hist, xedges, yedges = np.histogram2d(h1_all, h2_all, bins=30)
-        max_idx = np.unravel_index(np.argmax(hist), hist.shape)
-        rough_peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
-        rough_peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
+        if center_x is not None and center_z is not None:
+            peak_h1 = center_x
+            peak_h2 = center_z
+            print(f"[RECONSTRUCT-FILTER] Using custom crop center: ({peak_h1:.3f}, {peak_h2:.3f})")
+        else:
+            # Stage 1: Rough Horizontal Peak using entire cloud
+            h1_all = xyz[:, proj_axes[0]]
+            h2_all = xyz[:, proj_axes[1]]
+            hist, xedges, yedges = np.histogram2d(h1_all, h2_all, bins=30)
+            max_idx = np.unravel_index(np.argmax(hist), hist.shape)
+            rough_peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
+            rough_peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
 
-        # Rough crop to remove background (2.2 meters radius in real world)
-        ROUGH_CROP_RADIUS = 2.2
-        dist_sq_rough = (xyz[:, proj_axes[0]] - rough_peak_h1)**2 + (xyz[:, proj_axes[1]] - rough_peak_h2)**2
-        rough_cropped = xyz[dist_sq_rough <= ROUGH_CROP_RADIUS**2]
-        if len(rough_cropped) < 100:
-            rough_cropped = xyz
+            # Rough crop to remove background (2.2 meters radius in real world)
+            ROUGH_CROP_RADIUS = 2.2
+            dist_sq_rough = (xyz[:, proj_axes[0]] - rough_peak_h1)**2 + (xyz[:, proj_axes[1]] - rough_peak_h2)**2
+            rough_cropped = xyz[dist_sq_rough <= ROUGH_CROP_RADIUS**2]
+            if len(rough_cropped) < 100:
+                rough_cropped = xyz
 
-        # Stage 2: Refined Peak using lower 35% of rough cropped points (Y-down)
-        rough_y = rough_cropped[:, rough_axis_idx]
-        y_min = np.percentile(rough_y, 1)
-        y_max = np.percentile(rough_y, 99)
-        y_height = y_max - y_min
+            # Stage 2: Refined Peak using lower 35% of rough cropped points (Y-down)
+            rough_y = rough_cropped[:, rough_axis_idx]
+            y_min = np.percentile(rough_y, 1)
+            y_max = np.percentile(rough_y, 99)
+            y_height = y_max - y_min
 
-        # Lower 35% height in Y-down convention: Y is close to y_max
-        lower_mask = rough_y >= (y_max - y_height * 0.35)
-        lower_xyz = rough_cropped[lower_mask]
-        if len(lower_xyz) < 100:
-            lower_xyz = rough_cropped
+            # Lower 35% height in Y-down convention: Y is close to y_max
+            lower_mask = rough_y >= (y_max - y_height * 0.35)
+            lower_xyz = rough_cropped[lower_mask]
+            if len(lower_xyz) < 100:
+                lower_xyz = rough_cropped
 
-        h1 = lower_xyz[:, proj_axes[0]]
-        h2 = lower_xyz[:, proj_axes[1]]
+            h1 = lower_xyz[:, proj_axes[0]]
+            h2 = lower_xyz[:, proj_axes[1]]
 
-        hist_ref, xedges_ref, yedges_ref = np.histogram2d(h1, h2, bins=30)
-        max_idx_ref = np.unravel_index(np.argmax(hist_ref), hist_ref.shape)
-        peak_h1 = 0.5 * (xedges_ref[max_idx_ref[0]] + xedges_ref[max_idx_ref[0] + 1])
-        peak_h2 = 0.5 * (yedges_ref[max_idx_ref[1]] + yedges_ref[max_idx_ref[1] + 1])
+            hist_ref, xedges_ref, yedges_ref = np.histogram2d(h1, h2, bins=30)
+            max_idx_ref = np.unravel_index(np.argmax(hist_ref), hist_ref.shape)
+            peak_h1 = 0.5 * (xedges_ref[max_idx_ref[0]] + xedges_ref[max_idx_ref[0] + 1])
+            peak_h2 = 0.5 * (yedges_ref[max_idx_ref[1]] + yedges_ref[max_idx_ref[1] + 1])
 
         dist_sq = (xyz[:, proj_axes[0]] - peak_h1)**2 + (xyz[:, proj_axes[1]] - peak_h2)**2
         CROP_RADIUS = 1.0
@@ -923,26 +928,19 @@ def _reconstruct_thread(
             mb = os.path.getsize(out) / 1024 / 1024
         print(f"[RECONSTRUCT] Saved splat PLY: {out} ({mb:.2f} MB)")
 
-        # Save points3d.ply
+        # Save points3d.ply (keep raw on local disk for ICP alignment)
         if uploaded and points3d_url:
-            print(f"[RECONSTRUCT] Stream-downloading points3d.ply from R2 URL: {points3d_url}")
+            print(f"[RECONSTRUCT] Stream-downloading raw points3d.ply from R2 URL: {points3d_url}")
             import requests
             res_dl = requests.get(points3d_url, stream=True)
             with open(points3d_path, "wb") as f:
                 for chunk in res_dl.iter_content(chunk_size=8192):
                     f.write(chunk)
-            filter_points3d_ply(points3d_path)
-            try:
-                from storage.r2_client import upload_splat
-                upload_splat(points3d_path, tree_code, custom_timestamp=custom_ts)
-                print(f"[RECONSTRUCT] Re-uploaded filtered points3d.ply to R2 to overwrite raw version (timestamp: {custom_ts})")
-            except Exception as upload_err:
-                print(f"[RECONSTRUCT ERROR] Failed to re-upload filtered points3d.ply to R2: {upload_err}")
+            print(f"[RECONSTRUCT] Raw points3d.ply stream download completed successfully")
         elif points3d_bytes:
             with open(points3d_path, "wb") as f:
                 f.write(points3d_bytes)
             print(f"[RECONSTRUCT] Saved raw MASt3R point cloud: {points3d_path} ({len(points3d_bytes)/1024:.1f} KB)")
-            filter_points3d_ply(points3d_path)
         else:
             print("[RECONSTRUCT] No MASt3R point cloud returned — measurement will use splat")
             points3d_path = None
@@ -994,41 +992,29 @@ def _reconstruct_thread(
                     print(f"[RECONSTRUCT] Z-depth deviation ({abs(z_diff):.3f}m) > 1.5m. Background hit detected. Clamping Z2 to Z1.")
                     P2_np[2] = P1_np[2]
                     
-                # Align camera space to world space using ICP
+                # Align camera space to world space using ICP (raw-to-raw)
                 if points3d_path and os.path.exists(points3d_path):
                     from carbon.dbh_extractor import register_pointmap_to_world, parse_ply_points
                     try:
-                        pts_world = parse_ply_points(points3d_path)
+                        pts_world_raw = parse_ply_points(points3d_path)
                         
-                        # Crop pointmap to only keep points near the clicked trunk axis in camera space.
-                        # This ensures ICP registers trunk-to-trunk rather than trying to align
-                        # the entire background-heavy frame to the cropped world trunk.
-                        v_cam = P2_np - P1_np
-                        v_cam_norm = np.linalg.norm(v_cam)
-                        pts_cam_cropped = pointmap
-                        if v_cam_norm > 1e-6:
-                            v_cam_dir = v_cam / v_cam_norm
-                            valid_mask = ~np.all(pointmap == 0, axis=-1) & ~np.any(np.isnan(pointmap), axis=-1)
-                            pts_cam_all = pointmap[valid_mask]
-                            w_cam = pts_cam_all - P1_np
-                            h_proj_cam = np.dot(w_cam, v_cam_dir)
-                            perp_cam = w_cam - h_proj_cam[:, np.newaxis] * v_cam_dir[np.newaxis, :]
-                            perp_dist_cam = np.linalg.norm(perp_cam, axis=1)
-                            # Keep points within 0.4 units of clicked axis (tighter radius for cleaner trunk focus)
-                            crop_mask_cam = (perp_dist_cam <= 0.4) & (h_proj_cam >= -0.5) & (h_proj_cam <= v_cam_norm + 0.5)
-                            if np.sum(crop_mask_cam) >= 20:
-                                pts_cam_cropped = pts_cam_all[crop_mask_cam]
-                                
-                        R, t = register_pointmap_to_world(pts_cam_cropped, pts_world)
+                        # Use full pointmap and full pts_world_raw for raw-to-raw stability
+                        R, t = register_pointmap_to_world(pointmap, pts_world_raw)
                         P1_aligned = P1_np @ R.T + t
                         P2_aligned = P2_np @ R.T + t
                         P1_3d = P1_aligned.tolist()
                         P2_3d = P2_aligned.tolist()
                         print(f"[RECONSTRUCT] ICP Alignment successful: P1_3d={P1_3d}, P2_3d={P2_3d}")
+                        
+                        # Now crop the point cloud file on disk locally around the clicked trunk center.
+                        # This clean PLY will be used for the local carbon estimation.
+                        filter_points3d_ply(points3d_path, center_x=P1_aligned[0], center_z=P1_aligned[2])
+                        print(f"[RECONSTRUCT] Cleaned local point cloud around clicked trunk center: {P1_aligned[0]:.3f}, {P1_aligned[2]:.3f}")
                     except Exception as align_err:
                         print(f"[RECONSTRUCT ERROR] ICP Alignment failed: {align_err}. Using camera-space fallback.")
                         P1_3d = P1_np.tolist()
                         P2_3d = P2_np.tolist()
+                        filter_points3d_ply(points3d_path) # fallback to auto peak crop
                 else:
                     P1_3d = P1_np.tolist()
                     P2_3d = P2_np.tolist()
@@ -1616,21 +1602,40 @@ async def splat_proxy(tree_code: str, filename: str):
             raise HTTPException(status_code=404, detail="File not found in storage")
         raise HTTPException(status_code=500, detail=f"Failed to fetch from R2: {err_msg}")
 
-    # If it is points3d.ply, we intercept, filter on-the-fly, and upload back to R2 in background if it changed.
+    # If it is points3d.ply, we intercept, filter on-the-fly, and return the clean version.
+    # The file in R2 remains raw (useful for future recalculations), while the viewer gets a clean cloud.
     if filename.lower().endswith("points3d.ply"):
         try:
             content = await asyncio.to_thread(response["Body"].read)
             import tempfile
             import io
+            import json
+            from storage.d1_client import execute_d1_query
             
-            # Write to a temp file
+            # Fetch custom clicked center from D1 database if available
+            center_x = None
+            center_z = None
+            try:
+                sql = "SELECT geometry_3d FROM tree_scans WHERE tree_code = ? ORDER BY id DESC LIMIT 1"
+                scans = await asyncio.to_thread(execute_d1_query, sql, [tree_code])
+                if scans and scans[0].get("geometry_3d"):
+                    g3d = scans[0]["geometry_3d"]
+                    while isinstance(g3d, str) and g3d.strip():
+                        g3d = json.loads(g3d)
+                    if isinstance(g3d, dict):
+                        center_x = g3d.get("center_x")
+                        center_z = g3d.get("center_z")
+            except Exception as db_err:
+                print(f"[PROXY-FILTER ERROR] Failed to query geometry_3d for proxy: {db_err}")
+            
+            # Write raw content to a temp file
             with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as tmp_f:
                 tmp_f.write(content)
                 tmp_path = tmp_f.name
                 
-            # Filter it
+            # Filter the PLY using the custom center (or auto peak fallback)
             try:
-                await asyncio.to_thread(filter_points3d_ply, tmp_path)
+                await asyncio.to_thread(filter_points3d_ply, tmp_path, center_x, center_z)
                 
                 # Read filtered bytes
                 with open(tmp_path, "rb") as tmp_f:
@@ -1641,41 +1646,6 @@ async def splat_proxy(tree_code: str, filename: str):
                     os.remove(tmp_path)
                 except Exception:
                     pass
-                    
-                # If content changed (filtered out noise), upload clean version to R2 in background
-                if len(filtered_content) != len(content):
-                    print(f"[PROXY-FILTER] Filename {filename} was noisy ({len(content)} bytes) -> Cleaned ({len(filtered_content)} bytes). Uploading back to R2 in background...")
-                    
-                    async def upload_clean_back_to_r2():
-                        try:
-                            # Write clean content to a temp file to upload
-                            with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as upload_tmp:
-                                upload_tmp.write(filtered_content)
-                                upload_tmp_path = upload_tmp.name
-                            
-                            # Standardize filename to points3d.ply for upload
-                            std_upload_path = os.path.join(os.path.dirname(upload_tmp_path), "points3d.ply")
-                            import shutil
-                            shutil.copy2(upload_tmp_path, std_upload_path)
-                            
-                            ts_part = None
-                            try:
-                                if "_" in filename:
-                                    ts_part = int(filename.split("_")[0])
-                            except Exception:
-                                pass
-                                
-                            from storage.r2_client import upload_splat
-                            await asyncio.to_thread(upload_splat, std_upload_path, tree_code, ts_part)
-                            
-                            for p in (upload_tmp_path, std_upload_path):
-                                if os.path.exists(p):
-                                    os.remove(p)
-                            print(f"[PROXY-FILTER] Successfully re-uploaded cleaned {filename} to R2 bucket.")
-                        except Exception as upload_err:
-                            print(f"[PROXY-FILTER ERROR] Failed to upload clean file to R2: {upload_err}")
-                            
-                    asyncio.create_task(upload_clean_back_to_r2())
                     
                 headers = {
                     "Cache-Control": "public, max-age=31536000, immutable",
@@ -2067,29 +2037,6 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                 with open(local_ply_path, "wb") as f:
                     f.write(res_ply.content)
                 print(f"[RECALCULATE] Successfully downloaded existing points3d.ply from R2")
-                
-                # Filter and re-upload to R2 so subsequent viewer page loads get the filtered one!
-                filter_points3d_ply(local_ply_path)
-                try:
-                    from storage.r2_client import upload_splat
-                    import shutil
-                    ts_part = None
-                    try:
-                        filename = points3d_url.split("/")[-1].split("?")[0]
-                        if "_" in filename:
-                            ts_part = int(filename.split("_")[0])
-                    except Exception:
-                        pass
-                    tmp_upload_path = os.path.join(os.path.dirname(local_ply_path), "points3d.ply")
-                    shutil.copy2(local_ply_path, tmp_upload_path)
-                    upload_splat(tmp_upload_path, tree_code, custom_timestamp=ts_part)
-                    try:
-                        os.remove(tmp_upload_path)
-                    except Exception:
-                        pass
-                    print(f"[RECALCULATE] Re-uploaded filtered points3d.ply to R2 (timestamp: {ts_part})")
-                except Exception as upload_err:
-                    print(f"[RECALCULATE ERROR] Failed to re-upload filtered points3d.ply: {upload_err}")
             except Exception as ply_err:
                 raise HTTPException(
                     status_code=400,
@@ -2120,38 +2067,26 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             print(f"[RECALCULATE] Z-depth deviation ({abs(z_diff):.3f}m) > 1.5m. Background hit detected. Clamping Z2 to Z1.")
             P2_cam[2] = P1_cam[2]
 
-        # Align camera space to world space using ICP
+        # Align camera space to world space using ICP (raw-to-raw)
         from carbon.dbh_extractor import register_pointmap_to_world, parse_ply_points
         try:
-            pts_world = parse_ply_points(local_ply_path)
+            pts_world_raw = parse_ply_points(local_ply_path)
             
-            # Crop pointmap to only keep points near the clicked trunk axis in camera space.
-            # This ensures ICP registers trunk-to-trunk rather than trying to align
-            # the entire background-heavy frame to the cropped world trunk.
-            v_cam = P2_cam - P1_cam
-            v_cam_norm = np.linalg.norm(v_cam)
-            pts_cam_cropped = pointmap
-            if v_cam_norm > 1e-6:
-                v_cam_dir = v_cam / v_cam_norm
-                valid_mask = ~np.all(pointmap == 0, axis=-1) & ~np.any(np.isnan(pointmap), axis=-1)
-                pts_cam_all = pointmap[valid_mask]
-                w_cam = pts_cam_all - P1_cam
-                h_proj_cam = np.dot(w_cam, v_cam_dir)
-                perp_cam = w_cam - h_proj_cam[:, np.newaxis] * v_cam_dir[np.newaxis, :]
-                perp_dist_cam = np.linalg.norm(perp_cam, axis=1)
-                # Keep points within 0.4 units of clicked axis (tighter radius for cleaner trunk focus)
-                crop_mask_cam = (perp_dist_cam <= 0.4) & (h_proj_cam >= -0.5) & (h_proj_cam <= v_cam_norm + 0.5)
-                if np.sum(crop_mask_cam) >= 20:
-                    pts_cam_cropped = pts_cam_all[crop_mask_cam]
-                    
-            R, t = register_pointmap_to_world(pts_cam_cropped, pts_world)
+            # Use full pointmap and full pts_world_raw for raw-to-raw stability
+            R, t = register_pointmap_to_world(pointmap, pts_world_raw)
             P1 = (P1_cam @ R.T + t).tolist()
             P2 = (P2_cam @ R.T + t).tolist()
             print(f"[RECALCULATE] ICP Alignment successful. P1_world={P1}, P2_world={P2}")
+            
+            # Now filter the local point cloud file on disk by cropping around the clicked trunk center.
+            # This clean PLY will be passed to extract_dbh_with_2d_clicks.
+            filter_points3d_ply(local_ply_path, center_x=P1[0], center_z=P1[2])
+            print(f"[RECALCULATE] Cleaned local point cloud around clicked trunk center: {P1[0]:.3f}, {P1[2]:.3f}")
         except Exception as align_err:
             print(f"[RECALCULATE ERROR] ICP Alignment failed: {align_err}. Using camera-space fallback.")
             P1 = P1_cam.tolist()
             P2 = P2_cam.tolist()
+            filter_points3d_ply(local_ply_path) # fallback to auto peak crop
 
         # 7. Perform DBH extraction with 2D clicks
         scale_factor, _is_cal2, _src2 = _load_scale_factor_for_scan(tree_code)
