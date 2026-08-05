@@ -931,8 +931,13 @@ def _reconstruct_thread(
             with open(points3d_path, "wb") as f:
                 for chunk in res_dl.iter_content(chunk_size=8192):
                     f.write(chunk)
-            print(f"[RECONSTRUCT] points3d.ply stream download completed successfully")
             filter_points3d_ply(points3d_path)
+            try:
+                from storage.r2_client import upload_splat
+                upload_splat(points3d_path, tree_code, custom_timestamp=custom_ts)
+                print(f"[RECONSTRUCT] Re-uploaded filtered points3d.ply to R2 to overwrite raw version (timestamp: {custom_ts})")
+            except Exception as upload_err:
+                print(f"[RECONSTRUCT ERROR] Failed to re-upload filtered points3d.ply to R2: {upload_err}")
         elif points3d_bytes:
             with open(points3d_path, "wb") as f:
                 f.write(points3d_bytes)
@@ -1665,6 +1670,22 @@ async def manual_override(body: ManualOverrideRequest):
         with open(local_ply_path, "wb") as f:
             f.write(res.content)
         print(f"[OVERRIDE] Point cloud downloaded: {local_ply_path}")
+        
+        # Filter and re-upload to R2 so subsequent viewer page loads get the filtered one!
+        filter_points3d_ply(local_ply_path)
+        try:
+            from storage.r2_client import upload_splat
+            ts_part = None
+            try:
+                filename = points3d_url.split("/")[-1].split("?")[0]
+                if "_" in filename:
+                    ts_part = int(filename.split("_")[0])
+            except Exception:
+                pass
+            upload_splat(local_ply_path, body.tree_code, custom_timestamp=ts_part)
+            print(f"[OVERRIDE] Re-uploaded filtered points3d.ply to R2 (timestamp: {ts_part})")
+        except Exception as upload_err:
+            print(f"[OVERRIDE ERROR] Failed to re-upload filtered points3d.ply: {upload_err}")
 
         # 4. Perform manual override DBH extraction
         from carbon.dbh_extractor import extract_dbh_with_manual_override
@@ -1936,6 +1957,22 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             with open(local_ply_path, "wb") as f:
                 f.write(res_ply.content)
             print(f"[RECALCULATE] Successfully downloaded existing points3d.ply from R2")
+            
+            # Filter and re-upload to R2 so subsequent viewer page loads get the filtered one!
+            filter_points3d_ply(local_ply_path)
+            try:
+                from storage.r2_client import upload_splat
+                ts_part = None
+                try:
+                    filename = points3d_url.split("/")[-1].split("?")[0]
+                    if "_" in filename:
+                        ts_part = int(filename.split("_")[0])
+                except Exception:
+                    pass
+                upload_splat(local_ply_path, tree_code, custom_timestamp=ts_part)
+                print(f"[RECALCULATE] Re-uploaded filtered points3d.ply to R2 (timestamp: {ts_part})")
+            except Exception as upload_err:
+                print(f"[RECALCULATE ERROR] Failed to re-upload filtered points3d.ply: {upload_err}")
         except Exception as ply_err:
             raise HTTPException(
                 status_code=400,
