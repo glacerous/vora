@@ -332,24 +332,6 @@ def run_carbon_analysis(
                 calibration_source = scale_calibration["source"]
                 auto_calib_note = f"auto-kalibrasi pose diterapkan (offloaded ke Modal): {scale_calibration['reason']}"
                 print(f"[CARBON-AUTOCALIB] {auto_calib_note} scale_factor={scale_factor:.6f}")
-            elif points3d_path and os.path.exists(points3d_path):
-                # Fallback to local auto-calibration if no scale_calibration was provided (e.g. historical scans recalculate)
-                try:
-                    from carbon.height_calibration import auto_calibrate_scale_from_frames
-                    from carbon.dbh_extractor import parse_ply_points
-                    frames = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
-                    pts_3d = parse_ply_points(points3d_path)
-                    auto = auto_calibrate_scale_from_frames(frames, pts_3d)
-                    if auto and auto.get("is_calibrated") and auto.get("scale_factor", 0) > 0:
-                        scale_factor = float(auto["scale_factor"])
-                        is_calibrated = True
-                        calibration_source = "auto_pose"
-                        auto_calib_note = f"auto-kalibrasi pose diterapkan (lokal): {auto['reason']}"
-                        print(f"[CARBON-AUTOCALIB] {auto_calib_note} scale_factor={scale_factor:.6f}")
-                    else:
-                        print(f"[CARBON-AUTOCALIB] Pose auto-calibration did not succeed: {auto}")
-                except Exception as auto_err:
-                    print(f"[CARBON-AUTOCALIB ERROR] Local auto pose calibration failed: {auto_err}")
 
         scale_status = "calibrated" if is_calibrated else "uncalibrated"
 
@@ -587,7 +569,7 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
 
         if ratio < threshold:
             idx_mid = (idx_a + idx_b) // 2
-            print(f"[OVERLAP] ⚠ Low overlap ({ratio*100:.1f}% < {threshold*100:.1f}%). Inserting candidate {idx_mid} between {idx_a} and {idx_b}")
+            print(f"[OVERLAP] [WARNING] Low overlap ({ratio*100:.1f}% < {threshold*100:.1f}%). Inserting candidate {idx_mid} between {idx_a} and {idx_b}")
             current_idxs.insert(i + 1, idx_mid)
             added_count += 1
             gaps_detected.append(f"Gap between frames {i} and {i+1} ({ratio*100:.1f}% overlap)")
@@ -596,7 +578,7 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
             i += 1
 
     if gaps_detected:
-        warning_msg = f"⚠ Low overlap warning: {len(gaps_detected)} gaps detected. Resampled +{added_count} frames. Try slower/steadier capture next time."
+        warning_msg = f"[WARNING] Low overlap warning: {len(gaps_detected)} gaps detected. Resampled +{added_count} frames. Try slower/steadier capture next time."
         state["overlap_warning"] = warning_msg
         print(f"[OVERLAP] {warning_msg}")
     else:
@@ -611,9 +593,12 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
     cap = None
     try:
         upd("extracting", "Opening video file…")
+        t_open_start = time.time()
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise ValueError("Cannot open video — try MP4 / MOV / AVI / WEBM / MKV format")
+        t_open_end = time.time()
+        print(f"[TIMING] Opened video file via OpenCV: {t_open_end - t_open_start:.4f}s")
 
         orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -653,6 +638,7 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         os.makedirs(temp_candidates_dir, exist_ok=True)
 
         candidates, fi = [], 0
+        t_scan_start = time.time()
         while True:
             if state.get("cancel_requested", False):
                 break
@@ -693,6 +679,9 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
                 
             fi += 1
             
+        t_scan_end = time.time()
+        print(f"[TIMING] Video scan loop completed in {t_scan_end - t_scan_start:.4f}s. Scanned {fi} frames, kept {len(candidates)} candidates.")
+
     except Exception as exc:
         print(f"[EXTRACT ERROR] During video read: {exc}")
         upd("error", str(exc), error=str(exc))
@@ -728,11 +717,15 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
             state["cancel_requested"] = False
             return
             
+        t_overlap_start = time.time()
         resampled_idxs = _check_overlap_and_resample(candidates, idxs, threshold=0.15)
+        t_overlap_end = time.time()
+        print(f"[TIMING] Overlap check and dynamic resampling: {t_overlap_end - t_overlap_start:.4f}s")
         n = len(resampled_idxs)
         
         upd("extracting", f"Selecting {n} frames (including dynamically resampled ones)…")
 
+        t_copy_start = time.time()
         for f in glob.glob(os.path.join(FRAMES_DIR, "*")):
             os.remove(f)
 
@@ -762,6 +755,8 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
                 print(f"[EXTRACT] Saved frame {j:04d}.jpg from source: {raw_frame if isinstance(raw_frame, str) else 'bytes'}")
 
         state["frame_count"] = n
+        t_copy_end = time.time()
+        print(f"[TIMING] Selected and saved {n} frames to disk: {t_copy_end - t_copy_start:.4f}s")
         
         # Free memory immediately by deleting candidates list and running garbage collection
         try:
@@ -774,7 +769,7 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         # Pose detection for calibration has been deprecated as MASt3R native metric scale is correct
         state["calibration_frame"] = None
 
-        upd("extracted", f"\u2713 {n} sharp frames ready")
+        upd("extracted", f"✓ {n} sharp frames ready")
         print(f"[EXTRACT] Completed. {n} frames written to {FRAMES_DIR}")
 
     except Exception as exc:
@@ -809,6 +804,7 @@ def _reconstruct_thread(
             raise RuntimeError("Job cancelled by user")
         upd("reconstructing", "Connecting to Modal…")
 
+        t_disk_start = time.time()
         files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
         if not files:
             raise ValueError("No frames found in test_images/")
@@ -817,6 +813,8 @@ def _reconstruct_thread(
         for f in files:
             with open(f, "rb") as fh:
                 imgs.append(fh.read())
+        t_disk_end = time.time()
+        print(f"[TIMING] Read {len(imgs)} frames from local disk: {t_disk_end - t_disk_start:.4f}s")
 
         upd("reconstructing", f"Sending {len(imgs)} frames to Modal A10G GPU…")
         
@@ -913,6 +911,7 @@ def _reconstruct_thread(
                     pass
 
         # Load splat (viewer)
+        t_dl_splat_start = time.time()
         if uploaded and splat_url:
             print(f"[RECONSTRUCT] Stream-downloading result.ply from R2 URL: {splat_url}")
             import requests
@@ -926,6 +925,8 @@ def _reconstruct_thread(
                 f.write(splat_bytes)
         else:
             print("[RECONSTRUCT] WARNING: No Gaussian splat PLY received!")
+        t_dl_splat_end = time.time()
+        print(f"[TIMING] Save/download result.ply: {t_dl_splat_end - t_dl_splat_start:.4f}s")
 
         mb = 0.0
         if os.path.exists(out):
@@ -933,6 +934,7 @@ def _reconstruct_thread(
         print(f"[RECONSTRUCT] Saved splat PLY: {out} ({mb:.2f} MB)")
 
         # Save points3d.ply (keep raw on local disk for ICP alignment)
+        t_dl_pts_start = time.time()
         if uploaded and points3d_url:
             print(f"[RECONSTRUCT] Stream-downloading raw points3d.ply from R2 URL: {points3d_url}")
             import requests
@@ -948,8 +950,11 @@ def _reconstruct_thread(
         else:
             print("[RECONSTRUCT] No MASt3R point cloud returned — measurement will use splat")
             points3d_path = None
+        t_dl_pts_end = time.time()
+        print(f"[TIMING] Save/download points3d.ply: {t_dl_pts_end - t_dl_pts_start:.4f}s")
 
         # Save points3d_all.npy
+        t_dl_all_start = time.time()
         if uploaded and points3d_all_url:
             print(f"[RECONSTRUCT] Stream-downloading points3d_all.npy from R2 URL: {points3d_all_url}")
             import requests
@@ -964,7 +969,10 @@ def _reconstruct_thread(
             print(f"[RECONSTRUCT] Saved raw MASt3R dense pointmap: {points3d_all_path} ({len(points3d_all_bytes)/1024/1024:.1f} MB)")
         else:
             points3d_all_path = None
+        t_dl_all_end = time.time()
+        print(f"[TIMING] Save/download points3D_all.npy: {t_dl_all_end - t_dl_all_start:.4f}s")
 
+        t_icp_start = time.time()
         P1_3d = None
         P2_3d = None
         if p1 is not None and p2 is not None and points3d_all_path and os.path.exists(points3d_all_path):
@@ -1024,10 +1032,13 @@ def _reconstruct_thread(
                     P2_3d = P2_np.tolist()
             except Exception as map_err:
                 print(f"[RECONSTRUCT ERROR] Failed to map pixel coordinates to 3D: {map_err}")
+        t_icp_end = time.time()
+        print(f"[TIMING] Mapping pixel and ICP alignment / filter_points3d_ply: {t_icp_end - t_icp_start:.4f}s")
 
         elapsed = time.time() - t0
         print(f"[RECONSTRUCT] Total pipeline runtime: {elapsed:.2f} seconds")
 
+        t_meta_start = time.time()
         # 1. Resolve GPS coordinates from EXIF metadata if not provided manually
         if gps_lat is None or gps_lon is None:
             try:
@@ -1054,7 +1065,10 @@ def _reconstruct_thread(
                     print(f"[RECONSTRUCT-CLIMATE] Koppen Climate: {climate_zone}, Forest type: {forest_type}")
             except Exception as climate_err:
                 print(f"[RECONSTRUCT-CLIMATE ERROR] Mapresso query failed: {climate_err}")
+        t_meta_end = time.time()
+        print(f"[TIMING] EXIF GPS and Koppen Climate Zone classification: {t_meta_end - t_meta_start:.4f}s")
 
+        t_species_start = time.time()
         # 3. Detect Species via Pl@ntNet API
         species_preds = None
         try:
@@ -1099,7 +1113,10 @@ def _reconstruct_thread(
                         print(f"[RECONSTRUCT-WD] Matched wood density for {sci_name}: {wood_density}")
                 except Exception as wd_err:
                     print(f"[RECONSTRUCT-WD ERROR] Wood density lookup exception: {wd_err}")
+        t_species_end = time.time()
+        print(f"[TIMING] Pl@ntNet species detection & wood density lookup: {t_species_end - t_species_start:.4f}s")
 
+        t_carbon_start = time.time()
         # 5. Run Carbon Analysis using custom parameters
         progress_dict[tree_code] = "Computing DBH & carbon"
         upd("reconstructing", "✓ Reconstruction done. Estimating DBH and Carbon...")
@@ -1125,9 +1142,12 @@ def _reconstruct_thread(
                 carbon_est["confidence"] = "GPS data not available - fallback to moist forest assumption"
                 
         state["carbon_estimation"] = carbon_est
+        t_carbon_end = time.time()
+        print(f"[TIMING] Local carbon estimation analysis: {t_carbon_end - t_carbon_start:.4f}s")
 
         if carbon_est and "error" not in carbon_est:
             try:
+                t_persistence_start = time.time()
                 progress_dict[tree_code] = "Uploading results"
                 
                 if uploaded:
@@ -1204,6 +1224,8 @@ def _reconstruct_thread(
                     plot_id=plot_id,
                     claimed_by_user_id=claimed_by_user_id,
                 )
+                t_persistence_end = time.time()
+                print(f"[TIMING] R2 upload & D1 database persistence: {t_persistence_end - t_persistence_start:.4f}s")
                 upd("done", f"✓ Done in {elapsed:.0f}s — {mb:.1f} MB Gaussian Splat ready! (Tree code: {tree_code})")
             except Exception as exc:
                 print(f"Persistence error: {exc}")
@@ -1418,6 +1440,8 @@ async def upload_video(
         )
     path = os.path.join(UPLOAD_DIR, f"input{ext}")
 
+    t_start = time.time()
+    total_bytes = 0
     # Stream to disk in 1 MB chunks — safe for very large (4 GB) files
     with open(path, "wb") as out:
         while True:
@@ -1425,6 +1449,9 @@ async def upload_video(
             if not chunk:
                 break
             out.write(chunk)
+            total_bytes += len(chunk)
+    t_end = time.time()
+    print(f"[TIMING] Video upload write to disk: {t_end - t_start:.4f}s for {total_bytes / (1024 * 1024):.2f} MB")
 
     state["error"] = None
     state["cancel_requested"] = False
@@ -1433,29 +1460,6 @@ async def upload_video(
     background_tasks.add_task(_extract_thread, path, frames, blur_thresh)
     return {"queued": True}
 
-@app.post("/use_photos", summary="Upload photos directly as extracted frames")
-async def use_photos(photos: List[UploadFile] = File(...)):
-    """
-    Accepts a list of photos as direct input (skips video extraction step).
-    Poll `/status` for updated state.
-    """
-    if not photos:
-        raise HTTPException(status_code=400, detail="No photos provided")
-
-    for f in glob.glob(os.path.join(FRAMES_DIR, "*")):
-        os.remove(f)
-
-    for i, p in enumerate(photos):
-        data = await p.read()
-        with open(os.path.join(FRAMES_DIR, f"{i:04d}.jpg"), "wb") as out:
-            out.write(data)
-
-    n = len(photos)
-    state["frame_count"] = n
-    state["error"] = None
-    state["cancel_requested"] = False
-    upd("extracted", f"\u2713 {n} photos loaded")
-    return {"success": True, "count": n}
 
 @app.post("/reconstruct", summary="Start GPU reconstruction on extracted frames")
 async def reconstruct(
