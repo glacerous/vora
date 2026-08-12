@@ -8,4 +8,9 @@ opencv-python-headless
 numpy
 modal
 scipy
+reportlab
+qrcode
+openpyxl
+pillow
+
 

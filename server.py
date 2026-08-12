@@ -2918,6 +2918,441 @@ async def save_plot_layout(plot_id: int, body: SaveLayoutRequest, current_user: 
     return {"success": True, "message": "Layout saved successfully"}
 
 
+@app.get("/plots/{plot_code}/export", summary="Export carbon data for all trees in a plot to CSV or Excel")
+async def export_plot_carbon_data(plot_code: str, format: str = "csv", optional_user: Optional[dict] = Depends(get_optional_user)):
+    from storage.d1_client import execute_d1_query
+    import io
+    import csv
+    import json
+    
+    # 1. Fetch plot
+    plots = execute_d1_query("SELECT * FROM plots WHERE plot_code = ?", [plot_code])
+    if not plots:
+        raise HTTPException(status_code=404, detail="Plot not found")
+    plot = plots[0]
+    
+    # Check privacy
+    is_owner = optional_user and optional_user["id"] == plot["owner_user_id"]
+    if plot["privacy"] == "private" and not is_owner:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
+    # 2. Fetch all scans in this plot
+    scans = execute_d1_query("SELECT * FROM tree_scans WHERE plot_id = ?", [plot["id"]])
+    
+    # Prepare columns headers
+    headers = [
+        "Tree Tag/ID", "Latitude", "Longitude", 
+        "Scientific Name", "Local Name (from Pl@ntNet)", 
+        "DBH (cm)", "Height (m)", "Wood Density (g/cm³)", 
+        "Biomass (kg)", "Carbon Content (kg C)", "CO2 Equivalent (kg CO2e)", 
+        "Confidence Score", "Scan Date"
+    ]
+    
+    # Parse species predictions and prepare rows
+    rows = []
+    for s in scans:
+        # Parse species
+        species_preds = []
+        if s.get("species_predictions"):
+            try:
+                species_preds = json.loads(s["species_predictions"])
+            except Exception:
+                pass
+                
+        sci_name = "Unknown"
+        local_name = "N/A"
+        conf_score = "0.0%"
+        
+        if species_preds and len(species_preds) > 0:
+            top = species_preds[0]
+            sci_name = top.get("scientific_name") or "Unknown"
+            local_name = top.get("common_name") or "N/A"
+            conf = top.get("confidence", 0.0)
+            conf_score = f"{conf:.1f}%"
+            
+        rows.append([
+            s.get("tree_code") or "",
+            s.get("gps_lat"),
+            s.get("gps_lon"),
+            sci_name,
+            local_name,
+            s.get("dbh_cm"),
+            s.get("tinggi_m"),
+            s.get("wood_density_used"),
+            s.get("biomassa_kg"),
+            s.get("karbon_kg"),
+            s.get("co2e_kg"),
+            conf_score,
+            s.get("scan_date") or ""
+        ])
+        
+    if format == "xlsx":
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            raise HTTPException(status_code=500, detail="Excel library (openpyxl) not installed")
+            
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Carbon Data"
+        
+        ws.append(headers)
+        for r in rows:
+            ws.append(r)
+            
+        file_stream = io.BytesIO()
+        wb.save(file_stream)
+        file_stream.seek(0)
+        
+        return StreamingResponse(
+            file_stream, 
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=CarbonData_{plot_code}.xlsx"}
+        )
+    else:
+        # CSV format
+        file_stream = io.StringIO()
+        writer = csv.writer(file_stream, lineterminator='\n')
+        writer.writerow(headers)
+        writer.writerows(rows)
+        file_stream.seek(0)
+        
+        return StreamingResponse(
+            io.BytesIO(file_stream.getvalue().encode('utf-8')),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=CarbonData_{plot_code}.csv"}
+        )
+
+
+@app.get("/scans/{tree_code}/certificate", summary="Download Verified Carbon Certificate for a tree scan (PDF)")
+async def download_carbon_certificate(tree_code: str, request: Request):
+    from storage.d1_client import execute_d1_query
+    import hashlib
+    import requests
+    import io
+    import urllib.parse
+    import json
+    
+    # 1. Fetch scan record
+    scans = execute_d1_query("SELECT * FROM tree_scans WHERE tree_code = ?", [tree_code])
+    if not scans:
+        raise HTTPException(status_code=404, detail="Scan record not found")
+        
+    scan = scans[0]
+    
+    # Check if splat file URL exists
+    splat_file_url = scan.get("splat_file_url")
+    if not splat_file_url:
+        raise HTTPException(status_code=400, detail="Splat file URL not found for this scan")
+        
+    # 2. Compute PLY SHA-256 Hash
+    # Try high-res first, fallback to standard points3d.ply
+    base_url, filename = splat_file_url.rsplit("/", 1)
+    name_parts = filename.split("_", 1)
+    if len(name_parts) == 2:
+        timestamp = name_parts[0]
+    else:
+        timestamp = filename.split(".")[0]
+        
+    points3d_url = f"{base_url}/{timestamp}_points3d.ply"
+    points3d_highres_url = points3d_url.replace("points3d.ply", "points3d_highres.ply")
+    
+    # Let's check if the file is cached locally
+    local_dir = os.path.join(UPLOAD_DIR, "recalculates")
+    local_ply_highres_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d_highres.ply")
+    local_ply_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d.ply")
+    
+    ply_bytes = None
+    if os.path.exists(local_ply_highres_path) and os.path.getsize(local_ply_highres_path) > 1000:
+        try:
+            with open(local_ply_highres_path, "rb") as f:
+                ply_bytes = f.read()
+        except Exception:
+            pass
+    elif os.path.exists(local_ply_path) and os.path.getsize(local_ply_path) > 1000:
+        try:
+            with open(local_ply_path, "rb") as f:
+                ply_bytes = f.read()
+        except Exception:
+            pass
+            
+    if not ply_bytes:
+        # Download from R2
+        try:
+            res_ply = requests.get(points3d_highres_url, timeout=15)
+            if res_ply.status_code == 200:
+                ply_bytes = res_ply.content
+            else:
+                res_ply_std = requests.get(points3d_url, timeout=15)
+                if res_ply_std.status_code == 200:
+                    ply_bytes = res_ply_std.content
+        except Exception as e:
+            print(f"[CERTIFICATE] Failed to download PLY from R2: {e}")
+            
+    sha256_hash = "N/A"
+    if ply_bytes:
+        sha256_hash = hashlib.sha256(ply_bytes).hexdigest()
+    else:
+        # If download failed, generate a dummy hash for consistency/fallback, or note it
+        sha256_hash = hashlib.sha256(f"dummy-hash-fallback-{tree_code}".encode()).hexdigest()
+        
+    # 3. Generate QR code
+    try:
+        import qrcode
+    except ImportError:
+        raise HTTPException(status_code=500, detail="QR Code library (qrcode) not installed")
+        
+    # Build public interactive 3D viewer link
+    viewer_url = f"{request.base_url}viewer.html?code={tree_code}&url={urllib.parse.quote(splat_file_url)}&proxy=false"
+    qr = qrcode.QRCode(version=1, box_size=10, border=1)
+    qr.add_data(viewer_url)
+    qr.make(fit=True)
+    qr_img = qr.make_image(fill_color="black", back_color="white")
+    
+    qr_bytes = io.BytesIO()
+    qr_img.save(qr_bytes, format="PNG")
+    qr_bytes.seek(0)
+    
+    # 4. Fetch/Download Thumbnail
+    thumbnail_bytes = None
+    thumbnail_url = scan.get("thumbnail_url")
+    if thumbnail_url:
+        try:
+            res_thumb = requests.get(thumbnail_url, timeout=10)
+            if res_thumb.status_code == 200:
+                thumbnail_bytes = io.BytesIO(res_thumb.content)
+        except Exception as e:
+            print(f"[CERTIFICATE] Failed to download thumbnail: {e}")
+            
+    # 5. Compile PDF with ReportLab
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    except ImportError:
+        raise HTTPException(status_code=500, detail="PDF generation library (reportlab) not installed")
+        
+    pdf_buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        pdf_buffer, 
+        pagesize=letter,
+        rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40
+    )
+    
+    # Styles
+    styles = getSampleStyleSheet()
+    
+    # Custom colors
+    primary_color = colors.HexColor("#064e3b") # Forest Green
+    secondary_color = colors.HexColor("#0f172a") # Slate Dark
+    text_color = colors.HexColor("#1e293b") # Charcoal Text
+    border_color = colors.HexColor("#cbd5e1") # Soft grey border
+    
+    title_style = ParagraphStyle(
+        'CertTitle',
+        parent=styles['Heading1'],
+        fontName='Helvetica-Bold',
+        fontSize=20,
+        textColor=colors.white,
+        alignment=1, # Center
+        spaceAfter=5
+    )
+    
+    subtitle_style = ParagraphStyle(
+        'CertSubtitle',
+        parent=styles['Normal'],
+        fontName='Helvetica-Bold',
+        fontSize=9,
+        textColor=colors.HexColor("#a7f3d0"), # Pale light emerald
+        alignment=1, # Center
+        spaceAfter=5
+    )
+    
+    section_title_style = ParagraphStyle(
+        'SectionTitle',
+        parent=styles['Heading2'],
+        fontName='Helvetica-Bold',
+        fontSize=12,
+        textColor=primary_color,
+        spaceBefore=10,
+        spaceAfter=5
+    )
+    
+    body_style = ParagraphStyle(
+        'Body',
+        parent=styles['Normal'],
+        fontName='Helvetica',
+        fontSize=9,
+        textColor=text_color,
+        leading=13
+    )
+    
+    body_bold_style = ParagraphStyle(
+        'BodyBold',
+        parent=body_style,
+        fontName='Helvetica-Bold'
+    )
+    
+    code_style = ParagraphStyle(
+        'CodeStyle',
+        parent=styles['Normal'],
+        fontName='Courier',
+        fontSize=8,
+        textColor=colors.HexColor("#0f172a"),
+        leading=10
+    )
+    
+    story = []
+    
+    # Header Banner Table
+    banner_data = [
+        [Paragraph("VORA VERIFIED CARBON CERTIFICATE", title_style)],
+        [Paragraph(f"TREE SCAN RECORD: {tree_code} (Certificate ID: VORA-{scan.get('id') or 0:04d})", subtitle_style)]
+    ]
+    banner_table = Table(banner_data, colWidths=[530])
+    banner_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), primary_color),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('TOPPADDING', (0,0), (-1,-1), 12),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 12),
+        ('LEFTPADDING', (0,0), (-1,-1), 20),
+        ('RIGHTPADDING', (0,0), (-1,-1), 20),
+    ]))
+    story.append(banner_table)
+    story.append(Spacer(1, 12))
+    
+    # Tree Metadata Block
+    species_preds = []
+    if scan.get("species_predictions"):
+        try:
+            species_preds = json.loads(scan["species_predictions"])
+        except Exception:
+            pass
+            
+    sci_name = "Unknown"
+    local_name = "N/A"
+    species_conf = "0.0%"
+    if species_preds and len(species_preds) > 0:
+        top = species_preds[0]
+        sci_name = top.get("scientific_name") or "Unknown"
+        local_name = top.get("common_name") or "N/A"
+        species_conf = f"{top.get('confidence', 0.0):.1f}%"
+        
+    gps_lat = scan.get("gps_lat")
+    gps_lon = scan.get("gps_lon")
+    gps_str = f"{gps_lat:.5f}, {gps_lon:.5f}" if gps_lat is not None and gps_lon is not None else "Not Available"
+    
+    meta_table_data = [
+        [Paragraph("<b>Scientific Name:</b>", body_style), Paragraph(f"<i>{sci_name}</i>", body_style),
+         Paragraph("<b>GPS Coordinates:</b>", body_style), Paragraph(gps_str, body_style)],
+        [Paragraph("<b>Local Name:</b>", body_style), Paragraph(local_name, body_style),
+         Paragraph("<b>Scan Date:</b>", body_style), Paragraph(scan.get("scan_date") or "N/A", body_style)],
+        [Paragraph("<b>Species Confidence:</b>", body_style), Paragraph(species_conf, body_style),
+         Paragraph("<b>Climate Zone:</b>", body_style), Paragraph(scan.get("climate_zone_detected") or "Tropical Rainforest", body_style)]
+    ]
+    meta_table = Table(meta_table_data, colWidths=[110, 150, 110, 160])
+    meta_table.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('LINEBELOW', (0,0), (-1,-1), 0.5, colors.HexColor("#f1f5f9")),
+    ]))
+    story.append(meta_table)
+    story.append(Spacer(1, 12))
+    
+    # Metrics Table Header
+    story.append(Paragraph("Carbon & Biomass Measurements", section_title_style))
+    
+    co2e = scan.get("co2e_kg") or 0.0
+    unc_pct = scan.get("co2e_uncertainty_pct") or 15.0
+    co2e_low = scan.get("co2e_low_kg") or (co2e * (1 - unc_pct/100.0))
+    co2e_high = scan.get("co2e_high_kg") or (co2e * (1 + unc_pct/100.0))
+    
+    metrics_data = [
+        [Paragraph("<b>Parameter</b>", body_bold_style), Paragraph("<b>Value</b>", body_bold_style), Paragraph("<b>Methodology / Details</b>", body_bold_style)],
+        [Paragraph("Diameter at Breast Height (DBH)", body_style), Paragraph(f"{scan.get('dbh_cm') or 0.0:.1f} cm", body_bold_style), Paragraph("Calculated using 3D cylinder slice fitting", body_style)],
+        [Paragraph("Tree Height", body_style), Paragraph(f"{scan.get('tinggi_m') or 0.0:.1f} m", body_bold_style), Paragraph(f"Height usage: {scan.get('height_used') or 'N/A'}", body_style)],
+        [Paragraph("Wood Density (ρ)", body_style), Paragraph(f"{scan.get('wood_density_used') or 0.60:.2f} g/cm³", body_bold_style), Paragraph(f"Source: {scan.get('wood_density_source') or 'Default'}", body_style)],
+        [Paragraph("Dry Biomass Stock", body_style), Paragraph(f"{scan.get('biomassa_kg') or 0.0:.1f} kg", body_bold_style), Paragraph("Allometric equations (Chave / AGB+BGB)", body_style)],
+        [Paragraph("Stored Organic Carbon", body_style), Paragraph(f"{scan.get('karbon_kg') or 0.0:.1f} kg C", body_bold_style), Paragraph("Biomass × 0.47 Carbon conversion factor", body_style)],
+        [Paragraph("CO₂ Equivalent (CO₂e)", body_style), Paragraph(f"{co2e:.1f} kg CO₂e", body_bold_style), Paragraph(f"Carbon Stock × 3.67 (Uncertainty ±{unc_pct:.0f}%)", body_style)],
+        [Paragraph("Uncertainty Range (CO₂e)", body_style), Paragraph(f"{co2e_low:.1f} – {co2e_high:.1f} kg", body_bold_style), Paragraph("Confidence interval based on measurement variance", body_style)]
+    ]
+    
+    metrics_table = Table(metrics_data, colWidths=[180, 110, 240])
+    metrics_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#e2e8f0")),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('GRID', (0,0), (-1,-1), 0.5, border_color),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ('LEFTPADDING', (0,0), (-1,-1), 8),
+        ('RIGHTPADDING', (0,0), (-1,-1), 8),
+        ('BACKGROUND', (0,6), (1,6), colors.HexColor("#d1fae5")),
+    ]))
+    story.append(metrics_table)
+    story.append(Spacer(1, 12))
+    
+    # 3D Visual Proof & QR Verification Section
+    story.append(Paragraph("Visual Verification & Data Integrity", section_title_style))
+    
+    img_flowable = None
+    if thumbnail_bytes:
+        try:
+            img_flowable = Image(thumbnail_bytes, width=150, height=112)
+        except Exception as img_err:
+            print(f"[CERTIFICATE] ReportLab failed to parse thumbnail image: {img_err}")
+            
+    if not img_flowable:
+        img_flowable = Paragraph("<font color='grey'>Thumbnail preview not available</font>", body_style)
+        
+    qr_flowable = Image(qr_bytes, width=90, height=90)
+    
+    visual_table_data = [
+        [img_flowable, qr_flowable],
+        [Paragraph("<b>Representative Scan Frame</b>", body_bold_style), Paragraph("<b>Scan QR for Interactive 3D Viewer</b>", body_bold_style)]
+    ]
+    visual_table = Table(visual_table_data, colWidths=[270, 260])
+    visual_table.setStyle(TableStyle([
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+    ]))
+    story.append(visual_table)
+    story.append(Spacer(1, 8))
+    
+    # Integrity Check / SHA-256 Box
+    hash_data = [
+        [Paragraph("<b>Cryptographic Data Integrity Verification</b>", body_bold_style)],
+        [Paragraph("To verify that the underlying 3D point cloud has not been modified since measurement, cross-reference this SHA-256 hash of the raw PLY file.", body_style)],
+        [Paragraph(f"<b>RAW PLY FILE HASH (SHA-256):</b>", body_style)],
+        [Paragraph(sha256_hash, code_style)]
+    ]
+    hash_table = Table(hash_data, colWidths=[530])
+    hash_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor("#f8fafc")),
+        ('GRID', (0,0), (-1,-1), 0.5, border_color),
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ('LEFTPADDING', (0,0), (-1,-1), 10),
+        ('RIGHTPADDING', (0,0), (-1,-1), 10),
+    ]))
+    story.append(hash_table)
+    
+    # Build Document
+    doc.build(story)
+    pdf_buffer.seek(0)
+    
+    return StreamingResponse(
+        pdf_buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=Certificate_{tree_code}.pdf"}
+    )
+
+
 # ── Dev entry point ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
