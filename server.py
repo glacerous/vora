@@ -17,7 +17,7 @@ from typing import Any, List, Optional
 import cv2
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Query, UploadFile, Request
+from fastapi import BackgroundTasks, Body, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import boto3
@@ -1310,7 +1310,7 @@ async def _validate_session_token(token: str):
 
 async def get_optional_user(
     session_token: Optional[str] = Cookie(None),
-    authorization: Optional[str] = None
+    authorization: Optional[str] = Header(None)
 ):
     # 1. Check Bearer token from Authorization header (mobile clients)
     bearer_token = None
@@ -1325,7 +1325,7 @@ async def get_optional_user(
 
 async def get_current_user(
     session_token: Optional[str] = Cookie(None),
-    authorization: Optional[str] = None
+    authorization: Optional[str] = Header(None)
 ):
     user = await get_optional_user(session_token, authorization)
     if not user:
@@ -2553,11 +2553,24 @@ async def login_user(body: LoginRequest, response: Response):
 
 
 @app.post("/auth/logout", summary="Logout and invalidate session token")
-async def logout_user(response: Response, session_token: Optional[str] = Cookie(None)):
+async def logout_user(
+    response: Response,
+    session_token: Optional[str] = Cookie(None),
+    authorization: Optional[str] = Header(None),
+):
+    from storage.d1_client import execute_d1_query
+
+    # Web clients: invalidate the cookie-based session.
     if session_token:
-        from storage.d1_client import execute_d1_query
         execute_d1_query("DELETE FROM sessions WHERE token = ?", [session_token])
-    
+
+    # Mobile clients: invalidate the Bearer-token session too, otherwise
+    # "logout" only clears local state while the token stays valid server-side
+    # for its full 30-day expiry.
+    if authorization and authorization.startswith("Bearer "):
+        bearer_token = authorization[7:]
+        execute_d1_query("DELETE FROM sessions WHERE token = ?", [bearer_token])
+
     response.delete_cookie(
         key="session_token",
         path="/",
