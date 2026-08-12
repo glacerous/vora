@@ -300,7 +300,7 @@ def filter_points3d_ply(ply_path: str, center_x: float = None, center_z: float =
         print(f"[RECONSTRUCT-FILTER] Error filtering points3d.ply: {exc}")
 
 
-def decimate_ply_file(input_ply_path, output_ply_path, target_count=150000):
+def decimate_ply_file(input_ply_path, output_ply_path, target_count=300000):
     """
     Decimates a PLY file to the target count using random sampling,
     preserving binary little endian format and all attributes.
@@ -942,20 +942,18 @@ def _reconstruct_thread(
                         f.write(filtered_ply)
                     print(f"[RECONSTRUCT] Saved high-res filtered point cloud from Modal ({len(filtered_ply)/1024:.1f} KB)")
                     # Generate decimated point cloud for display
-                    decimate_ply_file(points3d_highres_path, points3d_path, target_count=150000)
+                    decimate_ply_file(points3d_highres_path, points3d_path, target_count=300000)
                 
                 if P1_3d and P2_3d:
                     print(f"[RECONSTRUCT] ICP Alignment successful: P1_3d={P1_3d}, P2_3d={P2_3d}")
                 else:
                     print(f"[RECONSTRUCT] Auto-filtering complete (no coordinates mapped)")
-            except Exception as align_err:
-                print(f"[RECONSTRUCT ERROR] Offloaded alignment/filtering failed: {align_err}")
                 # Fallback to local crop if it fails
                 try:
                     filter_points3d_ply(points3d_path)
                     import shutil
                     shutil.copy(points3d_path, points3d_highres_path)
-                    decimate_ply_file(points3d_highres_path, points3d_path, target_count=150000)
+                    decimate_ply_file(points3d_highres_path, points3d_path, target_count=300000)
                 except Exception as fb_err:
                     print(f"[RECONSTRUCT ERROR] Local fallback crop failed: {fb_err}")
         t_icp_end = time.time()
@@ -1813,7 +1811,7 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                     f.write(filtered_ply)
                 print(f"[RECALCULATE] Saved high-res filtered point cloud from Modal ({len(filtered_ply)/1024:.1f} KB)")
                 # Generate decimated point cloud for display
-                decimate_ply_file(local_ply_highres_path, local_ply_path, target_count=150000)
+                decimate_ply_file(local_ply_highres_path, local_ply_path, target_count=300000)
                 
                 # Upload both the decimated points3d.ply and high-res version to R2 to update them
                 try:
@@ -1850,7 +1848,7 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                 shutil.copy(local_ply_highres_path, local_ply_path)
                 filter_points3d_ply(local_ply_path)
                 shutil.copy(local_ply_path, local_ply_highres_path)
-                decimate_ply_file(local_ply_highres_path, local_ply_path, target_count=150000)
+                decimate_ply_file(local_ply_highres_path, local_ply_path, target_count=300000)
             except Exception as fb_err:
                 print(f"[RECALCULATE ERROR] Local fallback crop failed: {fb_err}")
 
