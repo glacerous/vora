@@ -63,6 +63,7 @@ class ReconstructRequest(BaseModel):
     p2: Optional[List[float]] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    iterations: Optional[int] = 7000
 
 class StatusResponse(BaseModel):
     stage: str
@@ -297,6 +298,7 @@ def filter_points3d_ply(ply_path: str, center_x: float = None, center_z: float =
 
     except Exception as exc:
         print(f"[RECONSTRUCT-FILTER] Error filtering points3d.ply: {exc}")
+
 
 
 def run_carbon_analysis(
@@ -590,184 +592,51 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
 
 # ── Background thread: frame extraction (sync, CPU+IO heavy) ─────────────────
 def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
-    cap = None
     try:
-        upd("extracting", "Opening video file…")
-        t_open_start = time.time()
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise ValueError("Cannot open video — try MP4 / MOV / AVI / WEBM / MKV format")
-        t_open_end = time.time()
-        print(f"[TIMING] Opened video file via OpenCV: {t_open_end - t_open_start:.4f}s")
+        upd("extracting", "Reading video file...")
+        t_read_start = time.time()
+        with open(video_path, "rb") as f:
+            video_bytes = f.read()
+        t_read_end = time.time()
+        print(f"[TIMING] Read video file into memory: {t_read_end - t_read_start:.4f}s for {len(video_bytes)/1024/1024:.2f} MB")
 
-        orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        duration     = total_frames / fps
-        # Dynamically calculate step based on target count to avoid scanning too many frames
-        # targeting about 2.0x candidates of target count across the video duration.
-        step = max(1, int(total_frames / (target * 2.0)))
-        
-        print(f"[EXTRACT] Start extraction from {video_path}")
-        print(f"[EXTRACT] Original Resolution: {orig_w}x{orig_h}, FPS: {fps:.2f}, Duration: {duration:.2f}s, Total Frames: {total_frames}, Step: {step}")
-        
-        upd("extracting", f"Scanning {total_frames} frames ({duration:.1f}s at {fps:.0f}fps)…")
+        upd("extracting", "Offloading frame extraction to Modal...")
+        t_modal_start = time.time()
+        import modal
+        fn = modal.Function.from_name("instantsplat-app", "extract_video_frames_modal")
+        res = fn.remote(video_bytes, target, blur_thresh)
+        t_modal_end = time.time()
+        print(f"[TIMING] Modal remote frame extraction call: {t_modal_end - t_modal_start:.4f}s")
 
-        def _blur(frame):
-            h, w = frame.shape[:2]
-            if w > 960:
-                f_resized = cv2.resize(frame, (960, int(h * 960 / w)), interpolation=cv2.INTER_NEAREST)
-            else:
-                f_resized = frame
-            gray = f_resized if (len(f_resized.shape) == 2 or f_resized.shape[2] == 1) else cv2.cvtColor(f_resized, cv2.COLOR_BGR2GRAY)
-            # Use CV_32F instead of CV_64F for 2-3x speedup on CPU
-            val = cv2.Laplacian(gray, cv2.CV_32F).var()
-            del gray
-            if f_resized is not frame:
-                del f_resized
-            return val
+        frames = res.get("frames", [])
+        overlap_warning = res.get("overlap_warning")
 
-        # Create a temporary directory for candidates to keep RAM usage at zero
-        temp_candidates_dir = os.path.join(os.path.dirname(video_path), "temp_candidates")
-        if os.path.exists(temp_candidates_dir):
+        n = len(frames)
+        if n == 0:
+            raise ValueError(f"No sharp frames found (blur_thresh={blur_thresh}). Try a slower, steadier recording.")
+
+        upd("extracting", f"Saving {n} frames from Modal to disk...")
+        t_save_start = time.time()
+        for f in glob.glob(os.path.join(FRAMES_DIR, "*")):
             try:
-                shutil.rmtree(temp_candidates_dir)
+                os.remove(f)
             except Exception:
                 pass
-        os.makedirs(temp_candidates_dir, exist_ok=True)
 
-        candidates, fi = [], 0
-        t_scan_start = time.time()
-        while True:
-            if state.get("cancel_requested", False):
-                break
-            
-            if fi % step != 0:
-                ok = cap.grab()
-                if not ok:
-                    break
-                fi += 1
-                continue
-                
-            ok, frame = cap.read()
-            if not ok:
-                break
-            
-            h, w = frame.shape[:2]
-            if w > 1920:
-                frame = cv2.resize(frame, (1920, int(h * 1920 / w)))
-
-            blur_score = _blur(frame)
-            if blur_score >= blur_thresh:
-                ok_enc, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                if ok_enc:
-                    temp_path = os.path.join(temp_candidates_dir, f"frame_{fi:04d}.jpg")
-                    with open(temp_path, "wb") as f_out:
-                        f_out.write(encoded_img.tobytes() if hasattr(encoded_img, "tobytes") else bytes(encoded_img))
-                    candidates.append((fi, blur_score, temp_path))
-            
-            del frame
-            if fi % 150 == 0:
-                import gc
-                gc.collect()
-            
-            # Send real-time progress update to frontend every 10 frames
-            if fi % 10 == 0 and total_frames > 0:
-                pct = int(fi * 100 / total_frames)
-                upd("extracting", f"Scanning frames: {fi}/{total_frames} ({pct}%)…")
-                
-            fi += 1
-            
-        t_scan_end = time.time()
-        print(f"[TIMING] Video scan loop completed in {t_scan_end - t_scan_start:.4f}s. Scanned {fi} frames, kept {len(candidates)} candidates.")
-
-    except Exception as exc:
-        print(f"[EXTRACT ERROR] During video read: {exc}")
-        upd("error", str(exc), error=str(exc))
-        return
-    finally:
-        if cap is not None:
-            cap.release()
-
-    # Handle cancellation cleanly outside the cv2.VideoCapture block
-    try:
-        if state.get("cancel_requested", False):
-            print("[EXTRACT] Cancel requested by user. Aborting...")
-            upd("idle", "Ready.")
-            state["cancel_requested"] = False
-            return
-
-        print(f"[EXTRACT] Found {len(candidates)} sharp candidate frames (blur_thresh={blur_thresh})")
-
-        if not candidates:
-            raise ValueError(
-                f"No sharp frames found (blur_thresh={blur_thresh}). "
-                "Try a slower, steadier recording."
-            )
-
-        n    = min(target, len(candidates))
-        idxs = np.linspace(0, len(candidates) - 1, n, dtype=int)
-        
-        # Overlap Check & Dynamic Resampling (Fase 3)
-        upd("extracting", f"Checking overlap & resampling frames...")
-        if state.get("cancel_requested", False):
-            print("[EXTRACT] Cancel requested by user. Aborting...")
-            upd("idle", "Ready.")
-            state["cancel_requested"] = False
-            return
-            
-        t_overlap_start = time.time()
-        resampled_idxs = _check_overlap_and_resample(candidates, idxs, threshold=0.15)
-        t_overlap_end = time.time()
-        print(f"[TIMING] Overlap check and dynamic resampling: {t_overlap_end - t_overlap_start:.4f}s")
-        n = len(resampled_idxs)
-        
-        upd("extracting", f"Selecting {n} frames (including dynamically resampled ones)…")
-
-        t_copy_start = time.time()
-        for f in glob.glob(os.path.join(FRAMES_DIR, "*")):
-            os.remove(f)
-
-        import shutil
-        for j, (_, _score, raw_frame) in enumerate([candidates[i] for i in resampled_idxs]):
-            if state.get("cancel_requested", False):
-                print("[EXTRACT] Cancel requested by user. Aborting...")
-                upd("idle", "Ready.")
-                state["cancel_requested"] = False
-                return
-            
+        for j, frame_bytes in enumerate(frames):
             img_path = os.path.join(FRAMES_DIR, f"{j:04d}.jpg")
-            if isinstance(raw_frame, str) and os.path.exists(raw_frame):
-                try:
-                    shutil.copy(raw_frame, img_path)
-                except Exception as copy_err:
-                    print(f"[EXTRACT ERROR] Failed to copy {raw_frame} to {img_path}: {copy_err}")
-                    # Fallback to write bytes if copy fails
-                    with open(raw_frame, "rb") as rf_fh:
-                        with open(img_path, "wb") as fh:
-                            fh.write(rf_fh.read())
-            else:
-                with open(img_path, "wb") as fh:
-                    fh.write(raw_frame.tobytes() if hasattr(raw_frame, "tobytes") else bytes(raw_frame))
-                
-            if j == 0 or j == n - 1 or j == n // 2:
-                print(f"[EXTRACT] Saved frame {j:04d}.jpg from source: {raw_frame if isinstance(raw_frame, str) else 'bytes'}")
+            with open(img_path, "wb") as f_out:
+                f_out.write(frame_bytes)
+
+        t_save_end = time.time()
+        print(f"[TIMING] Saved {n} frames to disk: {t_save_end - t_save_start:.4f}s")
 
         state["frame_count"] = n
-        t_copy_end = time.time()
-        print(f"[TIMING] Selected and saved {n} frames to disk: {t_copy_end - t_copy_start:.4f}s")
-        
-        # Free memory immediately by deleting candidates list and running garbage collection
-        try:
-            del candidates
-            import gc
-            gc.collect()
-        except Exception:
-            pass
-            
-        # Pose detection for calibration has been deprecated as MASt3R native metric scale is correct
+        state["overlap_warning"] = overlap_warning
         state["calibration_frame"] = None
+
+        if overlap_warning:
+            print(overlap_warning)
 
         upd("extracted", f"✓ {n} sharp frames ready")
         print(f"[EXTRACT] Completed. {n} frames written to {FRAMES_DIR}")
@@ -775,13 +644,6 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
     except Exception as exc:
         print(f"[EXTRACT ERROR] During frame processing: {exc}")
         upd("error", str(exc), error=str(exc))
-    finally:
-        try:
-            temp_candidates_dir = os.path.join(os.path.dirname(video_path), "temp_candidates")
-            if os.path.exists(temp_candidates_dir):
-                shutil.rmtree(temp_candidates_dir)
-        except Exception:
-            pass
 
 # ── Background thread: GPU reconstruction + R2/D1 persistence (sync, IO heavy) ─
 def _reconstruct_thread(
@@ -795,6 +657,7 @@ def _reconstruct_thread(
     height: int = None,
     plot_id: int = None,
     claimed_by_user_id: int = None,
+    iterations: int = 7000,
 ) -> None:
     import modal
     progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
@@ -837,7 +700,7 @@ def _reconstruct_thread(
 
         t_remote_start = time.time()
         try:
-            result = fn.remote(imgs, tree_code, remove_background, r2_config)
+            result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
         except Exception as remote_exc:
             # fn.remote() failed — this typically happens when the Render server
             # restarted while the Modal job was still running (connection reset).
@@ -975,63 +838,43 @@ def _reconstruct_thread(
         t_icp_start = time.time()
         P1_3d = None
         P2_3d = None
-        if p1 is not None and p2 is not None and points3d_all_path and os.path.exists(points3d_all_path):
+        
+        if points3d_path and os.path.exists(points3d_path):
             try:
-                pts3d = np.load(points3d_all_path)
-                N, H_crop, W_crop, _ = pts3d.shape
-                # Pick the representative frame by valid-pixel coverage
-                # (non-zero, non-NaN entries) — more robust than N//2 because N can
-                # vary between runs and the midpoint frame isn't always the most
-                # informative one. Falls back to 0 (first frame) if all are equal.
-                valid_counts = np.array([
-                    np.sum(~np.all(pts3d[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d[i]), axis=-1))
-                    for i in range(N)
-                ])
-                repr_idx = int(np.argmax(valid_counts))
-                print(f"[RECONSTRUCT] Representative frame: idx={repr_idx}/{N} "
-                      f"({valid_counts[repr_idx]:,} valid pixels vs N//2={N//2} w/ {valid_counts[N//2]:,})")
-                pointmap = pts3d[repr_idx]
-                
-                u1_crop, v1_crop = map_pixel_to_cropped(p1[0], p1[1], width, height, W_crop, H_crop)
-                u2_crop, v2_crop = map_pixel_to_cropped(p2[0], p2[1], width, height, W_crop, H_crop)
-                
-                P1_np = get_robust_3d_point(pointmap, u1_crop, v1_crop)
-                P2_np = get_robust_3d_point(pointmap, u2_crop, v2_crop)
-                
-                # Hybrid depth constraint: clamp depth only if deviation is > 1.5m (background hit)
-                z_diff = P2_np[2] - P1_np[2]
-                if abs(z_diff) > 1.5:
-                    print(f"[RECONSTRUCT] Z-depth deviation ({abs(z_diff):.3f}m) > 1.5m. Background hit detected. Clamping Z2 to Z1.")
-                    P2_np[2] = P1_np[2]
+                print(f"[RECONSTRUCT] Reading point cloud files for offloaded Modal alignment/filtering...")
+                with open(points3d_path, "rb") as f:
+                    ply_bytes = f.read()
                     
-                # Align camera space to world space using ICP (raw-to-raw)
-                if points3d_path and os.path.exists(points3d_path):
-                    from carbon.dbh_extractor import register_pointmap_to_world, parse_ply_points
-                    try:
-                        pts_world_raw = parse_ply_points(points3d_path)
-                        
-                        # Use full pointmap and full pts_world_raw for raw-to-raw stability
-                        R, t, s = register_pointmap_to_world(pointmap, pts_world_raw)
-                        P1_aligned = s * (P1_np @ R.T) + t
-                        P2_aligned = s * (P2_np @ R.T) + t
-                        P1_3d = P1_aligned.tolist()
-                        P2_3d = P2_aligned.tolist()
-                        print(f"[RECONSTRUCT] ICP Alignment successful: P1_3d={P1_3d}, P2_3d={P2_3d}, Scale={s:.6f}")
-                        
-                        # Now crop the point cloud file on disk locally around the clicked trunk center.
-                        # This clean PLY will be used for the local carbon estimation.
-                        filter_points3d_ply(points3d_path, center_x=P1_aligned[0], center_z=P1_aligned[2])
-                        print(f"[RECONSTRUCT] Cleaned local point cloud around clicked trunk center: {P1_aligned[0]:.3f}, {P1_aligned[2]:.3f}")
-                    except Exception as align_err:
-                        print(f"[RECONSTRUCT ERROR] ICP Alignment failed: {align_err}. Using camera-space fallback.")
-                        P1_3d = P1_np.tolist()
-                        P2_3d = P2_np.tolist()
-                        filter_points3d_ply(points3d_path) # fallback to auto peak crop
+                points3d_all_bytes = b""
+                if points3d_all_path and os.path.exists(points3d_all_path):
+                    with open(points3d_all_path, "rb") as f:
+                        points3d_all_bytes = f.read()
+                
+                print(f"[RECONSTRUCT] Offloading alignment and filtering to Modal...")
+                import modal
+                fn_align = modal.Function.from_name("instantsplat-app", "align_and_filter_ply_modal")
+                res = fn_align.remote(ply_bytes, points3d_all_bytes, p1, p2, width, height)
+                
+                P1_3d = res.get("P1")
+                P2_3d = res.get("P2")
+                filtered_ply = res.get("filtered_ply")
+                
+                if filtered_ply:
+                    with open(points3d_path, "wb") as f:
+                        f.write(filtered_ply)
+                    print(f"[RECONSTRUCT] Saved filtered point cloud from Modal ({len(filtered_ply)/1024:.1f} KB)")
+                
+                if P1_3d and P2_3d:
+                    print(f"[RECONSTRUCT] ICP Alignment successful: P1_3d={P1_3d}, P2_3d={P2_3d}")
                 else:
-                    P1_3d = P1_np.tolist()
-                    P2_3d = P2_np.tolist()
-            except Exception as map_err:
-                print(f"[RECONSTRUCT ERROR] Failed to map pixel coordinates to 3D: {map_err}")
+                    print(f"[RECONSTRUCT] Auto-filtering complete (no coordinates mapped)")
+            except Exception as align_err:
+                print(f"[RECONSTRUCT ERROR] Offloaded alignment/filtering failed: {align_err}")
+                # Fallback to local crop if it fails
+                try:
+                    filter_points3d_ply(points3d_path)
+                except Exception as fb_err:
+                    print(f"[RECONSTRUCT ERROR] Local fallback crop failed: {fb_err}")
         t_icp_end = time.time()
         print(f"[TIMING] Mapping pixel and ICP alignment / filter_points3d_ply: {t_icp_end - t_icp_start:.4f}s")
 
@@ -1153,6 +996,14 @@ def _reconstruct_thread(
                 if uploaded:
                     print(f"[RECONSTRUCT] Files were uploaded directly from Modal to R2.")
                     ts = custom_ts or int(time.time())
+                    # Overwrite raw points3d.ply in R2 with the filtered/aligned version
+                    if points3d_path and os.path.exists(points3d_path):
+                        try:
+                            from storage.r2_client import upload_splat
+                            upload_splat(points3d_path, tree_code, custom_timestamp=ts)
+                            print(f"[RECONSTRUCT] Overwrote R2 points3d.ply with clean filtered version")
+                        except Exception as upload_err:
+                            print(f"Failed to upload filtered points3d.ply to R2: {upload_err}")
                 else:
                     upd("reconstructing", "Uploading reconstruction files to Cloudflare R2...")
                     from storage.r2_client import upload_splat, upload_thumbnail
@@ -1470,6 +1321,7 @@ async def reconstruct(
     remove_bg_query: Optional[bool] = Query(default=None, alias="remove_background"),
     gps_lat_query: Optional[float] = Query(default=None, alias="gps_lat"),
     gps_lon_query: Optional[float] = Query(default=None, alias="gps_lon"),
+    iterations_query: Optional[int] = Query(default=None, alias="iterations"),
     optional_user: Optional[dict] = Depends(get_optional_user),
 ):
     """
@@ -1505,6 +1357,13 @@ async def reconstruct(
     width = body.width if body else None
     height = body.height if body else None
 
+    # Resolve iterations
+    iterations = 7000
+    if iterations_query is not None:
+        iterations = iterations_query
+    elif body and body.iterations is not None:
+        iterations = body.iterations
+
     # Resolve active plot session for auto-association has been deprecated and removed.
     plot_id = None
     claimed_by_user_id = optional_user["id"] if optional_user else None
@@ -1525,7 +1384,8 @@ async def reconstruct(
         width,
         height,
         plot_id,
-        claimed_by_user_id
+        claimed_by_user_id,
+        iterations
     )
     return {"started": True, "tree_code": final_code}
 
@@ -1615,67 +1475,6 @@ async def splat_proxy(tree_code: str, filename: str):
             raise HTTPException(status_code=404, detail="File not found in storage")
         raise HTTPException(status_code=500, detail=f"Failed to fetch from R2: {err_msg}")
 
-    # If it is points3d.ply, we intercept, filter on-the-fly, and return the clean version.
-    # The file in R2 remains raw (useful for future recalculations), while the viewer gets a clean cloud.
-    if filename.lower().endswith("points3d.ply"):
-        try:
-            content = await asyncio.to_thread(response["Body"].read)
-            import tempfile
-            import io
-            import json
-            from storage.d1_client import execute_d1_query
-            
-            # Fetch custom clicked center from D1 database if available
-            center_x = None
-            center_z = None
-            try:
-                sql = "SELECT geometry_3d FROM tree_scans WHERE tree_code = ? ORDER BY id DESC LIMIT 1"
-                scans = await asyncio.to_thread(execute_d1_query, sql, [tree_code])
-                if scans and scans[0].get("geometry_3d"):
-                    g3d = scans[0]["geometry_3d"]
-                    while isinstance(g3d, str) and g3d.strip():
-                        g3d = json.loads(g3d)
-                    if isinstance(g3d, dict):
-                        center_x = g3d.get("center_x")
-                        center_z = g3d.get("center_z")
-            except Exception as db_err:
-                print(f"[PROXY-FILTER ERROR] Failed to query geometry_3d for proxy: {db_err}")
-            
-            # Write raw content to a temp file
-            with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as tmp_f:
-                tmp_f.write(content)
-                tmp_path = tmp_f.name
-                
-            # Filter the PLY using the custom center (or auto peak fallback)
-            try:
-                await asyncio.to_thread(filter_points3d_ply, tmp_path, center_x, center_z)
-                
-                # Read filtered bytes
-                with open(tmp_path, "rb") as tmp_f:
-                    filtered_content = tmp_f.read()
-                    
-                # Clean up temp file
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-                    
-                headers = {
-                    "Cache-Control": "public, max-age=31536000, immutable",
-                    "Content-Length": str(len(filtered_content))
-                }
-                return StreamingResponse(io.BytesIO(filtered_content), media_type="application/x-ply", headers=headers)
-                
-            except Exception as filter_err:
-                print(f"[PROXY-FILTER ERROR] Failed to run filter: {filter_err}")
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-        except Exception as read_err:
-            print(f"[PROXY-FILTER ERROR] Failed to read/filter: {read_err}")
-
-    # Fallback/standard streaming response for other files (like result.ply)
     body = response["Body"]
 
     def iter_chunks():
@@ -1888,26 +1687,47 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             print(f"[RECALCULATE] Z-depth deviation ({abs(z_diff):.3f}m) > 1.5m. Background hit detected. Clamping Z2 to Z1.")
             P2_cam[2] = P1_cam[2]
 
-        # Align camera space to world space using ICP (raw-to-raw)
-        from carbon.dbh_extractor import register_pointmap_to_world, parse_ply_points
+        # Align camera space to world space using ICP (raw-to-raw) on Modal
         try:
-            pts_world_raw = parse_ply_points(local_ply_path)
+            print(f"[RECALCULATE] Reading point cloud files for offloaded Modal alignment/filtering...")
+            with open(local_ply_path, "rb") as f:
+                ply_bytes = f.read()
+            with open(local_npy_path, "rb") as f:
+                points3d_all_bytes = f.read()
+
+            print(f"[RECALCULATE] Offloading alignment and filtering to Modal...")
+            import modal
+            fn_align = modal.Function.from_name("instantsplat-app", "align_and_filter_ply_modal")
+            res = fn_align.remote(ply_bytes, points3d_all_bytes, body.p1, body.p2, body.width, body.height)
             
-            # Use full pointmap and full pts_world_raw for raw-to-raw stability
-            R, t, s = register_pointmap_to_world(pointmap, pts_world_raw)
-            P1 = (s * (P1_cam @ R.T) + t).tolist()
-            P2 = (s * (P2_cam @ R.T) + t).tolist()
-            print(f"[RECALCULATE] ICP Alignment successful. P1_world={P1}, P2_world={P2}, Scale={s:.6f}")
+            P1 = res.get("P1")
+            P2 = res.get("P2")
+            filtered_ply = res.get("filtered_ply")
             
-            # Now filter the local point cloud file on disk by cropping around the clicked trunk center.
-            # This clean PLY will be passed to extract_dbh_with_2d_clicks.
-            filter_points3d_ply(local_ply_path, center_x=P1[0], center_z=P1[2])
-            print(f"[RECALCULATE] Cleaned local point cloud around clicked trunk center: {P1[0]:.3f}, {P1[2]:.3f}")
+            if filtered_ply:
+                with open(local_ply_path, "wb") as f:
+                    f.write(filtered_ply)
+                print(f"[RECALCULATE] Saved filtered point cloud from Modal ({len(filtered_ply)/1024:.1f} KB)")
+                # Upload the newly filtered points3d.ply to R2 to update it
+                try:
+                    from storage.r2_client import upload_splat
+                    upload_splat(local_ply_path, tree_code, custom_timestamp=int(timestamp))
+                    print(f"[RECALCULATE] Uploaded recalculated points3d.ply to R2")
+                except Exception as upload_err:
+                    print(f"[RECALCULATE] Failed to upload updated points3d.ply to R2: {upload_err}")
+                
+            if P1 and P2:
+                print(f"[RECALCULATE] ICP Alignment successful. P1_world={P1}, P2_world={P2}")
+            else:
+                raise ValueError("Modal did not return aligned coordinates")
         except Exception as align_err:
-            print(f"[RECALCULATE ERROR] ICP Alignment failed: {align_err}. Using camera-space fallback.")
+            print(f"[RECALCULATE ERROR] Offloaded ICP Alignment failed: {align_err}. Using local camera-space fallback.")
             P1 = P1_cam.tolist()
             P2 = P2_cam.tolist()
-            filter_points3d_ply(local_ply_path) # fallback to auto peak crop
+            try:
+                filter_points3d_ply(local_ply_path)
+            except Exception as fb_err:
+                print(f"[RECALCULATE ERROR] Local fallback crop failed: {fb_err}")
 
         # 7. Perform DBH extraction with 2D clicks
         scale_factor, _is_cal2, _src2 = _load_scale_factor_for_scan(tree_code)
