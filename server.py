@@ -745,7 +745,7 @@ def _extract_thread(r2_key: str, target: int, blur_thresh: int, client_to_server
             "modal_transfer_in_s": modal_transfer_in,
             "modal_compute_s": modal_compute,
             "modal_transfer_out_s": modal_transfer_out,
-            "server_read_s": t_read_end - t_read_start,
+            "server_read_s": 0.0,
             "server_save_s": t_save_end - t_save_start
         }
 
