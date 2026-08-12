@@ -1485,7 +1485,7 @@
                     // Material with vertex colors (falls back to cyan if no color)
                     const hasColors = geometry.attributes.color !== undefined;
                     const material = new THREE.PointsMaterial({
-                        size: 0.006,
+                        size: 0.01,
                         vertexColors: hasColors,
                         color: hasColors ? undefined : 0x38bdf8,
                         transparent: true,
