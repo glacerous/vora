@@ -46,9 +46,8 @@ image = (
 
 def detect_person_pose(frame_path):
     import cv2
-    import mediapipe as mp
     try:
-        mp_pose = mp.solutions.pose
+        import mediapipe.solutions.pose as mp_pose
         with mp_pose.Pose(
             static_image_mode=True,
             model_complexity=2,
