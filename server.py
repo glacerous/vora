@@ -63,7 +63,7 @@ class ReconstructRequest(BaseModel):
     p2: Optional[List[float]] = None
     width: Optional[int] = None
     height: Optional[int] = None
-    iterations: Optional[int] = 7000
+    iterations: Optional[int] = 2000
 
 class StatusResponse(BaseModel):
     stage: str
@@ -734,7 +734,7 @@ def _reconstruct_thread(
     height: int = None,
     plot_id: int = None,
     claimed_by_user_id: int = None,
-    iterations: int = 7000,
+    iterations: int = 2000,
 ) -> None:
     import modal
     progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
@@ -1457,7 +1457,7 @@ async def reconstruct(
     height = body.height if body else None
 
     # Resolve iterations
-    iterations = 7000
+    iterations = 2000
     if iterations_query is not None:
         iterations = iterations_query
     elif body and body.iterations is not None:

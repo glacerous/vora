@@ -285,7 +285,7 @@ def upload_to_r2(file_path: str, tree_code: str, custom_timestamp: int = None, i
     timeout=1800,  # 30 minutes
     image=image
 )
-def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", remove_background: bool = False, r2_config: dict = None, iterations: int = 7000) -> dict:
+def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", remove_background: bool = False, r2_config: dict = None, iterations: int = 2000) -> dict:
     import os
     import time
     import shutil
