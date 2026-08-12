@@ -300,6 +300,83 @@ def filter_points3d_ply(ply_path: str, center_x: float = None, center_z: float =
         print(f"[RECONSTRUCT-FILTER] Error filtering points3d.ply: {exc}")
 
 
+def decimate_ply_file(input_ply_path, output_ply_path, target_count=150000):
+    """
+    Decimates a PLY file to the target count using random sampling,
+    preserving binary little endian format and all attributes.
+    """
+    import shutil
+    import random
+    if not input_ply_path or not os.path.exists(input_ply_path):
+        return False
+    try:
+        with open(input_ply_path, "rb") as f:
+            raw_props = []
+            num_vertices = 0
+            is_binary = False
+
+            while True:
+                line = f.readline().decode("ascii", errors="ignore").strip()
+                if line.startswith("format binary_little_endian"):
+                    is_binary = True
+                elif line.startswith("element vertex"):
+                    num_vertices = int(line.split()[-1])
+                elif line.startswith("property"):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        raw_props.append((parts[1], parts[2]))
+                elif line == "end_header":
+                    break
+
+            if num_vertices <= 0 or not is_binary:
+                print(f"[DECIMATE] Empty or non-binary PLY: {input_ply_path}")
+                return False
+
+            dtype_map = []
+            for p_type, p_name in raw_props:
+                if p_type in ("float", "float32"):
+                    dtype_map.append((p_name, "<f4"))
+                elif p_type in ("int", "int32", "uint"):
+                    dtype_map.append((p_name, "<i4"))
+                elif p_type in ("uchar", "uint8"):
+                    dtype_map.append((p_name, "u1"))
+                else:
+                    dtype_map.append((p_name, "<f4"))
+
+            vertex_data = np.fromfile(f, dtype=np.dtype(dtype_map), count=num_vertices)
+
+        if num_vertices <= target_count:
+            if input_ply_path != output_ply_path:
+                shutil.copy(input_ply_path, output_ply_path)
+            return True
+
+        indices = np.random.choice(num_vertices, size=target_count, replace=False)
+        decimated_data = vertex_data[indices]
+
+        header_lines = [
+            "ply",
+            "format binary_little_endian 1.0",
+            f"element vertex {target_count}",
+        ]
+        for p_type, p_name in raw_props:
+            header_lines.append(f"property {p_type} {p_name}")
+        header_lines.append("end_header")
+        header = "\n".join(header_lines) + "\n"
+
+        with open(output_ply_path, "wb") as f:
+            f.write(header.encode("ascii"))
+            decimated_data.tofile(f)
+        print(f"[DECIMATE] Decimated {input_ply_path} to {target_count} points: {num_vertices} -> {target_count}")
+        return True
+    except Exception as e:
+        print(f"[DECIMATE ERROR] Failed to decimate PLY {input_ply_path}: {e}")
+        if input_ply_path != output_ply_path:
+            try:
+                shutil.copy(input_ply_path, output_ply_path)
+            except:
+                pass
+        return False
+
 
 def run_carbon_analysis(
     ply_path: str,
@@ -763,10 +840,11 @@ def _reconstruct_thread(
 
         out = os.path.join(OUTPUT_DIR, "result.ply")
         points3d_path = os.path.join(OUTPUT_DIR, "points3d.ply")
+        points3d_highres_path = os.path.join(OUTPUT_DIR, "points3d_highres.ply")
         points3d_all_path = os.path.join(OUTPUT_DIR, "points3D_all.npy")
 
         # Clean old files to free up disk space
-        for p in (out, points3d_path, points3d_all_path):
+        for p in (out, points3d_path, points3d_highres_path, points3d_all_path):
             if os.path.exists(p):
                 try:
                     os.remove(p)
@@ -860,9 +938,11 @@ def _reconstruct_thread(
                 filtered_ply = res.get("filtered_ply")
                 
                 if filtered_ply:
-                    with open(points3d_path, "wb") as f:
+                    with open(points3d_highres_path, "wb") as f:
                         f.write(filtered_ply)
-                    print(f"[RECONSTRUCT] Saved filtered point cloud from Modal ({len(filtered_ply)/1024:.1f} KB)")
+                    print(f"[RECONSTRUCT] Saved high-res filtered point cloud from Modal ({len(filtered_ply)/1024:.1f} KB)")
+                    # Generate decimated point cloud for display
+                    decimate_ply_file(points3d_highres_path, points3d_path, target_count=150000)
                 
                 if P1_3d and P2_3d:
                     print(f"[RECONSTRUCT] ICP Alignment successful: P1_3d={P1_3d}, P2_3d={P2_3d}")
@@ -873,6 +953,9 @@ def _reconstruct_thread(
                 # Fallback to local crop if it fails
                 try:
                     filter_points3d_ply(points3d_path)
+                    import shutil
+                    shutil.copy(points3d_path, points3d_highres_path)
+                    decimate_ply_file(points3d_highres_path, points3d_path, target_count=150000)
                 except Exception as fb_err:
                     print(f"[RECONSTRUCT ERROR] Local fallback crop failed: {fb_err}")
         t_icp_end = time.time()
@@ -965,7 +1048,7 @@ def _reconstruct_thread(
         upd("reconstructing", "✓ Reconstruction done. Estimating DBH and Carbon...")
         carbon_est = run_carbon_analysis(
             out, 
-            points3d_path=points3d_path, 
+            points3d_path=points3d_highres_path, 
             scan_id=tree_code,
             wood_density=wood_density,
             forest_type=forest_type,
@@ -996,25 +1079,41 @@ def _reconstruct_thread(
                 if uploaded:
                     print(f"[RECONSTRUCT] Files were uploaded directly from Modal to R2.")
                     ts = custom_ts or int(time.time())
-                    # Overwrite raw points3d.ply in R2 with the filtered/aligned version
+                    # Upload high-res version to R2
+                    if points3d_highres_path and os.path.exists(points3d_highres_path):
+                        try:
+                            from storage.r2_client import upload_splat
+                            upload_splat(points3d_highres_path, tree_code, custom_timestamp=ts)
+                            print(f"[RECONSTRUCT] Uploaded high-res points3d_highres.ply to R2")
+                        except Exception as upload_err:
+                            print(f"Failed to upload points3d_highres.ply to R2: {upload_err}")
+                    # Overwrite raw points3d.ply in R2 with the decimated version
                     if points3d_path and os.path.exists(points3d_path):
                         try:
                             from storage.r2_client import upload_splat
                             upload_splat(points3d_path, tree_code, custom_timestamp=ts)
-                            print(f"[RECONSTRUCT] Overwrote R2 points3d.ply with clean filtered version")
+                            print(f"[RECONSTRUCT] Overwrote R2 points3d.ply with decimated version")
                         except Exception as upload_err:
-                            print(f"Failed to upload filtered points3d.ply to R2: {upload_err}")
+                            print(f"Failed to upload points3d.ply to R2: {upload_err}")
                 else:
                     upd("reconstructing", "Uploading reconstruction files to Cloudflare R2...")
                     from storage.r2_client import upload_splat, upload_thumbnail
                     ts = int(time.time())
                     splat_url = upload_splat(out, tree_code, custom_timestamp=ts)
                     
-                    # If MASt3R points3d.ply was computed, upload it too
+                    # Upload high-res version
+                    if points3d_highres_path and os.path.exists(points3d_highres_path):
+                        try:
+                            upload_splat(points3d_highres_path, tree_code, custom_timestamp=ts)
+                            print(f"[RECONSTRUCT] Uploaded high-res points3d_highres.ply to R2")
+                        except Exception as upload_err:
+                            print(f"Failed to upload points3d_highres.ply to R2: {upload_err}")
+                            
+                    # Upload decimated points3d.ply
                     if points3d_path and os.path.exists(points3d_path):
                         try:
                             upload_splat(points3d_path, tree_code, custom_timestamp=ts)
-                            print(f"[RECONSTRUCT] Uploaded MASt3R points3d.ply with timestamp {ts}")
+                            print(f"[RECONSTRUCT] Uploaded decimated points3d.ply to R2")
                         except Exception as upload_err:
                             print(f"Failed to upload points3d.ply to R2: {upload_err}")
 
@@ -1619,6 +1718,7 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
         os.makedirs(local_dir, exist_ok=True)
         local_npy_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3D_all.npy")
         local_ply_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d.ply")
+        local_ply_highres_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d_highres.ply")
 
         # 4. Download dense pointmap (NPY) from R2 if not already cached locally
         if os.path.exists(local_npy_path) and os.path.getsize(local_npy_path) > 100000:
@@ -1642,25 +1742,34 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                     detail=f"Failed to download dense pointmap: {npy_err}"
                 )
 
-        # 5. Download the existing points3d.ply from R2 if not already cached locally
-        if os.path.exists(local_ply_path) and os.path.getsize(local_ply_path) > 1000:
-            print(f"[RECALCULATE] Found locally cached points3d.ply: {local_ply_path} — skipping download/filter.")
+        # 5. Download the existing points3d_highres.ply from R2 if not already cached locally
+        if os.path.exists(local_ply_highres_path) and os.path.getsize(local_ply_highres_path) > 1000:
+            print(f"[RECALCULATE] Found locally cached points3d_highres.ply: {local_ply_highres_path} — skipping download.")
         else:
-            print(f"[RECALCULATE] Downloading existing points3d.ply from {points3d_url}")
+            points3d_highres_url = points3d_url.replace("points3d.ply", "points3d_highres.ply")
+            print(f"[RECALCULATE] Downloading existing points3d_highres.ply from {points3d_highres_url}")
             try:
-                res_ply = requests.get(points3d_url, timeout=30)
-                if res_ply.status_code != 200:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Failed to download points3d.ply: HTTP {res_ply.status_code}"
-                    )
-                with open(local_ply_path, "wb") as f:
-                    f.write(res_ply.content)
-                print(f"[RECALCULATE] Successfully downloaded existing points3d.ply from R2")
+                res_ply = requests.get(points3d_highres_url, timeout=30)
+                if res_ply.status_code == 200:
+                    with open(local_ply_highres_path, "wb") as f:
+                        f.write(res_ply.content)
+                    print(f"[RECALCULATE] Successfully downloaded existing points3d_highres.ply from R2")
+                else:
+                    # Fallback to standard points3d.ply
+                    print(f"[RECALCULATE] points3d_highres.ply not found. Falling back to downloading standard points3d.ply from {points3d_url}")
+                    res_ply_std = requests.get(points3d_url, timeout=30)
+                    if res_ply_std.status_code != 200:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Failed to download points3d.ply: HTTP {res_ply_std.status_code}"
+                        )
+                    with open(local_ply_highres_path, "wb") as f:
+                        f.write(res_ply_std.content)
+                    print(f"[RECALCULATE] Successfully downloaded standard points3d.ply from R2 as fallback")
             except Exception as ply_err:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Failed to download points3d.ply: {ply_err}"
+                    detail=f"Failed to download points3d: {ply_err}"
                 )
 
         # 6. Load pointmap and perform coordinate mapping
@@ -1690,7 +1799,7 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
         # Align camera space to world space using ICP (raw-to-raw) on Modal
         try:
             print(f"[RECALCULATE] Reading point cloud files for offloaded Modal alignment/filtering...")
-            with open(local_ply_path, "rb") as f:
+            with open(local_ply_highres_path, "rb") as f:
                 ply_bytes = f.read()
             with open(local_npy_path, "rb") as f:
                 points3d_all_bytes = f.read()
@@ -1705,16 +1814,20 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             filtered_ply = res.get("filtered_ply")
             
             if filtered_ply:
-                with open(local_ply_path, "wb") as f:
+                with open(local_ply_highres_path, "wb") as f:
                     f.write(filtered_ply)
-                print(f"[RECALCULATE] Saved filtered point cloud from Modal ({len(filtered_ply)/1024:.1f} KB)")
-                # Upload the newly filtered points3d.ply to R2 to update it
+                print(f"[RECALCULATE] Saved high-res filtered point cloud from Modal ({len(filtered_ply)/1024:.1f} KB)")
+                # Generate decimated point cloud for display
+                decimate_ply_file(local_ply_highres_path, local_ply_path, target_count=150000)
+                
+                # Upload both the decimated points3d.ply and high-res version to R2 to update them
                 try:
                     from storage.r2_client import upload_splat
                     upload_splat(local_ply_path, tree_code, custom_timestamp=int(timestamp))
-                    print(f"[RECALCULATE] Uploaded recalculated points3d.ply to R2")
+                    upload_splat(local_ply_highres_path, tree_code, custom_timestamp=int(timestamp))
+                    print(f"[RECALCULATE] Uploaded updated points3d.ply and points3d_highres.ply to R2")
                 except Exception as upload_err:
-                    print(f"[RECALCULATE] Failed to upload updated points3d.ply to R2: {upload_err}")
+                    print(f"[RECALCULATE] Failed to upload recalculated PLYs to R2: {upload_err}")
                 
             if P1 and P2:
                 print(f"[RECALCULATE] ICP Alignment successful. P1_world={P1}, P2_world={P2}")
@@ -1725,14 +1838,18 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             P1 = P1_cam.tolist()
             P2 = P2_cam.tolist()
             try:
+                import shutil
+                shutil.copy(local_ply_highres_path, local_ply_path)
                 filter_points3d_ply(local_ply_path)
+                shutil.copy(local_ply_path, local_ply_highres_path)
+                decimate_ply_file(local_ply_highres_path, local_ply_path, target_count=150000)
             except Exception as fb_err:
                 print(f"[RECALCULATE ERROR] Local fallback crop failed: {fb_err}")
 
         # 7. Perform DBH extraction with 2D clicks
         scale_factor, _is_cal2, _src2 = _load_scale_factor_for_scan(tree_code)
         res_override = extract_dbh_with_2d_clicks(
-            ply_path=local_ply_path,
+            ply_path=local_ply_highres_path,
             P1=np.array(P1),
             P2=np.array(P2),
             scale=scale_factor
