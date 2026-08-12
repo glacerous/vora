@@ -1817,10 +1817,23 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                 
                 # Upload both the decimated points3d.ply and high-res version to R2 to update them
                 try:
+                    import shutil
+                    temp_upload_dir = os.path.join(local_dir, f"temp_upload_{timestamp}_{tree_code}")
+                    os.makedirs(temp_upload_dir, exist_ok=True)
+                    
+                    target_ply = os.path.join(temp_upload_dir, "points3d.ply")
+                    target_ply_highres = os.path.join(temp_upload_dir, "points3d_highres.ply")
+                    
+                    shutil.copy2(local_ply_path, target_ply)
+                    shutil.copy2(local_ply_highres_path, target_ply_highres)
+                    
                     from storage.r2_client import upload_splat
-                    upload_splat(local_ply_path, tree_code, custom_timestamp=int(timestamp))
-                    upload_splat(local_ply_highres_path, tree_code, custom_timestamp=int(timestamp))
+                    upload_splat(target_ply, tree_code, custom_timestamp=int(timestamp))
+                    upload_splat(target_ply_highres, tree_code, custom_timestamp=int(timestamp))
                     print(f"[RECALCULATE] Uploaded updated points3d.ply and points3d_highres.ply to R2")
+                    
+                    # Clean up temp upload files
+                    shutil.rmtree(temp_upload_dir, ignore_errors=True)
                 except Exception as upload_err:
                     print(f"[RECALCULATE] Failed to upload recalculated PLYs to R2: {upload_err}")
                 
