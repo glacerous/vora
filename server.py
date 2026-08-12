@@ -1697,21 +1697,16 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             raise HTTPException(status_code=400, detail="Target scan does not have a splat file URL")
 
         # 2. Derive pointmap (.npy) and points3d (.ply) URLs from splat_file_url
-        if "_result.ply" in splat_file_url:
-            base_filename = splat_file_url.rsplit("/", 1)[-1]
-            timestamp = base_filename.split("_")[0]
-            pointmap_url = splat_file_url.replace("_result.ply", "_points3D_all.npy")
-            points3d_url = splat_file_url.replace("_result.ply", "_points3d.ply")
-        elif "result.ply" in splat_file_url:
-            base_filename = splat_file_url.rsplit("/", 1)[-1]
-            timestamp = base_filename.split("_")[0] if "_" in base_filename else "default"
-            pointmap_url = splat_file_url.replace("result.ply", "points3D_all.npy")
-            points3d_url = splat_file_url.replace("result.ply", "points3d.ply")
+        # 2. Derive pointmap (.npy) and points3d (.ply) URLs from splat_file_url robustly
+        base_url, filename = splat_file_url.rsplit("/", 1)
+        name_parts = filename.split("_", 1)
+        if len(name_parts) == 2:
+            timestamp = name_parts[0]
         else:
-            base_filename = splat_file_url.rsplit("/", 1)[-1]
-            timestamp = base_filename.split(".")[0]
-            pointmap_url = splat_file_url.replace(".ply", "_points3D_all.npy")
-            points3d_url = splat_file_url.replace(".ply", "_points3d.ply")
+            timestamp = filename.split(".")[0]
+        
+        pointmap_url = f"{base_url}/{timestamp}_points3D_all.npy"
+        points3d_url = f"{base_url}/{timestamp}_points3d.ply"
 
         # 3. Create temp local directories
         local_dir = os.path.join(UPLOAD_DIR, "recalculates")
@@ -2066,18 +2061,14 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
         splat_file_url = target_scan.get("splat_file_url")
         local_ply_path = ""
         if splat_file_url:
-            if "_result.ply" in splat_file_url:
-                base_filename = splat_file_url.rsplit("/", 1)[-1]
-                timestamp = base_filename.split("_")[0]
-                points3d_url = splat_file_url.replace("_result.ply", "_points3d.ply")
-            elif "result.ply" in splat_file_url:
-                base_filename = splat_file_url.rsplit("/", 1)[-1]
-                timestamp = base_filename.split("_")[0] if "_" in base_filename else "default"
-                points3d_url = splat_file_url.replace("result.ply", "points3d.ply")
+            base_url, filename = splat_file_url.rsplit("/", 1)
+            name_parts = filename.split("_", 1)
+            if len(name_parts) == 2:
+                timestamp = name_parts[0]
             else:
-                base_filename = splat_file_url.rsplit("/", 1)[-1]
-                timestamp = base_filename.split(".")[0]
-                points3d_url = splat_file_url.replace(".ply", "_points3d.ply")
+                timestamp = filename.split(".")[0]
+            
+            points3d_url = f"{base_url}/{timestamp}_points3d.ply"
 
             local_dir = os.path.join(UPLOAD_DIR, "recalculates")
             os.makedirs(local_dir, exist_ok=True)
