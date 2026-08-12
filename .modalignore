@@ -1,0 +1,16 @@
+uploads/
+output/
+test_images/
+.git/
+.agents/
+.gemini/
+__pycache__/
+*.ply
+*.npy
+*.mp4
+*.avi
+*.mov
+*.webm
+*.mkv
+*.zip
+*.tar.gz
