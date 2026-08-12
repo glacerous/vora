@@ -1068,21 +1068,29 @@ def extract_video_frames_modal(
     if native_h > 1080:
         downscaled_path = os.path.join(temp_dir, "input_1080p.mp4")
         t_ff_start = time.time()
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", video_path,
-                "-vf", "scale=-2:1080",          # scale height to 1080, maintain AR
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-crf", "18",                    # near-lossless quality
-                "-an",                           # drop audio (not needed)
-                downscaled_path,
-            ],
-            check=True, capture_output=True, timeout=120
-        )
-        t_ff_end = time.time()
-        print(f"[TIMING] ffmpeg downscale {native_h}p -> 1080p: {t_ff_end - t_ff_start:.4f}s")
-        video_path = downscaled_path
+        try:
+            res = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-vf", "scale=-2:1080",          # scale height to 1080, maintain AR
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-crf", "18",                    # near-lossless quality
+                    "-an",                           # drop audio (not needed)
+                    downscaled_path,
+                ],
+                capture_output=True, text=True, timeout=120
+            )
+            if res.returncode == 0:
+                t_ff_end = time.time()
+                print(f"[TIMING] ffmpeg downscale {native_h}p -> 1080p: {t_ff_end - t_ff_start:.4f}s")
+                video_path = downscaled_path
+            else:
+                print(f"[WARNING] ffmpeg downscale failed with exit code {res.returncode}. Falling back to original video.")
+                print(f"ffmpeg stdout: {res.stdout}")
+                print(f"ffmpeg stderr: {res.stderr}")
+        except Exception as e:
+            print(f"[WARNING] ffmpeg downscale raised exception: {e}. Falling back to original video.")
     else:
         print(f"[TIMING] ffmpeg downscale skipped (native height={native_h}p <= 1080p)")
     try:
