@@ -1104,36 +1104,28 @@ def extract_video_frames_modal(
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         step = max(1, int(total_frames / (target * 2.0)))
 
-        # 1. Grab all step frames and decode/compute blur in parallel
-        frame_indices = []
+        # 1. Read frames sequentially in a single pass to avoid opening the video file multiple times
+        frames_to_process = []
         fi = 0
         while True:
-            if fi % step != 0:
-                ok = cap.grab()
-                if not ok:
-                    break
-                fi += 1
-                continue
-
             ok = cap.grab()
             if not ok:
                 break
-            frame_indices.append(fi)
+            if fi % step == 0:
+                ok_ret, frame = cap.retrieve()
+                if ok_ret and frame is not None:
+                    # Resize immediately to max 1920 width to save memory
+                    h, w = frame.shape[:2]
+                    if w > 1920:
+                        frame = cv2.resize(frame, (1920, int(h * 1920 / w)))
+                    frames_to_process.append((fi, frame))
             fi += 1
         
         cap.release()
 
-        def process_single_frame(frame_idx):
-            cap_local = cv2.VideoCapture(video_path)
-            cap_local.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ok, frame = cap_local.read()
-            cap_local.release()
-            if not ok:
-                return None
-            
+        def process_decoded_frame(args):
+            frame_idx, frame = args
             h, w = frame.shape[:2]
-            if w > 1920:
-                frame = cv2.resize(frame, (1920, int(h * 1920 / w)))
             
             # Compute blur score
             if w > 960:
@@ -1152,7 +1144,7 @@ def extract_video_frames_modal(
         # Execute in parallel to speed up Laplacian scoring significantly
         candidates = []
         with ThreadPoolExecutor(max_workers=4) as executor:
-            results = executor.map(process_single_frame, frame_indices)
+            results = executor.map(process_decoded_frame, frames_to_process)
             for res in results:
                 if res is not None:
                     candidates.append(res)
