@@ -669,20 +669,22 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
 
 
 # ── Background thread: frame extraction (sync, CPU+IO heavy) ─────────────────
-def _extract_thread(video_path: str, target: int, blur_thresh: int, client_to_server_s: float = None) -> None:
+def _extract_thread(r2_key: str, target: int, blur_thresh: int, client_to_server_s: float = None) -> None:
     try:
-        upd("extracting", "Reading video file...")
-        t_read_start = time.time()
-        with open(video_path, "rb") as f:
-            video_bytes = f.read()
-        t_read_end = time.time()
-        print(f"[TIMING] Read video file into memory: {t_read_end - t_read_start:.4f}s for {len(video_bytes)/1024/1024:.2f} MB")
-
-        upd("extracting", "Offloading frame extraction to Modal...")
+        upd("extracting", "Offloading frame extraction to Modal (pulling from R2)...")
         t_modal_start = time.time()
+
+        # Build R2 config dict to pass to Modal so it can download the video
+        r2_config = {
+            "CLOUDFLARE_ACCOUNT_ID": os.environ.get("CLOUDFLARE_ACCOUNT_ID"),
+            "R2_ACCESS_KEY_ID": os.environ.get("R2_ACCESS_KEY_ID"),
+            "R2_SECRET_ACCESS_KEY": os.environ.get("R2_SECRET_ACCESS_KEY"),
+            "R2_BUCKET_NAME": os.environ.get("R2_BUCKET_NAME"),
+        }
+
         import modal
         fn = modal.Function.from_name("instantsplat-app", "extract_video_frames_modal")
-        res = fn.remote(video_bytes, target, blur_thresh, t_modal_start)
+        res = fn.remote(None, target, blur_thresh, t_modal_start, r2_key=r2_key, r2_config=r2_config)
         t_modal_end = time.time()
 
         t_modal_enter = res.get("t_modal_enter")
@@ -1405,56 +1407,88 @@ async def status():
         "has_result": os.path.exists(os.path.join(OUTPUT_DIR, "result.ply")),
     }
 
-@app.post("/upload_video", summary="Upload a video and start frame extraction")
+@app.get("/video_upload_url", summary="Get a presigned R2 PUT URL for direct browser-to-R2 video upload")
+async def video_upload_url(
+    request: Request,
+    filename: str = Query(..., description="Original video filename (used to infer extension)"),
+    content_type: str = Query(default="video/mp4", description="MIME type of the video"),
+):
+    """
+    Returns a short-lived presigned PUT URL so the browser can upload the video
+    directly to Cloudflare R2 without routing bytes through the Render backend.
+    Also returns the R2 key the browser should pass to POST /upload_video after upload.
+    """
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    access_key = os.environ.get("R2_ACCESS_KEY_ID")
+    secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
+    bucket_name = os.environ.get("R2_BUCKET_NAME")
+    if not all([account_id, access_key, secret_key, bucket_name]):
+        raise HTTPException(status_code=500, detail="R2 credentials not configured on server.")
+
+    allowed_extensions = {".mp4", ".mov", ".avi", ".webm", ".mkv"}
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in allowed_extensions:
+        raise HTTPException(status_code=400, detail=f"Unsupported video format: {ext}")
+
+    ts = int(time.time())
+    r2_key = f"video_uploads/{ts}_{os.path.basename(filename)}"
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=Config(signature_version="s3v4"),
+        region_name="auto",
+    )
+    presigned_url = s3.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": bucket_name, "Key": r2_key, "ContentType": content_type},
+        ExpiresIn=300,  # 5 minutes
+    )
+    print(f"[UPLOAD-URL] Generated presigned PUT URL for key: {r2_key}")
+    return {"url": presigned_url, "key": r2_key}
+
+
+class UploadVideoRequest(BaseModel):
+    r2_key: str
+    frames: int = 25
+    blur_thresh: int = 80
+
+
+@app.post("/upload_video", summary="Trigger frame extraction from an already-uploaded R2 video")
 async def upload_video(
     request: Request,
     background_tasks: BackgroundTasks,
-    video: UploadFile = File(..., description="Video file (MP4/MOV/AVI/WEBM/MKV, up to 4 GB)"),
-    frames: int = Form(default=25, description="Target number of frames to extract"),
-    blur_thresh: int = Form(default=80, description="Minimum Laplacian blur score to keep a frame"),
+    body: UploadVideoRequest,
 ):
     """
-    Accepts a video upload, saves it to disk, then starts smart frame extraction
-    asynchronously. Poll `/status` for progress.
+    Accepts a JSON body with the R2 key of a video that the browser already PUT
+    directly to R2 via a presigned URL. Queues frame extraction on Modal.
+    No video bytes are transferred through this endpoint.
+    Poll `/status` for progress.
     """
-    allowed_extensions = {".mp4", ".mov", ".avi", ".webm", ".mkv"}
-    ext = os.path.splitext(video.filename or "")[1].lower()
-    if ext not in allowed_extensions:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported video format. Allowed formats: {', '.join(allowed_extensions)}"
-        )
-    path = os.path.join(UPLOAD_DIR, f"input{ext}")
+    r2_key = body.r2_key
+    frames = body.frames
+    blur_thresh = body.blur_thresh
 
-    t_start = time.time()
-    
-    # Calculate client-to-server transfer time
+    # Record when this request arrived for timing purposes
+    t_arrival = time.time()
     upload_start = request.headers.get("X-Upload-Start-Time")
     client_to_server_s = None
     if upload_start:
         try:
-            client_to_server_s = (t_start * 1000.0 - float(upload_start)) / 1000.0
-            print(f"[TIMING] Client-to-server video upload transfer: {client_to_server_s:.4f}s")
+            client_to_server_s = (t_arrival * 1000.0 - float(upload_start)) / 1000.0
+            print(f"[TIMING] Client R2 upload + notify latency: {client_to_server_s:.4f}s")
         except Exception as e:
             print(f"[TIMING] Failed to parse client start time: {e}")
 
-    total_bytes = 0
-    # Stream to disk in 1 MB chunks — safe for very large (4 GB) files
-    with open(path, "wb") as out:
-        while True:
-            chunk = await video.read(1024 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
-            total_bytes += len(chunk)
-    t_end = time.time()
-    print(f"[TIMING] Video upload write to disk: {t_end - t_start:.4f}s for {total_bytes / (1024 * 1024):.2f} MB")
-
+    print(f"[UPLOAD-VIDEO] Received r2_key={r2_key}, frames={frames}, blur_thresh={blur_thresh}")
     state["error"] = None
     state["cancel_requested"] = False
-    upd("extracting", "Video received, starting smart extraction…")
+    upd("extracting", "Video received on R2, starting smart extraction...")
     # BackgroundTasks dispatches sync callables to thread pool automatically
-    background_tasks.add_task(_extract_thread, path, frames, blur_thresh, client_to_server_s)
+    background_tasks.add_task(_extract_thread, r2_key, frames, blur_thresh, client_to_server_s)
     return {"queued": True}
 
 

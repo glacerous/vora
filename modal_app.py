@@ -1,5 +1,8 @@
 import os
+import time
 import modal
+
+global_import_time = time.time()
 
 app = modal.App("instantsplat-app")
 progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
@@ -11,7 +14,7 @@ GPU_CONFIG = "a10g"
 image = (
     modal.Image.from_registry("dockerzhiwen/instantsplat_public:2.0")
     .run_commands(
-        "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git libgl1-mesa-glx libglib2.0-0",
+        "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git libgl1-mesa-glx libglib2.0-0 ffmpeg",
         "git clone --recursive https://github.com/NVlabs/InstantSplat.git /workspace/InstantSplat",
         "/opt/conda/bin/pip install 'numpy==1.26.0' open3d plyfile icecream pyquaternion configargparse rembg mediapipe opencv-python-headless boto3",
         "TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;8.9' /opt/conda/bin/pip install --no-build-isolation --no-deps /workspace/InstantSplat/submodules/simple-knn",
@@ -996,19 +999,92 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
     timeout=300,
     cpu=2.0
 )
-def extract_video_frames_modal(video_bytes: bytes, target: int, blur_thresh: int) -> dict:
+def extract_video_frames_modal(
+    video_bytes: bytes,
+    target: int,
+    blur_thresh: int,
+    t_server_before_call: float = None,
+    r2_key: str = None,
+    r2_config: dict = None,
+) -> dict:
+    """Extract sharp, well-overlapping frames from a video.
+
+    Two modes:
+    - Legacy (video_bytes not None): receives raw bytes serialised through Modal call.
+    - New (r2_key + r2_config): downloads directly from R2, skips the serialisation overhead.
+
+    After downloading, 4K (>1080p height) footage is pre-downscaled to 1080p via ffmpeg
+    before the CV2 frame-scoring loop, cutting compute time ~3-4x.
+    """
+    import time
+    t_modal_enter = time.time()
     import os
     import cv2
     import numpy as np
     import shutil
     import tempfile
+    import subprocess
     from concurrent.futures import ThreadPoolExecutor
 
     temp_dir = tempfile.mkdtemp()
     video_path = os.path.join(temp_dir, "input_video.mp4")
-    with open(video_path, "wb") as f:
-        f.write(video_bytes)
 
+    # --- Step 1: Obtain video from R2 or legacy bytes ---
+    if r2_key and r2_config:
+        import boto3
+        from botocore.config import Config as BotoConfig
+        t_dl_start = time.time()
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=f"https://{r2_config['CLOUDFLARE_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+            aws_access_key_id=r2_config["R2_ACCESS_KEY_ID"],
+            aws_secret_access_key=r2_config["R2_SECRET_ACCESS_KEY"],
+            config=BotoConfig(signature_version="s3v4"),
+            region_name="auto",
+        )
+        s3.download_file(r2_config["R2_BUCKET_NAME"], r2_key, video_path)
+        t_dl_end = time.time()
+        file_mb = os.path.getsize(video_path) / 1024 / 1024
+        print(f"[TIMING] R2 download to Modal: {t_dl_end - t_dl_start:.4f}s for {file_mb:.2f} MB")
+    else:
+        # Legacy: bytes passed directly through Modal serialisation
+        with open(video_path, "wb") as f:
+            f.write(video_bytes)
+
+    # --- Step 2: Pre-downscale 4K -> 1080p with ffmpeg (Fix 2) ---
+    # This reduces CV2 decode cost ~4x for 3840x2160 inputs at the cost of ~5s ffmpeg step.
+    # 1080p is more than sufficient for MASt3R (internally works at 512px).
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=height", "-of", "default=noprint_wrappers=1:nokey=1",
+             video_path],
+            capture_output=True, text=True, timeout=30
+        )
+        native_h = int(probe.stdout.strip()) if probe.stdout.strip().isdigit() else 0
+    except Exception:
+        native_h = 0
+
+    if native_h > 1080:
+        downscaled_path = os.path.join(temp_dir, "input_1080p.mp4")
+        t_ff_start = time.time()
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vf", "scale=-2:1080",          # scale height to 1080, maintain AR
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "18",                    # near-lossless quality
+                "-an",                           # drop audio (not needed)
+                downscaled_path,
+            ],
+            check=True, capture_output=True, timeout=120
+        )
+        t_ff_end = time.time()
+        print(f"[TIMING] ffmpeg downscale {native_h}p -> 1080p: {t_ff_end - t_ff_start:.4f}s")
+        video_path = downscaled_path
+    else:
+        print(f"[TIMING] ffmpeg downscale skipped (native height={native_h}p <= 1080p)")
     try:
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -1142,10 +1218,20 @@ def extract_video_frames_modal(video_bytes: bytes, target: int, blur_thresh: int
 
         return {
             "frames": final_frames_bytes,
-            "overlap_warning": overlap_warning
+            "overlap_warning": overlap_warning,
+            "t_modal_enter": t_modal_enter,
+            "t_modal_exit": time.time(),
+            "global_import_time": global_import_time
         }
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+        # Clean up the temporary video_uploads/ key from R2 after successful processing
+        if r2_key and r2_config:
+            try:
+                s3.delete_object(Bucket=r2_config["R2_BUCKET_NAME"], Key=r2_key)
+                print(f"[CLEANUP] Deleted temp R2 key: {r2_key}")
+            except Exception as cleanup_err:
+                print(f"[CLEANUP] Failed to delete R2 key {r2_key}: {cleanup_err}")
 
 
 @app.function(
