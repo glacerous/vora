@@ -987,6 +987,7 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
         "points3d_url": points3d_url,
         "points3d_all_url": points3d_all_url,
         "thumbnail_url": thumbnail_url,
+        "timestamp": ts,
     }
 
 
