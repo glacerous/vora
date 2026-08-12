@@ -312,6 +312,34 @@
             border-color: rgba(2,132,199,0.25);
         }
 
+        /* Styling for slider range input */
+        .control-slider {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(8,29,42,0.06);
+            outline: none;
+            cursor: pointer;
+            margin: 6px 0;
+        }
+        .control-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #0284c7;
+            cursor: pointer;
+            border: 2px solid var(--panel-bg);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+            transition: transform 0.1s;
+        }
+        .control-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.15);
+        }
+
+
         /* Responsive controls layout for mobile viewports */
         @media (max-width: 768px) {
             .viewer-controls {
@@ -819,6 +847,10 @@
                 <option value="disabled">Disabled</option>
             </select>
         </div>
+        <div class="control-group" id="point-size-group" style="display: none;">
+            <span class="control-label" id="point-size-label">Point Size: 0.005</span>
+            <input type="range" class="control-slider" id="point-size-slider" min="0.001" max="0.04" step="0.001" value="0.005">
+        </div>
     </div>
 
     <!-- Control Panel -->
@@ -1055,7 +1087,20 @@
                 // Toggle view modes (Splat, Laser Scan, Hybrid)
                 const viewModeSelect = document.getElementById('view-mode-select');
                 const cadOverlaySelect = document.getElementById('cad-overlay-select');
+                const pointSizeSlider = document.getElementById('point-size-slider');
+                const pointSizeLabel = document.getElementById('point-size-label');
 
+                if (pointSizeSlider) {
+                    pointSizeSlider.oninput = (e) => {
+                        const val = parseFloat(e.target.value);
+                        if (pointSizeLabel) {
+                            pointSizeLabel.textContent = `Point Size: ${val}`;
+                        }
+                        if (pointCloudObj && pointCloudObj.material) {
+                            pointCloudObj.material.size = val;
+                        }
+                    };
+                }
 
                 viewModeSelect.onchange = (e) => {
                     currentRenderMode = e.target.value;
@@ -1201,6 +1246,12 @@
             
             if (pointCloudObj) {
                 pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
+            }
+
+            // Toggle Point Size slider visibility depending on render mode
+            const pointSizeGroup = document.getElementById('point-size-group');
+            if (pointSizeGroup) {
+                pointSizeGroup.style.display = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid') ? 'flex' : 'none';
             }
             
             // Look for cadOverlay in syncGroup first, then fall back to scene root
@@ -1481,7 +1532,7 @@
                     // Material with vertex colors (falls back to cyan if no color)
                     const hasColors = geometry.attributes.color !== undefined;
                     const material = new THREE.PointsMaterial({
-                        size: 0.02,
+                        size: 0.005,
                         vertexColors: hasColors,
                         color: hasColors ? undefined : 0x38bdf8,
                         transparent: true,
@@ -1490,6 +1541,16 @@
 
                     pointCloudObj = new THREE.Points(geometry, material);
                     pointCloudObj.name = 'laser_scan_points';
+
+                    // Update Point Size Slider to match the material size
+                    const slider = document.getElementById('point-size-slider');
+                    const label = document.getElementById('point-size-label');
+                    if (slider) {
+                        slider.value = material.size;
+                    }
+                    if (label) {
+                        label.textContent = `Point Size: ${material.size}`;
+                    }
 
                     // Add Point Cloud under syncGroup (which mirrors splatMesh.matrix each frame).
                     // Visibility is independent of splatMesh.visible.
