@@ -948,6 +948,8 @@ def _reconstruct_thread(
                     print(f"[RECONSTRUCT] ICP Alignment successful: P1_3d={P1_3d}, P2_3d={P2_3d}")
                 else:
                     print(f"[RECONSTRUCT] Auto-filtering complete (no coordinates mapped)")
+            except Exception as align_err:
+                print(f"[RECONSTRUCT ERROR] Offloaded alignment/filtering failed: {align_err}")
                 # Fallback to local crop if it fails
                 try:
                     filter_points3d_ply(points3d_path)
