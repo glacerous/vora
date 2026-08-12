@@ -1274,13 +1274,12 @@ from fastapi import Cookie, Depends, HTTPException, status
 import secrets
 import json
 
-async def get_optional_user(session_token: Optional[str] = Cookie(None)):
-    if not session_token:
-        return None
+async def _validate_session_token(token: str):
+    """Validate a session token (used by both cookie auth and Bearer token auth)."""
     try:
         from storage.d1_client import execute_d1_query
         sql = "SELECT * FROM sessions WHERE token = ?"
-        sessions = execute_d1_query(sql, [session_token])
+        sessions = execute_d1_query(sql, [token])
         if not sessions:
             return None
         
@@ -1289,7 +1288,7 @@ async def get_optional_user(session_token: Optional[str] = Cookie(None)):
         expires_str = session["expires_at"].replace('Z', '+00:00')
         expires_at = datetime.fromisoformat(expires_str)
         if expires_at < datetime.now(timezone.utc):
-            execute_d1_query("DELETE FROM sessions WHERE token = ?", [session_token])
+            execute_d1_query("DELETE FROM sessions WHERE token = ?", [token])
             return None
         
         users = execute_d1_query("SELECT id, username, display_name, is_demo_account, created_at FROM users WHERE id = ?", [session["user_id"]])
@@ -1297,11 +1296,29 @@ async def get_optional_user(session_token: Optional[str] = Cookie(None)):
             return None
         return users[0]
     except Exception as e:
-        print(f"[AUTH ERROR] Failed checking optional user session: {e}")
+        print(f"[AUTH ERROR] Failed validating session token: {e}")
         return None
 
-async def get_current_user(session_token: Optional[str] = Cookie(None)):
-    user = await get_optional_user(session_token)
+async def get_optional_user(
+    session_token: Optional[str] = Cookie(None),
+    authorization: Optional[str] = None
+):
+    # 1. Check Bearer token from Authorization header (mobile clients)
+    bearer_token = None
+    if authorization and authorization.startswith("Bearer "):
+        bearer_token = authorization[7:]
+    if bearer_token:
+        return await _validate_session_token(bearer_token)
+    # 2. Fallback to cookie-based session (web clients)
+    if not session_token:
+        return None
+    return await _validate_session_token(session_token)
+
+async def get_current_user(
+    session_token: Optional[str] = Cookie(None),
+    authorization: Optional[str] = None
+):
+    user = await get_optional_user(session_token, authorization)
     if not user:
         raise HTTPException(
             status_code=401,
@@ -2393,6 +2410,49 @@ class RemoveScanRequest(BaseModel):
     tree_code: str
 
 # ── Auth Endpoints ────────────────────────────────────────────────────────────
+
+@app.post("/auth/token", summary="[Mobile] Login and return Bearer token (JWT-compatible)")
+async def login_token(body: LoginRequest):
+    """
+    Mobile-friendly auth endpoint: returns a Bearer token instead of setting an httpOnly cookie.
+    The token is a standard session token stored in D1 (same as cookie auth).
+    Web frontend uses /auth/login (cookie). Mobile clients use /auth/token (Bearer).
+    Both methods use the same session table — no separate JWT library needed.
+    """
+    username = body.username.strip().lower()
+    from storage.d1_client import execute_d1_query
+    users = execute_d1_query("SELECT * FROM users WHERE username = ?", [username])
+    if not users:
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+    
+    user = users[0]
+    from storage.auth_utils import verify_password
+    if not verify_password(body.password, user["password_hash"], user["password_salt"]):
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+    
+    # Create session token (same mechanism as cookie auth)
+    token = secrets.token_urlsafe(32)
+    created_at = datetime.now(timezone.utc).isoformat()
+    # Mobile tokens last 30 days (longer than web 7-day cookies)
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    
+    execute_d1_query(
+        "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        [token, user["id"], created_at, expires_at]
+    )
+    
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_in": 30 * 24 * 60 * 60,  # 30 days in seconds
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "display_name": user["display_name"],
+            "is_demo_account": bool(user["is_demo_account"])
+        }
+    }
+
 
 @app.post("/auth/register", summary="Register a new user")
 async def register_user(body: RegisterRequest):
