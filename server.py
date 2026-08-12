@@ -77,6 +77,7 @@ class StatusResponse(BaseModel):
     calibration_frame: Optional[Any] = None
     tree_code: Optional[str] = None
     started_at: Optional[float] = None
+    timings: Optional[dict] = None
 
 class HistoryResponse(BaseModel):
     success: bool
@@ -735,6 +736,16 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int, client_to_se
         state["frame_count"] = n
         state["overlap_warning"] = overlap_warning
         state["calibration_frame"] = None
+        state["timings"] = {
+            "client_to_server_s": client_to_server_s,
+            "modal_roundtrip_s": t_modal_end - t_modal_start,
+            "modal_scheduling_cold_start_s": modal_scheduling_cold_start,
+            "modal_transfer_in_s": modal_transfer_in,
+            "modal_compute_s": modal_compute,
+            "modal_transfer_out_s": modal_transfer_out,
+            "server_read_s": t_read_end - t_read_start,
+            "server_save_s": t_save_end - t_save_start
+        }
 
         if overlap_warning:
             print(overlap_warning)
