@@ -3277,8 +3277,8 @@ async def download_carbon_certificate(tree_code: str, request: Request):
         [Paragraph("Wood Density (ρ)", body_style), Paragraph(f"{scan.get('wood_density_used') or 0.60:.2f} g/cm³", body_bold_style), Paragraph(f"Source: {scan.get('wood_density_source') or 'Default'}", body_style)],
         [Paragraph("Dry Biomass Stock", body_style), Paragraph(f"{scan.get('biomassa_kg') or 0.0:.1f} kg", body_bold_style), Paragraph("Allometric equations (Chave / AGB+BGB)", body_style)],
         [Paragraph("Stored Organic Carbon", body_style), Paragraph(f"{scan.get('karbon_kg') or 0.0:.1f} kg C", body_bold_style), Paragraph("Biomass × 0.47 Carbon conversion factor", body_style)],
-        [Paragraph("CO₂ Equivalent (CO₂e)", body_style), Paragraph(f"{co2e:.1f} kg CO₂e", body_bold_style), Paragraph(f"Carbon Stock × 3.67 (Uncertainty ±{unc_pct:.0f}%)", body_style)],
-        [Paragraph("Uncertainty Range (CO₂e)", body_style), Paragraph(f"{co2e_low:.1f} – {co2e_high:.1f} kg", body_bold_style), Paragraph("Confidence interval based on measurement variance", body_style)]
+        [Paragraph("CO<sub>2</sub> Equivalent (CO<sub>2</sub>e)", body_style), Paragraph(f"{co2e:.1f} kg CO<sub>2</sub>e", body_bold_style), Paragraph(f"Carbon Stock × 3.67 (Uncertainty ±{unc_pct:.0f}%)", body_style)],
+        [Paragraph("Uncertainty Range (CO<sub>2</sub>e)", body_style), Paragraph(f"{co2e_low:.1f} – {co2e_high:.1f} kg", body_bold_style), Paragraph("Confidence interval based on measurement variance", body_style)]
     ]
     
     metrics_table = Table(metrics_data, colWidths=[180, 110, 240])
