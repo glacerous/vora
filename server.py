@@ -17,7 +17,7 @@ from typing import Any, List, Optional
 import cv2
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Query, UploadFile, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import boto3
@@ -63,6 +63,7 @@ class ReconstructRequest(BaseModel):
     p2: Optional[List[float]] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    iterations: Optional[int] = 2000
 
 class StatusResponse(BaseModel):
     stage: str
@@ -76,6 +77,7 @@ class StatusResponse(BaseModel):
     calibration_frame: Optional[Any] = None
     tree_code: Optional[str] = None
     started_at: Optional[float] = None
+    timings: Optional[dict] = None
 
 class HistoryResponse(BaseModel):
     success: bool
@@ -299,6 +301,84 @@ def filter_points3d_ply(ply_path: str, center_x: float = None, center_z: float =
         print(f"[RECONSTRUCT-FILTER] Error filtering points3d.ply: {exc}")
 
 
+def decimate_ply_file(input_ply_path, output_ply_path, target_count=300000):
+    """
+    Decimates a PLY file to the target count using random sampling,
+    preserving binary little endian format and all attributes.
+    """
+    import shutil
+    import random
+    if not input_ply_path or not os.path.exists(input_ply_path):
+        return False
+    try:
+        with open(input_ply_path, "rb") as f:
+            raw_props = []
+            num_vertices = 0
+            is_binary = False
+
+            while True:
+                line = f.readline().decode("ascii", errors="ignore").strip()
+                if line.startswith("format binary_little_endian"):
+                    is_binary = True
+                elif line.startswith("element vertex"):
+                    num_vertices = int(line.split()[-1])
+                elif line.startswith("property"):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        raw_props.append((parts[1], parts[2]))
+                elif line == "end_header":
+                    break
+
+            if num_vertices <= 0 or not is_binary:
+                print(f"[DECIMATE] Empty or non-binary PLY: {input_ply_path}")
+                return False
+
+            dtype_map = []
+            for p_type, p_name in raw_props:
+                if p_type in ("float", "float32"):
+                    dtype_map.append((p_name, "<f4"))
+                elif p_type in ("int", "int32", "uint"):
+                    dtype_map.append((p_name, "<i4"))
+                elif p_type in ("uchar", "uint8"):
+                    dtype_map.append((p_name, "u1"))
+                else:
+                    dtype_map.append((p_name, "<f4"))
+
+            vertex_data = np.fromfile(f, dtype=np.dtype(dtype_map), count=num_vertices)
+
+        if num_vertices <= target_count:
+            if input_ply_path != output_ply_path:
+                shutil.copy(input_ply_path, output_ply_path)
+            return True
+
+        indices = np.random.choice(num_vertices, size=target_count, replace=False)
+        decimated_data = vertex_data[indices]
+
+        header_lines = [
+            "ply",
+            "format binary_little_endian 1.0",
+            f"element vertex {target_count}",
+        ]
+        for p_type, p_name in raw_props:
+            header_lines.append(f"property {p_type} {p_name}")
+        header_lines.append("end_header")
+        header = "\n".join(header_lines) + "\n"
+
+        with open(output_ply_path, "wb") as f:
+            f.write(header.encode("ascii"))
+            decimated_data.tofile(f)
+        print(f"[DECIMATE] Decimated {input_ply_path} to {target_count} points: {num_vertices} -> {target_count}")
+        return True
+    except Exception as e:
+        print(f"[DECIMATE ERROR] Failed to decimate PLY {input_ply_path}: {e}")
+        if input_ply_path != output_ply_path:
+            try:
+                shutil.copy(input_ply_path, output_ply_path)
+            except:
+                pass
+        return False
+
+
 def run_carbon_analysis(
     ply_path: str,
     points3d_path: str = None,
@@ -332,24 +412,6 @@ def run_carbon_analysis(
                 calibration_source = scale_calibration["source"]
                 auto_calib_note = f"auto-kalibrasi pose diterapkan (offloaded ke Modal): {scale_calibration['reason']}"
                 print(f"[CARBON-AUTOCALIB] {auto_calib_note} scale_factor={scale_factor:.6f}")
-            elif points3d_path and os.path.exists(points3d_path):
-                # Fallback to local auto-calibration if no scale_calibration was provided (e.g. historical scans recalculate)
-                try:
-                    from carbon.height_calibration import auto_calibrate_scale_from_frames
-                    from carbon.dbh_extractor import parse_ply_points
-                    frames = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
-                    pts_3d = parse_ply_points(points3d_path)
-                    auto = auto_calibrate_scale_from_frames(frames, pts_3d)
-                    if auto and auto.get("is_calibrated") and auto.get("scale_factor", 0) > 0:
-                        scale_factor = float(auto["scale_factor"])
-                        is_calibrated = True
-                        calibration_source = "auto_pose"
-                        auto_calib_note = f"auto-kalibrasi pose diterapkan (lokal): {auto['reason']}"
-                        print(f"[CARBON-AUTOCALIB] {auto_calib_note} scale_factor={scale_factor:.6f}")
-                    else:
-                        print(f"[CARBON-AUTOCALIB] Pose auto-calibration did not succeed: {auto}")
-                except Exception as auto_err:
-                    print(f"[CARBON-AUTOCALIB ERROR] Local auto pose calibration failed: {auto_err}")
 
         scale_status = "calibrated" if is_calibrated else "uncalibrated"
 
@@ -587,7 +649,7 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
 
         if ratio < threshold:
             idx_mid = (idx_a + idx_b) // 2
-            print(f"[OVERLAP] ⚠ Low overlap ({ratio*100:.1f}% < {threshold*100:.1f}%). Inserting candidate {idx_mid} between {idx_a} and {idx_b}")
+            print(f"[OVERLAP] [WARNING] Low overlap ({ratio*100:.1f}% < {threshold*100:.1f}%). Inserting candidate {idx_mid} between {idx_a} and {idx_b}")
             current_idxs.insert(i + 1, idx_mid)
             added_count += 1
             gaps_detected.append(f"Gap between frames {i} and {i+1} ({ratio*100:.1f}% overlap)")
@@ -596,7 +658,7 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
             i += 1
 
     if gaps_detected:
-        warning_msg = f"⚠ Low overlap warning: {len(gaps_detected)} gaps detected. Resampled +{added_count} frames. Try slower/steadier capture next time."
+        warning_msg = f"[WARNING] Low overlap warning: {len(gaps_detected)} gaps detected. Resampled +{added_count} frames. Try slower/steadier capture next time."
         state["overlap_warning"] = warning_msg
         print(f"[OVERLAP] {warning_msg}")
     else:
@@ -607,186 +669,95 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
 
 
 # ── Background thread: frame extraction (sync, CPU+IO heavy) ─────────────────
-def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
-    cap = None
+def _extract_thread(r2_key: str, target: int, blur_thresh: int, client_to_server_s: float = None) -> None:
     try:
-        upd("extracting", "Opening video file…")
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise ValueError("Cannot open video — try MP4 / MOV / AVI / WEBM / MKV format")
+        upd("extracting", "Offloading frame extraction to Modal (pulling from R2)...")
+        t_modal_start = time.time()
 
-        orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        duration     = total_frames / fps
-        # Dynamically calculate step based on target count to avoid scanning too many frames
-        # targeting about 2.0x candidates of target count across the video duration.
-        step = max(1, int(total_frames / (target * 2.0)))
-        
-        print(f"[EXTRACT] Start extraction from {video_path}")
-        print(f"[EXTRACT] Original Resolution: {orig_w}x{orig_h}, FPS: {fps:.2f}, Duration: {duration:.2f}s, Total Frames: {total_frames}, Step: {step}")
-        
-        upd("extracting", f"Scanning {total_frames} frames ({duration:.1f}s at {fps:.0f}fps)…")
+        # Build R2 config dict to pass to Modal so it can download the video
+        r2_config = {
+            "CLOUDFLARE_ACCOUNT_ID": os.environ.get("CLOUDFLARE_ACCOUNT_ID"),
+            "R2_ACCESS_KEY_ID": os.environ.get("R2_ACCESS_KEY_ID"),
+            "R2_SECRET_ACCESS_KEY": os.environ.get("R2_SECRET_ACCESS_KEY"),
+            "R2_BUCKET_NAME": os.environ.get("R2_BUCKET_NAME"),
+        }
 
-        def _blur(frame):
-            h, w = frame.shape[:2]
-            if w > 960:
-                f_resized = cv2.resize(frame, (960, int(h * 960 / w)), interpolation=cv2.INTER_NEAREST)
-            else:
-                f_resized = frame
-            gray = f_resized if (len(f_resized.shape) == 2 or f_resized.shape[2] == 1) else cv2.cvtColor(f_resized, cv2.COLOR_BGR2GRAY)
-            # Use CV_32F instead of CV_64F for 2-3x speedup on CPU
-            val = cv2.Laplacian(gray, cv2.CV_32F).var()
-            del gray
-            if f_resized is not frame:
-                del f_resized
-            return val
+        import modal
+        fn = modal.Function.from_name("instantsplat-app", "extract_video_frames_modal")
+        res = fn.remote(None, target, blur_thresh, t_modal_start, r2_key=r2_key, r2_config=r2_config)
+        t_modal_end = time.time()
 
-        # Create a temporary directory for candidates to keep RAM usage at zero
-        temp_candidates_dir = os.path.join(os.path.dirname(video_path), "temp_candidates")
-        if os.path.exists(temp_candidates_dir):
+        t_modal_enter = res.get("t_modal_enter")
+        t_modal_exit = res.get("t_modal_exit")
+        global_import_time = res.get("global_import_time")
+
+        # Calculate sub-phases
+        modal_scheduling_cold_start = 0.0
+        modal_transfer_in = 0.0
+        modal_compute = 0.0
+        modal_transfer_out = 0.0
+
+        if t_modal_enter and t_modal_exit and global_import_time:
+            modal_scheduling_cold_start = global_import_time - t_modal_start
+            modal_transfer_in = t_modal_enter - global_import_time
+            modal_compute = t_modal_exit - t_modal_enter
+            modal_transfer_out = t_modal_end - t_modal_exit
+
+        print(f"[TIMING] Modal remote frame extraction call complete.")
+        if client_to_server_s is not None:
+            print(f"  - (a) Client -> Server Upload : {client_to_server_s:.4f}s")
+        print(f"  - Total Modal Roundtrip       : {t_modal_end - t_modal_start:.4f}s")
+        print(f"  - (c) Modal Scheduling / Cold : {modal_scheduling_cold_start:.4f}s")
+        print(f"  - (b) Request Upload to Modal : {modal_transfer_in:.4f}s")
+        print(f"  - (d) Modal CV2 Compute       : {modal_compute:.4f}s")
+        print(f"  - Response Download           : {modal_transfer_out:.4f}s")
+
+        frames = res.get("frames", [])
+        overlap_warning = res.get("overlap_warning")
+
+        n = len(frames)
+        if n == 0:
+            raise ValueError(f"No sharp frames found (blur_thresh={blur_thresh}). Try a slower, steadier recording.")
+
+        upd("extracting", f"Saving {n} frames from Modal to disk...")
+        t_save_start = time.time()
+        for f in glob.glob(os.path.join(FRAMES_DIR, "*")):
             try:
-                shutil.rmtree(temp_candidates_dir)
+                os.remove(f)
             except Exception:
                 pass
-        os.makedirs(temp_candidates_dir, exist_ok=True)
 
-        candidates, fi = [], 0
-        while True:
-            if state.get("cancel_requested", False):
-                break
-            
-            if fi % step != 0:
-                ok = cap.grab()
-                if not ok:
-                    break
-                fi += 1
-                continue
-                
-            ok, frame = cap.read()
-            if not ok:
-                break
-            
-            h, w = frame.shape[:2]
-            if w > 1920:
-                frame = cv2.resize(frame, (1920, int(h * 1920 / w)))
-
-            blur_score = _blur(frame)
-            if blur_score >= blur_thresh:
-                ok_enc, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                if ok_enc:
-                    temp_path = os.path.join(temp_candidates_dir, f"frame_{fi:04d}.jpg")
-                    with open(temp_path, "wb") as f_out:
-                        f_out.write(encoded_img.tobytes() if hasattr(encoded_img, "tobytes") else bytes(encoded_img))
-                    candidates.append((fi, blur_score, temp_path))
-            
-            del frame
-            if fi % 150 == 0:
-                import gc
-                gc.collect()
-            
-            # Send real-time progress update to frontend every 10 frames
-            if fi % 10 == 0 and total_frames > 0:
-                pct = int(fi * 100 / total_frames)
-                upd("extracting", f"Scanning frames: {fi}/{total_frames} ({pct}%)…")
-                
-            fi += 1
-            
-    except Exception as exc:
-        print(f"[EXTRACT ERROR] During video read: {exc}")
-        upd("error", str(exc), error=str(exc))
-        return
-    finally:
-        if cap is not None:
-            cap.release()
-
-    # Handle cancellation cleanly outside the cv2.VideoCapture block
-    try:
-        if state.get("cancel_requested", False):
-            print("[EXTRACT] Cancel requested by user. Aborting...")
-            upd("idle", "Ready.")
-            state["cancel_requested"] = False
-            return
-
-        print(f"[EXTRACT] Found {len(candidates)} sharp candidate frames (blur_thresh={blur_thresh})")
-
-        if not candidates:
-            raise ValueError(
-                f"No sharp frames found (blur_thresh={blur_thresh}). "
-                "Try a slower, steadier recording."
-            )
-
-        n    = min(target, len(candidates))
-        idxs = np.linspace(0, len(candidates) - 1, n, dtype=int)
-        
-        # Overlap Check & Dynamic Resampling (Fase 3)
-        upd("extracting", f"Checking overlap & resampling frames...")
-        if state.get("cancel_requested", False):
-            print("[EXTRACT] Cancel requested by user. Aborting...")
-            upd("idle", "Ready.")
-            state["cancel_requested"] = False
-            return
-            
-        resampled_idxs = _check_overlap_and_resample(candidates, idxs, threshold=0.15)
-        n = len(resampled_idxs)
-        
-        upd("extracting", f"Selecting {n} frames (including dynamically resampled ones)…")
-
-        for f in glob.glob(os.path.join(FRAMES_DIR, "*")):
-            os.remove(f)
-
-        import shutil
-        for j, (_, _score, raw_frame) in enumerate([candidates[i] for i in resampled_idxs]):
-            if state.get("cancel_requested", False):
-                print("[EXTRACT] Cancel requested by user. Aborting...")
-                upd("idle", "Ready.")
-                state["cancel_requested"] = False
-                return
-            
+        for j, frame_bytes in enumerate(frames):
             img_path = os.path.join(FRAMES_DIR, f"{j:04d}.jpg")
-            if isinstance(raw_frame, str) and os.path.exists(raw_frame):
-                try:
-                    shutil.copy(raw_frame, img_path)
-                except Exception as copy_err:
-                    print(f"[EXTRACT ERROR] Failed to copy {raw_frame} to {img_path}: {copy_err}")
-                    # Fallback to write bytes if copy fails
-                    with open(raw_frame, "rb") as rf_fh:
-                        with open(img_path, "wb") as fh:
-                            fh.write(rf_fh.read())
-            else:
-                with open(img_path, "wb") as fh:
-                    fh.write(raw_frame.tobytes() if hasattr(raw_frame, "tobytes") else bytes(raw_frame))
-                
-            if j == 0 or j == n - 1 or j == n // 2:
-                print(f"[EXTRACT] Saved frame {j:04d}.jpg from source: {raw_frame if isinstance(raw_frame, str) else 'bytes'}")
+            with open(img_path, "wb") as f_out:
+                f_out.write(frame_bytes)
+
+        t_save_end = time.time()
+        print(f"[TIMING] Saved {n} frames to disk: {t_save_end - t_save_start:.4f}s")
 
         state["frame_count"] = n
-        
-        # Free memory immediately by deleting candidates list and running garbage collection
-        try:
-            del candidates
-            import gc
-            gc.collect()
-        except Exception:
-            pass
-            
-        # Pose detection for calibration has been deprecated as MASt3R native metric scale is correct
+        state["overlap_warning"] = overlap_warning
         state["calibration_frame"] = None
+        state["timings"] = {
+            "client_to_server_s": client_to_server_s,
+            "modal_roundtrip_s": t_modal_end - t_modal_start,
+            "modal_scheduling_cold_start_s": modal_scheduling_cold_start,
+            "modal_transfer_in_s": modal_transfer_in,
+            "modal_compute_s": modal_compute,
+            "modal_transfer_out_s": modal_transfer_out,
+            "server_read_s": 0.0,
+            "server_save_s": t_save_end - t_save_start
+        }
 
-        upd("extracted", f"\u2713 {n} sharp frames ready")
+        if overlap_warning:
+            print(overlap_warning)
+
+        upd("extracted", f"✓ {n} sharp frames ready")
         print(f"[EXTRACT] Completed. {n} frames written to {FRAMES_DIR}")
 
     except Exception as exc:
         print(f"[EXTRACT ERROR] During frame processing: {exc}")
         upd("error", str(exc), error=str(exc))
-    finally:
-        try:
-            temp_candidates_dir = os.path.join(os.path.dirname(video_path), "temp_candidates")
-            if os.path.exists(temp_candidates_dir):
-                shutil.rmtree(temp_candidates_dir)
-        except Exception:
-            pass
 
 # ── Background thread: GPU reconstruction + R2/D1 persistence (sync, IO heavy) ─
 def _reconstruct_thread(
@@ -800,6 +771,7 @@ def _reconstruct_thread(
     height: int = None,
     plot_id: int = None,
     claimed_by_user_id: int = None,
+    iterations: int = 2000,
 ) -> None:
     import modal
     progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
@@ -809,6 +781,7 @@ def _reconstruct_thread(
             raise RuntimeError("Job cancelled by user")
         upd("reconstructing", "Connecting to Modal…")
 
+        t_disk_start = time.time()
         files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
         if not files:
             raise ValueError("No frames found in test_images/")
@@ -817,6 +790,8 @@ def _reconstruct_thread(
         for f in files:
             with open(f, "rb") as fh:
                 imgs.append(fh.read())
+        t_disk_end = time.time()
+        print(f"[TIMING] Read {len(imgs)} frames from local disk: {t_disk_end - t_disk_start:.4f}s")
 
         upd("reconstructing", f"Sending {len(imgs)} frames to Modal A10G GPU…")
         
@@ -839,7 +814,7 @@ def _reconstruct_thread(
 
         t_remote_start = time.time()
         try:
-            result = fn.remote(imgs, tree_code, remove_background, r2_config)
+            result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
         except Exception as remote_exc:
             # fn.remote() failed — this typically happens when the Render server
             # restarted while the Modal job was still running (connection reset).
@@ -902,10 +877,11 @@ def _reconstruct_thread(
 
         out = os.path.join(OUTPUT_DIR, "result.ply")
         points3d_path = os.path.join(OUTPUT_DIR, "points3d.ply")
+        points3d_highres_path = os.path.join(OUTPUT_DIR, "points3d_highres.ply")
         points3d_all_path = os.path.join(OUTPUT_DIR, "points3D_all.npy")
 
         # Clean old files to free up disk space
-        for p in (out, points3d_path, points3d_all_path):
+        for p in (out, points3d_path, points3d_highres_path, points3d_all_path):
             if os.path.exists(p):
                 try:
                     os.remove(p)
@@ -913,6 +889,7 @@ def _reconstruct_thread(
                     pass
 
         # Load splat (viewer)
+        t_dl_splat_start = time.time()
         if uploaded and splat_url:
             print(f"[RECONSTRUCT] Stream-downloading result.ply from R2 URL: {splat_url}")
             import requests
@@ -926,6 +903,8 @@ def _reconstruct_thread(
                 f.write(splat_bytes)
         else:
             print("[RECONSTRUCT] WARNING: No Gaussian splat PLY received!")
+        t_dl_splat_end = time.time()
+        print(f"[TIMING] Save/download result.ply: {t_dl_splat_end - t_dl_splat_start:.4f}s")
 
         mb = 0.0
         if os.path.exists(out):
@@ -933,6 +912,7 @@ def _reconstruct_thread(
         print(f"[RECONSTRUCT] Saved splat PLY: {out} ({mb:.2f} MB)")
 
         # Save points3d.ply (keep raw on local disk for ICP alignment)
+        t_dl_pts_start = time.time()
         if uploaded and points3d_url:
             print(f"[RECONSTRUCT] Stream-downloading raw points3d.ply from R2 URL: {points3d_url}")
             import requests
@@ -948,8 +928,11 @@ def _reconstruct_thread(
         else:
             print("[RECONSTRUCT] No MASt3R point cloud returned — measurement will use splat")
             points3d_path = None
+        t_dl_pts_end = time.time()
+        print(f"[TIMING] Save/download points3d.ply: {t_dl_pts_end - t_dl_pts_start:.4f}s")
 
         # Save points3d_all.npy
+        t_dl_all_start = time.time()
         if uploaded and points3d_all_url:
             print(f"[RECONSTRUCT] Stream-downloading points3d_all.npy from R2 URL: {points3d_all_url}")
             import requests
@@ -964,70 +947,61 @@ def _reconstruct_thread(
             print(f"[RECONSTRUCT] Saved raw MASt3R dense pointmap: {points3d_all_path} ({len(points3d_all_bytes)/1024/1024:.1f} MB)")
         else:
             points3d_all_path = None
+        t_dl_all_end = time.time()
+        print(f"[TIMING] Save/download points3D_all.npy: {t_dl_all_end - t_dl_all_start:.4f}s")
 
+        t_icp_start = time.time()
         P1_3d = None
         P2_3d = None
-        if p1 is not None and p2 is not None and points3d_all_path and os.path.exists(points3d_all_path):
+        
+        if points3d_path and os.path.exists(points3d_path):
             try:
-                pts3d = np.load(points3d_all_path)
-                N, H_crop, W_crop, _ = pts3d.shape
-                # Pick the representative frame by valid-pixel coverage
-                # (non-zero, non-NaN entries) — more robust than N//2 because N can
-                # vary between runs and the midpoint frame isn't always the most
-                # informative one. Falls back to 0 (first frame) if all are equal.
-                valid_counts = np.array([
-                    np.sum(~np.all(pts3d[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d[i]), axis=-1))
-                    for i in range(N)
-                ])
-                repr_idx = int(np.argmax(valid_counts))
-                print(f"[RECONSTRUCT] Representative frame: idx={repr_idx}/{N} "
-                      f"({valid_counts[repr_idx]:,} valid pixels vs N//2={N//2} w/ {valid_counts[N//2]:,})")
-                pointmap = pts3d[repr_idx]
-                
-                u1_crop, v1_crop = map_pixel_to_cropped(p1[0], p1[1], width, height, W_crop, H_crop)
-                u2_crop, v2_crop = map_pixel_to_cropped(p2[0], p2[1], width, height, W_crop, H_crop)
-                
-                P1_np = get_robust_3d_point(pointmap, u1_crop, v1_crop)
-                P2_np = get_robust_3d_point(pointmap, u2_crop, v2_crop)
-                
-                # Hybrid depth constraint: clamp depth only if deviation is > 1.5m (background hit)
-                z_diff = P2_np[2] - P1_np[2]
-                if abs(z_diff) > 1.5:
-                    print(f"[RECONSTRUCT] Z-depth deviation ({abs(z_diff):.3f}m) > 1.5m. Background hit detected. Clamping Z2 to Z1.")
-                    P2_np[2] = P1_np[2]
+                print(f"[RECONSTRUCT] Reading point cloud files for offloaded Modal alignment/filtering...")
+                with open(points3d_path, "rb") as f:
+                    ply_bytes = f.read()
                     
-                # Align camera space to world space using ICP (raw-to-raw)
-                if points3d_path and os.path.exists(points3d_path):
-                    from carbon.dbh_extractor import register_pointmap_to_world, parse_ply_points
-                    try:
-                        pts_world_raw = parse_ply_points(points3d_path)
-                        
-                        # Use full pointmap and full pts_world_raw for raw-to-raw stability
-                        R, t, s = register_pointmap_to_world(pointmap, pts_world_raw)
-                        P1_aligned = s * (P1_np @ R.T) + t
-                        P2_aligned = s * (P2_np @ R.T) + t
-                        P1_3d = P1_aligned.tolist()
-                        P2_3d = P2_aligned.tolist()
-                        print(f"[RECONSTRUCT] ICP Alignment successful: P1_3d={P1_3d}, P2_3d={P2_3d}, Scale={s:.6f}")
-                        
-                        # Now crop the point cloud file on disk locally around the clicked trunk center.
-                        # This clean PLY will be used for the local carbon estimation.
-                        filter_points3d_ply(points3d_path, center_x=P1_aligned[0], center_z=P1_aligned[2])
-                        print(f"[RECONSTRUCT] Cleaned local point cloud around clicked trunk center: {P1_aligned[0]:.3f}, {P1_aligned[2]:.3f}")
-                    except Exception as align_err:
-                        print(f"[RECONSTRUCT ERROR] ICP Alignment failed: {align_err}. Using camera-space fallback.")
-                        P1_3d = P1_np.tolist()
-                        P2_3d = P2_np.tolist()
-                        filter_points3d_ply(points3d_path) # fallback to auto peak crop
+                points3d_all_bytes = b""
+                if points3d_all_path and os.path.exists(points3d_all_path):
+                    with open(points3d_all_path, "rb") as f:
+                        points3d_all_bytes = f.read()
+                
+                print(f"[RECONSTRUCT] Offloading alignment and filtering to Modal...")
+                import modal
+                fn_align = modal.Function.from_name("instantsplat-app", "align_and_filter_ply_modal")
+                res = fn_align.remote(ply_bytes, points3d_all_bytes, p1, p2, width, height)
+                
+                P1_3d = res.get("P1")
+                P2_3d = res.get("P2")
+                filtered_ply = res.get("filtered_ply")
+                
+                if filtered_ply:
+                    with open(points3d_highres_path, "wb") as f:
+                        f.write(filtered_ply)
+                    print(f"[RECONSTRUCT] Saved high-res filtered point cloud from Modal ({len(filtered_ply)/1024:.1f} KB)")
+                    # Generate decimated point cloud for display
+                    decimate_ply_file(points3d_highres_path, points3d_path, target_count=300000)
+                
+                if P1_3d and P2_3d:
+                    print(f"[RECONSTRUCT] ICP Alignment successful: P1_3d={P1_3d}, P2_3d={P2_3d}")
                 else:
-                    P1_3d = P1_np.tolist()
-                    P2_3d = P2_np.tolist()
-            except Exception as map_err:
-                print(f"[RECONSTRUCT ERROR] Failed to map pixel coordinates to 3D: {map_err}")
+                    print(f"[RECONSTRUCT] Auto-filtering complete (no coordinates mapped)")
+            except Exception as align_err:
+                print(f"[RECONSTRUCT ERROR] Offloaded alignment/filtering failed: {align_err}")
+                # Fallback to local crop if it fails
+                try:
+                    filter_points3d_ply(points3d_path)
+                    import shutil
+                    shutil.copy(points3d_path, points3d_highres_path)
+                    decimate_ply_file(points3d_highres_path, points3d_path, target_count=300000)
+                except Exception as fb_err:
+                    print(f"[RECONSTRUCT ERROR] Local fallback crop failed: {fb_err}")
+        t_icp_end = time.time()
+        print(f"[TIMING] Mapping pixel and ICP alignment / filter_points3d_ply: {t_icp_end - t_icp_start:.4f}s")
 
         elapsed = time.time() - t0
         print(f"[RECONSTRUCT] Total pipeline runtime: {elapsed:.2f} seconds")
 
+        t_meta_start = time.time()
         # 1. Resolve GPS coordinates from EXIF metadata if not provided manually
         if gps_lat is None or gps_lon is None:
             try:
@@ -1054,7 +1028,10 @@ def _reconstruct_thread(
                     print(f"[RECONSTRUCT-CLIMATE] Koppen Climate: {climate_zone}, Forest type: {forest_type}")
             except Exception as climate_err:
                 print(f"[RECONSTRUCT-CLIMATE ERROR] Mapresso query failed: {climate_err}")
+        t_meta_end = time.time()
+        print(f"[TIMING] EXIF GPS and Koppen Climate Zone classification: {t_meta_end - t_meta_start:.4f}s")
 
+        t_species_start = time.time()
         # 3. Detect Species via Pl@ntNet API
         species_preds = None
         try:
@@ -1099,13 +1076,16 @@ def _reconstruct_thread(
                         print(f"[RECONSTRUCT-WD] Matched wood density for {sci_name}: {wood_density}")
                 except Exception as wd_err:
                     print(f"[RECONSTRUCT-WD ERROR] Wood density lookup exception: {wd_err}")
+        t_species_end = time.time()
+        print(f"[TIMING] Pl@ntNet species detection & wood density lookup: {t_species_end - t_species_start:.4f}s")
 
+        t_carbon_start = time.time()
         # 5. Run Carbon Analysis using custom parameters
         progress_dict[tree_code] = "Computing DBH & carbon"
         upd("reconstructing", "✓ Reconstruction done. Estimating DBH and Carbon...")
         carbon_est = run_carbon_analysis(
             out, 
-            points3d_path=points3d_path, 
+            points3d_path=points3d_highres_path, 
             scan_id=tree_code,
             wood_density=wood_density,
             forest_type=forest_type,
@@ -1125,25 +1105,52 @@ def _reconstruct_thread(
                 carbon_est["confidence"] = "GPS data not available - fallback to moist forest assumption"
                 
         state["carbon_estimation"] = carbon_est
+        t_carbon_end = time.time()
+        print(f"[TIMING] Local carbon estimation analysis: {t_carbon_end - t_carbon_start:.4f}s")
 
         if carbon_est and "error" not in carbon_est:
             try:
+                t_persistence_start = time.time()
                 progress_dict[tree_code] = "Uploading results"
                 
                 if uploaded:
                     print(f"[RECONSTRUCT] Files were uploaded directly from Modal to R2.")
                     ts = custom_ts or int(time.time())
+                    # Upload high-res version to R2
+                    if points3d_highres_path and os.path.exists(points3d_highres_path):
+                        try:
+                            from storage.r2_client import upload_splat
+                            upload_splat(points3d_highres_path, tree_code, custom_timestamp=ts)
+                            print(f"[RECONSTRUCT] Uploaded high-res points3d_highres.ply to R2")
+                        except Exception as upload_err:
+                            print(f"Failed to upload points3d_highres.ply to R2: {upload_err}")
+                    # Overwrite raw points3d.ply in R2 with the decimated version
+                    if points3d_path and os.path.exists(points3d_path):
+                        try:
+                            from storage.r2_client import upload_splat
+                            upload_splat(points3d_path, tree_code, custom_timestamp=ts)
+                            print(f"[RECONSTRUCT] Overwrote R2 points3d.ply with decimated version")
+                        except Exception as upload_err:
+                            print(f"Failed to upload points3d.ply to R2: {upload_err}")
                 else:
                     upd("reconstructing", "Uploading reconstruction files to Cloudflare R2...")
                     from storage.r2_client import upload_splat, upload_thumbnail
                     ts = int(time.time())
                     splat_url = upload_splat(out, tree_code, custom_timestamp=ts)
                     
-                    # If MASt3R points3d.ply was computed, upload it too
+                    # Upload high-res version
+                    if points3d_highres_path and os.path.exists(points3d_highres_path):
+                        try:
+                            upload_splat(points3d_highres_path, tree_code, custom_timestamp=ts)
+                            print(f"[RECONSTRUCT] Uploaded high-res points3d_highres.ply to R2")
+                        except Exception as upload_err:
+                            print(f"Failed to upload points3d_highres.ply to R2: {upload_err}")
+                            
+                    # Upload decimated points3d.ply
                     if points3d_path and os.path.exists(points3d_path):
                         try:
                             upload_splat(points3d_path, tree_code, custom_timestamp=ts)
-                            print(f"[RECONSTRUCT] Uploaded MASt3R points3d.ply with timestamp {ts}")
+                            print(f"[RECONSTRUCT] Uploaded decimated points3d.ply to R2")
                         except Exception as upload_err:
                             print(f"Failed to upload points3d.ply to R2: {upload_err}")
 
@@ -1204,6 +1211,8 @@ def _reconstruct_thread(
                     plot_id=plot_id,
                     claimed_by_user_id=claimed_by_user_id,
                 )
+                t_persistence_end = time.time()
+                print(f"[TIMING] R2 upload & D1 database persistence: {t_persistence_end - t_persistence_start:.4f}s")
                 upd("done", f"✓ Done in {elapsed:.0f}s — {mb:.1f} MB Gaussian Splat ready! (Tree code: {tree_code})")
             except Exception as exc:
                 print(f"Persistence error: {exc}")
@@ -1415,64 +1424,90 @@ async def status():
         "has_result": os.path.exists(os.path.join(OUTPUT_DIR, "result.ply")),
     }
 
-@app.post("/upload_video", summary="Upload a video and start frame extraction")
-async def upload_video(
-    background_tasks: BackgroundTasks,
-    video: UploadFile = File(..., description="Video file (MP4/MOV/AVI/WEBM/MKV, up to 4 GB)"),
-    frames: int = Form(default=25, description="Target number of frames to extract"),
-    blur_thresh: int = Form(default=80, description="Minimum Laplacian blur score to keep a frame"),
+@app.get("/video_upload_url", summary="Get a presigned R2 PUT URL for direct browser-to-R2 video upload")
+async def video_upload_url(
+    request: Request,
+    filename: str = Query(..., description="Original video filename (used to infer extension)"),
+    content_type: str = Query(default="video/mp4", description="MIME type of the video"),
 ):
     """
-    Accepts a video upload, saves it to disk, then starts smart frame extraction
-    asynchronously. Poll `/status` for progress.
+    Returns a short-lived presigned PUT URL so the browser can upload the video
+    directly to Cloudflare R2 without routing bytes through the Render backend.
+    Also returns the R2 key the browser should pass to POST /upload_video after upload.
     """
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    access_key = os.environ.get("R2_ACCESS_KEY_ID")
+    secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
+    bucket_name = os.environ.get("R2_BUCKET_NAME")
+    if not all([account_id, access_key, secret_key, bucket_name]):
+        raise HTTPException(status_code=500, detail="R2 credentials not configured on server.")
+
     allowed_extensions = {".mp4", ".mov", ".avi", ".webm", ".mkv"}
-    ext = os.path.splitext(video.filename or "")[1].lower()
+    ext = os.path.splitext(filename)[1].lower()
     if ext not in allowed_extensions:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported video format. Allowed formats: {', '.join(allowed_extensions)}"
-        )
-    path = os.path.join(UPLOAD_DIR, f"input{ext}")
+        raise HTTPException(status_code=400, detail=f"Unsupported video format: {ext}")
 
-    # Stream to disk in 1 MB chunks — safe for very large (4 GB) files
-    with open(path, "wb") as out:
-        while True:
-            chunk = await video.read(1024 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
+    ts = int(time.time())
+    r2_key = f"video_uploads/{ts}_{os.path.basename(filename)}"
 
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=Config(signature_version="s3v4"),
+        region_name="auto",
+    )
+    presigned_url = s3.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": bucket_name, "Key": r2_key, "ContentType": content_type},
+        ExpiresIn=300,  # 5 minutes
+    )
+    print(f"[UPLOAD-URL] Generated presigned PUT URL for key: {r2_key}")
+    return {"url": presigned_url, "key": r2_key}
+
+
+class UploadVideoRequest(BaseModel):
+    r2_key: str
+    frames: int = 25
+    blur_thresh: int = 80
+
+
+@app.post("/upload_video", summary="Trigger frame extraction from an already-uploaded R2 video")
+async def upload_video(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    body: UploadVideoRequest,
+):
+    """
+    Accepts a JSON body with the R2 key of a video that the browser already PUT
+    directly to R2 via a presigned URL. Queues frame extraction on Modal.
+    No video bytes are transferred through this endpoint.
+    Poll `/status` for progress.
+    """
+    r2_key = body.r2_key
+    frames = body.frames
+    blur_thresh = body.blur_thresh
+
+    # Record when this request arrived for timing purposes
+    t_arrival = time.time()
+    upload_start = request.headers.get("X-Upload-Start-Time")
+    client_to_server_s = None
+    if upload_start:
+        try:
+            client_to_server_s = (t_arrival * 1000.0 - float(upload_start)) / 1000.0
+            print(f"[TIMING] Client R2 upload + notify latency: {client_to_server_s:.4f}s")
+        except Exception as e:
+            print(f"[TIMING] Failed to parse client start time: {e}")
+
+    print(f"[UPLOAD-VIDEO] Received r2_key={r2_key}, frames={frames}, blur_thresh={blur_thresh}")
     state["error"] = None
     state["cancel_requested"] = False
-    upd("extracting", "Video received, starting smart extraction…")
+    upd("extracting", "Video received on R2, starting smart extraction...")
     # BackgroundTasks dispatches sync callables to thread pool automatically
-    background_tasks.add_task(_extract_thread, path, frames, blur_thresh)
+    background_tasks.add_task(_extract_thread, r2_key, frames, blur_thresh, client_to_server_s)
     return {"queued": True}
 
-@app.post("/use_photos", summary="Upload photos directly as extracted frames")
-async def use_photos(photos: List[UploadFile] = File(...)):
-    """
-    Accepts a list of photos as direct input (skips video extraction step).
-    Poll `/status` for updated state.
-    """
-    if not photos:
-        raise HTTPException(status_code=400, detail="No photos provided")
-
-    for f in glob.glob(os.path.join(FRAMES_DIR, "*")):
-        os.remove(f)
-
-    for i, p in enumerate(photos):
-        data = await p.read()
-        with open(os.path.join(FRAMES_DIR, f"{i:04d}.jpg"), "wb") as out:
-            out.write(data)
-
-    n = len(photos)
-    state["frame_count"] = n
-    state["error"] = None
-    state["cancel_requested"] = False
-    upd("extracted", f"\u2713 {n} photos loaded")
-    return {"success": True, "count": n}
 
 @app.post("/reconstruct", summary="Start GPU reconstruction on extracted frames")
 async def reconstruct(
@@ -1483,6 +1518,7 @@ async def reconstruct(
     remove_bg_query: Optional[bool] = Query(default=None, alias="remove_background"),
     gps_lat_query: Optional[float] = Query(default=None, alias="gps_lat"),
     gps_lon_query: Optional[float] = Query(default=None, alias="gps_lon"),
+    iterations_query: Optional[int] = Query(default=None, alias="iterations"),
     optional_user: Optional[dict] = Depends(get_optional_user),
 ):
     """
@@ -1518,6 +1554,13 @@ async def reconstruct(
     width = body.width if body else None
     height = body.height if body else None
 
+    # Resolve iterations
+    iterations = 2000
+    if iterations_query is not None:
+        iterations = iterations_query
+    elif body and body.iterations is not None:
+        iterations = body.iterations
+
     # Resolve active plot session for auto-association has been deprecated and removed.
     plot_id = None
     claimed_by_user_id = optional_user["id"] if optional_user else None
@@ -1538,7 +1581,8 @@ async def reconstruct(
         width,
         height,
         plot_id,
-        claimed_by_user_id
+        claimed_by_user_id,
+        iterations
     )
     return {"started": True, "tree_code": final_code}
 
@@ -1628,67 +1672,6 @@ async def splat_proxy(tree_code: str, filename: str):
             raise HTTPException(status_code=404, detail="File not found in storage")
         raise HTTPException(status_code=500, detail=f"Failed to fetch from R2: {err_msg}")
 
-    # If it is points3d.ply, we intercept, filter on-the-fly, and return the clean version.
-    # The file in R2 remains raw (useful for future recalculations), while the viewer gets a clean cloud.
-    if filename.lower().endswith("points3d.ply"):
-        try:
-            content = await asyncio.to_thread(response["Body"].read)
-            import tempfile
-            import io
-            import json
-            from storage.d1_client import execute_d1_query
-            
-            # Fetch custom clicked center from D1 database if available
-            center_x = None
-            center_z = None
-            try:
-                sql = "SELECT geometry_3d FROM tree_scans WHERE tree_code = ? ORDER BY id DESC LIMIT 1"
-                scans = await asyncio.to_thread(execute_d1_query, sql, [tree_code])
-                if scans and scans[0].get("geometry_3d"):
-                    g3d = scans[0]["geometry_3d"]
-                    while isinstance(g3d, str) and g3d.strip():
-                        g3d = json.loads(g3d)
-                    if isinstance(g3d, dict):
-                        center_x = g3d.get("center_x")
-                        center_z = g3d.get("center_z")
-            except Exception as db_err:
-                print(f"[PROXY-FILTER ERROR] Failed to query geometry_3d for proxy: {db_err}")
-            
-            # Write raw content to a temp file
-            with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as tmp_f:
-                tmp_f.write(content)
-                tmp_path = tmp_f.name
-                
-            # Filter the PLY using the custom center (or auto peak fallback)
-            try:
-                await asyncio.to_thread(filter_points3d_ply, tmp_path, center_x, center_z)
-                
-                # Read filtered bytes
-                with open(tmp_path, "rb") as tmp_f:
-                    filtered_content = tmp_f.read()
-                    
-                # Clean up temp file
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-                    
-                headers = {
-                    "Cache-Control": "public, max-age=31536000, immutable",
-                    "Content-Length": str(len(filtered_content))
-                }
-                return StreamingResponse(io.BytesIO(filtered_content), media_type="application/x-ply", headers=headers)
-                
-            except Exception as filter_err:
-                print(f"[PROXY-FILTER ERROR] Failed to run filter: {filter_err}")
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-        except Exception as read_err:
-            print(f"[PROXY-FILTER ERROR] Failed to read/filter: {read_err}")
-
-    # Fallback/standard streaming response for other files (like result.ply)
     body = response["Body"]
 
     def iter_chunks():
@@ -1812,27 +1795,23 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             raise HTTPException(status_code=400, detail="Target scan does not have a splat file URL")
 
         # 2. Derive pointmap (.npy) and points3d (.ply) URLs from splat_file_url
-        if "_result.ply" in splat_file_url:
-            base_filename = splat_file_url.rsplit("/", 1)[-1]
-            timestamp = base_filename.split("_")[0]
-            pointmap_url = splat_file_url.replace("_result.ply", "_points3D_all.npy")
-            points3d_url = splat_file_url.replace("_result.ply", "_points3d.ply")
-        elif "result.ply" in splat_file_url:
-            base_filename = splat_file_url.rsplit("/", 1)[-1]
-            timestamp = base_filename.split("_")[0] if "_" in base_filename else "default"
-            pointmap_url = splat_file_url.replace("result.ply", "points3D_all.npy")
-            points3d_url = splat_file_url.replace("result.ply", "points3d.ply")
+        # 2. Derive pointmap (.npy) and points3d (.ply) URLs from splat_file_url robustly
+        base_url, filename = splat_file_url.rsplit("/", 1)
+        name_parts = filename.split("_", 1)
+        if len(name_parts) == 2:
+            timestamp = name_parts[0]
         else:
-            base_filename = splat_file_url.rsplit("/", 1)[-1]
-            timestamp = base_filename.split(".")[0]
-            pointmap_url = splat_file_url.replace(".ply", "_points3D_all.npy")
-            points3d_url = splat_file_url.replace(".ply", "_points3d.ply")
+            timestamp = filename.split(".")[0]
+        
+        pointmap_url = f"{base_url}/{timestamp}_points3D_all.npy"
+        points3d_url = f"{base_url}/{timestamp}_points3d.ply"
 
         # 3. Create temp local directories
         local_dir = os.path.join(UPLOAD_DIR, "recalculates")
         os.makedirs(local_dir, exist_ok=True)
         local_npy_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3D_all.npy")
         local_ply_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d.ply")
+        local_ply_highres_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d_highres.ply")
 
         # 4. Download dense pointmap (NPY) from R2 if not already cached locally
         if os.path.exists(local_npy_path) and os.path.getsize(local_npy_path) > 100000:
@@ -1856,25 +1835,34 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                     detail=f"Failed to download dense pointmap: {npy_err}"
                 )
 
-        # 5. Download the existing points3d.ply from R2 if not already cached locally
-        if os.path.exists(local_ply_path) and os.path.getsize(local_ply_path) > 1000:
-            print(f"[RECALCULATE] Found locally cached points3d.ply: {local_ply_path} — skipping download/filter.")
+        # 5. Download the existing points3d_highres.ply from R2 if not already cached locally
+        if os.path.exists(local_ply_highres_path) and os.path.getsize(local_ply_highres_path) > 1000:
+            print(f"[RECALCULATE] Found locally cached points3d_highres.ply: {local_ply_highres_path} — skipping download.")
         else:
-            print(f"[RECALCULATE] Downloading existing points3d.ply from {points3d_url}")
+            points3d_highres_url = points3d_url.replace("points3d.ply", "points3d_highres.ply")
+            print(f"[RECALCULATE] Downloading existing points3d_highres.ply from {points3d_highres_url}")
             try:
-                res_ply = requests.get(points3d_url, timeout=30)
-                if res_ply.status_code != 200:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Failed to download points3d.ply: HTTP {res_ply.status_code}"
-                    )
-                with open(local_ply_path, "wb") as f:
-                    f.write(res_ply.content)
-                print(f"[RECALCULATE] Successfully downloaded existing points3d.ply from R2")
+                res_ply = requests.get(points3d_highres_url, timeout=30)
+                if res_ply.status_code == 200:
+                    with open(local_ply_highres_path, "wb") as f:
+                        f.write(res_ply.content)
+                    print(f"[RECALCULATE] Successfully downloaded existing points3d_highres.ply from R2")
+                else:
+                    # Fallback to standard points3d.ply
+                    print(f"[RECALCULATE] points3d_highres.ply not found. Falling back to downloading standard points3d.ply from {points3d_url}")
+                    res_ply_std = requests.get(points3d_url, timeout=30)
+                    if res_ply_std.status_code != 200:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Failed to download points3d.ply: HTTP {res_ply_std.status_code}"
+                        )
+                    with open(local_ply_highres_path, "wb") as f:
+                        f.write(res_ply_std.content)
+                    print(f"[RECALCULATE] Successfully downloaded standard points3d.ply from R2 as fallback")
             except Exception as ply_err:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Failed to download points3d.ply: {ply_err}"
+                    detail=f"Failed to download points3d: {ply_err}"
                 )
 
         # 6. Load pointmap and perform coordinate mapping
@@ -1901,31 +1889,73 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             print(f"[RECALCULATE] Z-depth deviation ({abs(z_diff):.3f}m) > 1.5m. Background hit detected. Clamping Z2 to Z1.")
             P2_cam[2] = P1_cam[2]
 
-        # Align camera space to world space using ICP (raw-to-raw)
-        from carbon.dbh_extractor import register_pointmap_to_world, parse_ply_points
+        # Align camera space to world space using ICP (raw-to-raw) on Modal
         try:
-            pts_world_raw = parse_ply_points(local_ply_path)
+            print(f"[RECALCULATE] Reading point cloud files for offloaded Modal alignment/filtering...")
+            with open(local_ply_highres_path, "rb") as f:
+                ply_bytes = f.read()
+            with open(local_npy_path, "rb") as f:
+                points3d_all_bytes = f.read()
+
+            print(f"[RECALCULATE] Offloading alignment and filtering to Modal...")
+            import modal
+            fn_align = modal.Function.from_name("instantsplat-app", "align_and_filter_ply_modal")
+            res = fn_align.remote(ply_bytes, points3d_all_bytes, body.p1, body.p2, body.width, body.height)
             
-            # Use full pointmap and full pts_world_raw for raw-to-raw stability
-            R, t, s = register_pointmap_to_world(pointmap, pts_world_raw)
-            P1 = (s * (P1_cam @ R.T) + t).tolist()
-            P2 = (s * (P2_cam @ R.T) + t).tolist()
-            print(f"[RECALCULATE] ICP Alignment successful. P1_world={P1}, P2_world={P2}, Scale={s:.6f}")
+            P1 = res.get("P1")
+            P2 = res.get("P2")
+            filtered_ply = res.get("filtered_ply")
             
-            # Now filter the local point cloud file on disk by cropping around the clicked trunk center.
-            # This clean PLY will be passed to extract_dbh_with_2d_clicks.
-            filter_points3d_ply(local_ply_path, center_x=P1[0], center_z=P1[2])
-            print(f"[RECALCULATE] Cleaned local point cloud around clicked trunk center: {P1[0]:.3f}, {P1[2]:.3f}")
+            if filtered_ply:
+                with open(local_ply_highres_path, "wb") as f:
+                    f.write(filtered_ply)
+                print(f"[RECALCULATE] Saved high-res filtered point cloud from Modal ({len(filtered_ply)/1024:.1f} KB)")
+                # Generate decimated point cloud for display
+                decimate_ply_file(local_ply_highres_path, local_ply_path, target_count=300000)
+                
+                # Upload both the decimated points3d.ply and high-res version to R2 to update them
+                try:
+                    import shutil
+                    temp_upload_dir = os.path.join(local_dir, f"temp_upload_{timestamp}_{tree_code}")
+                    os.makedirs(temp_upload_dir, exist_ok=True)
+                    
+                    target_ply = os.path.join(temp_upload_dir, "points3d.ply")
+                    target_ply_highres = os.path.join(temp_upload_dir, "points3d_highres.ply")
+                    
+                    shutil.copy2(local_ply_path, target_ply)
+                    shutil.copy2(local_ply_highres_path, target_ply_highres)
+                    
+                    from storage.r2_client import upload_splat
+                    upload_splat(target_ply, tree_code, custom_timestamp=int(timestamp))
+                    upload_splat(target_ply_highres, tree_code, custom_timestamp=int(timestamp))
+                    print(f"[RECALCULATE] Uploaded updated points3d.ply and points3d_highres.ply to R2")
+                    
+                    # Clean up temp upload files
+                    shutil.rmtree(temp_upload_dir, ignore_errors=True)
+                except Exception as upload_err:
+                    print(f"[RECALCULATE] Failed to upload recalculated PLYs to R2: {upload_err}")
+                
+            if P1 and P2:
+                print(f"[RECALCULATE] ICP Alignment successful. P1_world={P1}, P2_world={P2}")
+            else:
+                raise ValueError("Modal did not return aligned coordinates")
         except Exception as align_err:
-            print(f"[RECALCULATE ERROR] ICP Alignment failed: {align_err}. Using camera-space fallback.")
+            print(f"[RECALCULATE ERROR] Offloaded ICP Alignment failed: {align_err}. Using local camera-space fallback.")
             P1 = P1_cam.tolist()
             P2 = P2_cam.tolist()
-            filter_points3d_ply(local_ply_path) # fallback to auto peak crop
+            try:
+                import shutil
+                shutil.copy(local_ply_highres_path, local_ply_path)
+                filter_points3d_ply(local_ply_path)
+                shutil.copy(local_ply_path, local_ply_highres_path)
+                decimate_ply_file(local_ply_highres_path, local_ply_path, target_count=300000)
+            except Exception as fb_err:
+                print(f"[RECALCULATE ERROR] Local fallback crop failed: {fb_err}")
 
         # 7. Perform DBH extraction with 2D clicks
         scale_factor, _is_cal2, _src2 = _load_scale_factor_for_scan(tree_code)
         res_override = extract_dbh_with_2d_clicks(
-            ply_path=local_ply_path,
+            ply_path=local_ply_highres_path,
             P1=np.array(P1),
             P2=np.array(P2),
             scale=scale_factor
@@ -2142,18 +2172,14 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
         splat_file_url = target_scan.get("splat_file_url")
         local_ply_path = ""
         if splat_file_url:
-            if "_result.ply" in splat_file_url:
-                base_filename = splat_file_url.rsplit("/", 1)[-1]
-                timestamp = base_filename.split("_")[0]
-                points3d_url = splat_file_url.replace("_result.ply", "_points3d.ply")
-            elif "result.ply" in splat_file_url:
-                base_filename = splat_file_url.rsplit("/", 1)[-1]
-                timestamp = base_filename.split("_")[0] if "_" in base_filename else "default"
-                points3d_url = splat_file_url.replace("result.ply", "points3d.ply")
+            base_url, filename = splat_file_url.rsplit("/", 1)
+            name_parts = filename.split("_", 1)
+            if len(name_parts) == 2:
+                timestamp = name_parts[0]
             else:
-                base_filename = splat_file_url.rsplit("/", 1)[-1]
-                timestamp = base_filename.split(".")[0]
-                points3d_url = splat_file_url.replace(".ply", "_points3d.ply")
+                timestamp = filename.split(".")[0]
+            
+            points3d_url = f"{base_url}/{timestamp}_points3d.ply"
 
             local_dir = os.path.join(UPLOAD_DIR, "recalculates")
             os.makedirs(local_dir, exist_ok=True)

@@ -312,6 +312,8 @@
             border-color: rgba(2,132,199,0.25);
         }
 
+
+
         /* Responsive controls layout for mobile viewports */
         @media (max-width: 768px) {
             .viewer-controls {
@@ -915,7 +917,7 @@
         // =========================================================================
         const urlParams = new URLSearchParams(window.location.search);
         let splatPath = urlParams.get('url') || urlParams.get('file') || 'output/result.ply';
-        const useProxy = urlParams.get('proxy') !== 'false';
+        const useProxy = urlParams.get('proxy') === 'true';
 
         // Rewrite R2 URLs to use the local server streaming proxy (bypasses ISP blocks and CORS policies)
         if (useProxy && splatPath.includes('/tree_scans/') && (splatPath.startsWith('http://') || splatPath.startsWith('https://')) && !splatPath.includes('localhost') && !splatPath.includes('127.0.0.1')) {
@@ -1202,6 +1204,8 @@
             if (pointCloudObj) {
                 pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
             }
+
+
             
             // Look for cadOverlay in syncGroup first, then fall back to scene root
             const cadOverlay = (syncGroup ? syncGroup.getObjectByName('cad_measurement_overlay') : null)
@@ -1460,8 +1464,8 @@
             }
 
             // If path is already a proxy path (/splat-proxy/...), no rewrite needed
-            // If it's an external R2 URL, rewrite to proxy
-            if (!pointsPath.startsWith('/splat-proxy/') && pointsPath.includes('/tree_scans/') && (pointsPath.startsWith('http://') || pointsPath.startsWith('https://'))) {
+            // If it's an external R2 URL, rewrite to proxy only if useProxy is enabled
+            if (useProxy && !pointsPath.startsWith('/splat-proxy/') && pointsPath.includes('/tree_scans/') && (pointsPath.startsWith('http://') || pointsPath.startsWith('https://'))) {
                 const parts = pointsPath.split('/tree_scans/');
                 if (parts.length === 2) {
                     const sub = parts[1].split('/');
@@ -1481,7 +1485,7 @@
                     // Material with vertex colors (falls back to cyan if no color)
                     const hasColors = geometry.attributes.color !== undefined;
                     const material = new THREE.PointsMaterial({
-                        size: 0.02,
+                        size: 0.01,
                         vertexColors: hasColors,
                         color: hasColors ? undefined : 0x38bdf8,
                         transparent: true,

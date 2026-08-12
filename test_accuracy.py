@@ -340,9 +340,9 @@ def test_2d_clicks_short_trunk_clamp():
         check("short trunk -> h_target DI DALAM [h_min,h_max] (tidak melayang di atas)",
               (h_t >= h_min - 1e-6) and (h_t <= h_max + 1e-6),
               f"(h_target={h_t:.4f}, h_min={h_min:.4f}, h_max={h_max:.4f})")
-        check("short trunk -> h_target = h_min + 0.30*total_h (clamp aktif)",
-              abs(h_t - (h_min + 0.30 * total_h)) < 1e-6,
-              f"(h_target={h_t:.4f}, expected={h_min + 0.30 * total_h:.4f})")
+        check("short trunk -> h_target = h_min + 0.50*total_h (clamp aktif)",
+              abs(h_t - (h_min + 0.50 * total_h)) < 1e-6,
+              f"(h_target={h_t:.4f}, expected={h_min + 0.50 * total_h:.4f})")
         check("short trunk -> clamp condition benar (1.3 m >= 90% total_h)",
               (1.3 / 1.0) >= total_h * 0.90, f"(1.3 >= {total_h * 0.90:.4f})")
         check("short trunk -> method pakai slice fit (bukan '2D fallback')",

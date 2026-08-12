@@ -1,5 +1,8 @@
 import os
+import time
 import modal
+
+global_import_time = time.time()
 
 app = modal.App("instantsplat-app")
 progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
@@ -11,7 +14,7 @@ GPU_CONFIG = "a10g"
 image = (
     modal.Image.from_registry("dockerzhiwen/instantsplat_public:2.0")
     .run_commands(
-        "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git libgl1-mesa-glx libglib2.0-0",
+        "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git libgl1-mesa-glx libglib2.0-0 ffmpeg",
         "git clone --recursive https://github.com/NVlabs/InstantSplat.git /workspace/InstantSplat",
         "/opt/conda/bin/pip install 'numpy==1.26.0' open3d plyfile icecream pyquaternion configargparse rembg mediapipe opencv-python-headless boto3",
         "TORCH_CUDA_ARCH_LIST='7.0;7.5;8.0;8.6;8.9' /opt/conda/bin/pip install --no-build-isolation --no-deps /workspace/InstantSplat/submodules/simple-knn",
@@ -34,13 +37,17 @@ image = (
         "print('Downloading u2net.onnx...'); "
         "urllib.request.urlretrieve(url, t) if not os.path.exists(t) else print('exists');\""
     )
+    .run_commands(
+        "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y curl",
+        "curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs",
+        "git clone https://github.com/mkkellogg/GaussianSplats3D.git /workspace/GaussianSplats3D && cd /workspace/GaussianSplats3D && npm install && npm run build"
+    )
 )
 
 def detect_person_pose(frame_path):
     import cv2
-    import mediapipe as mp
     try:
-        mp_pose = mp.solutions.pose
+        import mediapipe.solutions.pose as mp_pose
         with mp_pose.Pose(
             static_image_mode=True,
             model_complexity=2,
@@ -280,7 +287,7 @@ def upload_to_r2(file_path: str, tree_code: str, custom_timestamp: int = None, i
     timeout=1800,  # 30 minutes
     image=image
 )
-def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", remove_background: bool = False, r2_config: dict = None) -> dict:
+def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", remove_background: bool = False, r2_config: dict = None, iterations: int = 2000) -> dict:
     import os
     import time
     import shutil
@@ -522,12 +529,12 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
         "python3", seed_wrapper_path, "train.py",
         "--source_path", source_path,
         "--model_path", output_dir,
-        "--iterations", "7000",
+        "--iterations", str(iterations),
         "--n_views", str(detected_n_views),
         "--optim_pose",
-        "--test_iterations", "7000"
+        "--test_iterations", str(iterations)
     ]
-    run_command(train_cmd, "Fast 3D-Gaussian Optimization (train.py)")
+    run_command(train_cmd, f"Fast 3D-Gaussian Optimization (train.py) with {iterations} iterations")
     
     # 5. Exporting results
     print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] --- Locating output file ---")
@@ -781,8 +788,28 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
         # Non-fatal: if cleanup fails, we still return the unfiltered PLY
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: outlier removal failed ({cleanup_err}), returning unfiltered PLY")
 
-    with open(output_file_path, "rb") as f:
-        splat_data = f.read()
+    # Convert PLY to KSPLAT
+    ksplat_path = output_file_path.replace(".ply", ".ksplat")
+    splat_data = b""
+    try:
+        conv_cmd = [
+            "node", "/workspace/GaussianSplats3D/util/create-ksplat.js",
+            output_file_path, ksplat_path,
+            "1", "1"
+        ]
+        conv_res = subprocess.run(conv_cmd, capture_output=True, text=True)
+        if conv_res.returncode == 0:
+            with open(ksplat_path, "rb") as f:
+                splat_data = f.read()
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KSPLAT conversion successful: {len(splat_data):,} bytes")
+        else:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KSPLAT conversion failed: {conv_res.stderr}. Returning raw PLY instead.")
+            with open(output_file_path, "rb") as f:
+                splat_data = f.read()
+    except Exception as conv_err:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KSPLAT conversion exception: {conv_err}. Returning raw PLY instead.")
+        with open(output_file_path, "rb") as f:
+            splat_data = f.read()
 
     # Locate the MASt3R plain xyz+rgb point cloud produced by init_geo.py.
     # init_geo may save it as "result.ply" in output_dir or source_path,
@@ -892,7 +919,26 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Uploading files directly to Cloudflare R2 from Modal...")
         try:
             if output_file_path and os.path.exists(output_file_path):
-                splat_url = upload_to_r2(output_file_path, tree_code, custom_timestamp=ts, custom_filename="result.ply")
+                # Convert PLY to KSPLAT on Modal
+                ksplat_path = output_file_path.replace(".ply", ".ksplat")
+                try:
+                    import subprocess
+                    conv_cmd = [
+                        "node", "/workspace/GaussianSplats3D/util/create-ksplat.js",
+                        output_file_path, ksplat_path,
+                        "1", "1"  # compression level = 1, alpha removal threshold = 1
+                    ]
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Converting splat PLY to KSPLAT: {' '.join(conv_cmd)}")
+                    conv_res = subprocess.run(conv_cmd, capture_output=True, text=True)
+                    if conv_res.returncode == 0:
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KSPLAT conversion successful: {os.path.getsize(ksplat_path):,} bytes")
+                        splat_url = upload_to_r2(ksplat_path, tree_code, custom_timestamp=ts, custom_filename="result.ksplat")
+                    else:
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KSPLAT conversion failed: {conv_res.stderr}. Uploading raw PLY instead.")
+                        splat_url = upload_to_r2(output_file_path, tree_code, custom_timestamp=ts, custom_filename="result.ply")
+                except Exception as conv_err:
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KSPLAT conversion exception: {conv_err}. Uploading raw PLY instead.")
+                    splat_url = upload_to_r2(output_file_path, tree_code, custom_timestamp=ts, custom_filename="result.ply")
             if len(mast3r_candidates) > 0 and os.path.exists(mast3r_candidates[0]):
                 points3d_url = upload_to_r2(mast3r_candidates[0], tree_code, custom_timestamp=ts, custom_filename="points3d.ply")
             npy_path = None
@@ -934,6 +980,7 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
 
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] --- Export completed successfully ---")
     return {
+        "uploaded": True if r2_config else False,
         "splat": splat_data if not r2_config else b"",
         "points3d": points3d_data if not r2_config else b"",
         "points3d_all": points3d_all_data if not r2_config else b"",
@@ -942,9 +989,583 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
         "points3d_url": points3d_url,
         "points3d_all_url": points3d_all_url,
         "thumbnail_url": thumbnail_url,
-        "uploaded": bool(r2_config),
         "timestamp": ts,
     }
+
+
+@app.function(
+    image=image,
+    timeout=300,
+    cpu=2.0
+)
+def extract_video_frames_modal(
+    video_bytes: bytes,
+    target: int,
+    blur_thresh: int,
+    t_server_before_call: float = None,
+    r2_key: str = None,
+    r2_config: dict = None,
+) -> dict:
+    """Extract sharp, well-overlapping frames from a video.
+
+    Two modes:
+    - Legacy (video_bytes not None): receives raw bytes serialised through Modal call.
+    - New (r2_key + r2_config): downloads directly from R2, skips the serialisation overhead.
+
+    After downloading, 4K (>1080p height) footage is pre-downscaled to 1080p via ffmpeg
+    before the CV2 frame-scoring loop, cutting compute time ~3-4x.
+    """
+    import time
+    t_modal_enter = time.time()
+    import os
+    import cv2
+    import numpy as np
+    import shutil
+    import tempfile
+    import subprocess
+    from concurrent.futures import ThreadPoolExecutor
+
+    temp_dir = tempfile.mkdtemp()
+    video_path = os.path.join(temp_dir, "input_video.mp4")
+
+    # --- Step 1: Obtain video from R2 or legacy bytes ---
+    if r2_key and r2_config:
+        import boto3
+        from botocore.config import Config as BotoConfig
+        t_dl_start = time.time()
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=f"https://{r2_config['CLOUDFLARE_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+            aws_access_key_id=r2_config["R2_ACCESS_KEY_ID"],
+            aws_secret_access_key=r2_config["R2_SECRET_ACCESS_KEY"],
+            config=BotoConfig(signature_version="s3v4"),
+            region_name="auto",
+        )
+        s3.download_file(r2_config["R2_BUCKET_NAME"], r2_key, video_path)
+        t_dl_end = time.time()
+        file_mb = os.path.getsize(video_path) / 1024 / 1024
+        print(f"[TIMING] R2 download to Modal: {t_dl_end - t_dl_start:.4f}s for {file_mb:.2f} MB")
+    else:
+        # Legacy: bytes passed directly through Modal serialisation
+        with open(video_path, "wb") as f:
+            f.write(video_bytes)
+
+    # --- Step 2: Pre-downscale 4K -> 1080p with ffmpeg (Fix 2) ---
+    # This reduces CV2 decode cost ~4x for 3840x2160 inputs at the cost of ~5s ffmpeg step.
+    # 1080p is more than sufficient for MASt3R (internally works at 512px).
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=height", "-of", "default=noprint_wrappers=1:nokey=1",
+             video_path],
+            capture_output=True, text=True, timeout=30
+        )
+        native_h = int(probe.stdout.strip()) if probe.stdout.strip().isdigit() else 0
+    except Exception:
+        native_h = 0
+
+    if native_h > 1080:
+        downscaled_path = os.path.join(temp_dir, "input_1080p.mp4")
+        t_ff_start = time.time()
+        try:
+            res = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-vf", "scale=-2:1080",          # scale height to 1080, maintain AR
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-crf", "18",                    # near-lossless quality
+                    "-an",                           # drop audio (not needed)
+                    downscaled_path,
+                ],
+                capture_output=True, text=True, timeout=120
+            )
+            if res.returncode == 0:
+                t_ff_end = time.time()
+                print(f"[TIMING] ffmpeg downscale {native_h}p -> 1080p: {t_ff_end - t_ff_start:.4f}s")
+                video_path = downscaled_path
+            else:
+                print(f"[WARNING] ffmpeg downscale failed with exit code {res.returncode}. Falling back to original video.")
+                print(f"ffmpeg stdout: {res.stdout}")
+                print(f"ffmpeg stderr: {res.stderr}")
+        except Exception as e:
+            print(f"[WARNING] ffmpeg downscale raised exception: {e}. Falling back to original video.")
+    else:
+        print(f"[TIMING] ffmpeg downscale skipped (native height={native_h}p <= 1080p)")
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError("Cannot open video in Modal container")
+
+        orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        step = max(1, int(total_frames / (target * 2.0)))
+
+        # 1. Read frames sequentially in a single pass to avoid opening the video file multiple times
+        frames_to_process = []
+        fi = 0
+        while True:
+            ok = cap.grab()
+            if not ok:
+                break
+            if fi % step == 0:
+                ok_ret, frame = cap.retrieve()
+                if ok_ret and frame is not None:
+                    # Resize immediately to max 1920 width to save memory
+                    h, w = frame.shape[:2]
+                    if w > 1920:
+                        frame = cv2.resize(frame, (1920, int(h * 1920 / w)))
+                    frames_to_process.append((fi, frame))
+            fi += 1
+        
+        cap.release()
+
+        def process_decoded_frame(args):
+            frame_idx, frame = args
+            h, w = frame.shape[:2]
+            
+            # Compute blur score
+            if w > 960:
+                f_resized = cv2.resize(frame, (960, int(h * 960 / w)), interpolation=cv2.INTER_NEAREST)
+            else:
+                f_resized = frame
+            gray = cv2.cvtColor(f_resized, cv2.COLOR_BGR2GRAY)
+            blur_score = cv2.Laplacian(gray, cv2.CV_32F).var()
+            
+            if blur_score >= blur_thresh:
+                ok_enc, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                if ok_enc:
+                    return (frame_idx, blur_score, encoded_img.tobytes())
+            return None
+
+        # Execute in parallel to speed up Laplacian scoring significantly
+        candidates = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = executor.map(process_decoded_frame, frames_to_process)
+            for res in results:
+                if res is not None:
+                    candidates.append(res)
+
+        # Sort candidates by frame index
+        candidates.sort(key=lambda x: x[0])
+
+        if not candidates:
+            raise ValueError(f"No sharp frames found with blur_thresh={blur_thresh}")
+
+        # 2. Overlap Validation & Resampling using ORB
+        orb = cv2.ORB_create(nfeatures=1000)
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+
+        n = min(target, len(candidates))
+        idxs = list(np.linspace(0, len(candidates) - 1, n, dtype=int))
+
+        current_idxs = list(idxs)
+        added_count = 0
+        max_added = 10
+        i = 0
+        gaps_detected = []
+        threshold = 0.15
+
+        while i < len(current_idxs) - 1 and added_count < max_added:
+            idx_a = current_idxs[i]
+            idx_b = current_idxs[i+1]
+
+            if idx_b - idx_a <= 1:
+                i += 1
+                continue
+
+            raw_a = candidates[idx_a][2]
+            raw_b = candidates[idx_b][2]
+
+            gray_a = cv2.imdecode(np.frombuffer(raw_a, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+            gray_b = cv2.imdecode(np.frombuffer(raw_b, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+
+            h_a, w_a = gray_a.shape[:2]
+            if w_a > 640:
+                gray_a = cv2.resize(gray_a, (640, int(h_a * 640 / w_a)))
+            h_b, w_b = gray_b.shape[:2]
+            if w_b > 640:
+                gray_b = cv2.resize(gray_b, (640, int(h_b * 640 / w_b)))
+
+            kp1, des1 = orb.detectAndCompute(gray_a, None)
+            kp2, des2 = orb.detectAndCompute(gray_b, None)
+
+            if des1 is None or des2 is None:
+                ratio = 0.0
+            else:
+                matches = bf.match(des1, des2)
+                good_matches = [m for m in matches if m.distance < 50]
+                min_features = min(len(kp1), len(kp2))
+                ratio = len(good_matches) / max(1, min_features)
+
+            if ratio < threshold:
+                idx_mid = (idx_a + idx_b) // 2
+                current_idxs.insert(i + 1, idx_mid)
+                added_count += 1
+                gaps_detected.append(f"Gap between frames {i} and {i+1} ({ratio*100:.1f}% overlap)")
+                i += 2
+            else:
+                i += 1
+
+        overlap_warning = None
+        if gaps_detected:
+            overlap_warning = f"[WARNING] Low overlap warning: {len(gaps_detected)} gaps detected. Resampled +{added_count} frames. Try slower/steadier capture next time."
+
+        final_frames_bytes = [candidates[idx][2] for idx in current_idxs]
+
+        return {
+            "frames": final_frames_bytes,
+            "overlap_warning": overlap_warning,
+            "t_modal_enter": t_modal_enter,
+            "t_modal_exit": time.time(),
+            "global_import_time": global_import_time
+        }
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        # Clean up the temporary video_uploads/ key from R2 after successful processing
+        if r2_key and r2_config:
+            try:
+                s3.delete_object(Bucket=r2_config["R2_BUCKET_NAME"], Key=r2_key)
+                print(f"[CLEANUP] Deleted temp R2 key: {r2_key}")
+            except Exception as cleanup_err:
+                print(f"[CLEANUP] Failed to delete R2 key {r2_key}: {cleanup_err}")
+
+
+@app.function(
+    image=image,
+    timeout=180,
+    cpu=1.0
+)
+def align_and_filter_ply_modal(
+    ply_bytes: bytes,
+    points3d_all_bytes: bytes,
+    p1: list[float] = None,
+    p2: list[float] = None,
+    width: int = None,
+    height: int = None,
+) -> dict:
+    import os
+    import io
+    import numpy as np
+    import tempfile
+    import shutil
+    from scipy.spatial import KDTree
+
+    temp_dir = tempfile.mkdtemp()
+    temp_ply_path = os.path.join(temp_dir, "temp_points3d.ply")
+    with open(temp_ply_path, "wb") as f:
+        f.write(ply_bytes)
+
+    # 1. Parse raw PLY
+    def parse_ply_points_local(ply_path):
+        with open(ply_path, "rb") as f:
+            raw_props = []
+            num_vertices = 0
+            is_binary = False
+            while True:
+                line = f.readline().decode("ascii", errors="ignore").strip()
+                if line.startswith("format binary_little_endian"):
+                    is_binary = True
+                elif line.startswith("element vertex"):
+                    num_vertices = int(line.split()[-1])
+                elif line.startswith("property"):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        raw_props.append((parts[1], parts[2]))
+                elif line == "end_header":
+                    break
+            if num_vertices <= 0:
+                raise ValueError("No vertices in header")
+            
+            dtype_map = []
+            for p_type, p_name in raw_props:
+                if p_type in ("float", "float32"):   dtype_map.append((p_name, "<f4"))
+                elif p_type in ("int", "int32", "uint"): dtype_map.append((p_name, "<i4"))
+                elif p_type in ("uchar", "uint8"):   dtype_map.append((p_name, "u1"))
+                else:                                 dtype_map.append((p_name, "<f4"))
+            
+            vertex_data = np.fromfile(f, dtype=np.dtype(dtype_map), count=num_vertices)
+            return vertex_data, raw_props, num_vertices
+
+    try:
+        vertex_data, raw_props, num_vertices = parse_ply_points_local(temp_ply_path)
+        x = vertex_data['x']
+        y = vertex_data['y']
+        z = vertex_data['z']
+        pts_world_raw = np.column_stack((x, y, z))
+
+        # 2. Map coordinates and align if p1 and p2 are provided and points3d_all_bytes is available
+        P1_aligned = None
+        P2_aligned = None
+        R = np.eye(3)
+        t = np.zeros(3)
+        s = 1.0
+        
+        # Umeyama SVD fit function
+        def umeyama_fit(A, B):
+            n = A.shape[0]
+            centroid_A = np.mean(A, axis=0)
+            centroid_B = np.mean(B, axis=0)
+            AA = A - centroid_A
+            BB = B - centroid_B
+            var_A = np.mean(np.sum(AA**2, axis=1))
+            if var_A < 1e-8:
+                return np.eye(3), np.zeros(3), 1.0
+            H = (AA.T @ BB) / n
+            U, S, Vt = np.linalg.svd(H)
+            R_fit = Vt.T @ U.T
+            if np.linalg.det(R_fit) < 0:
+                Vt[2, :] *= -1
+                R_fit = Vt.T @ U.T
+            d = np.ones(3)
+            if np.linalg.det(H) < 0:
+                d[2] = -1
+            s_fit = float(np.sum(S * d) / var_A)
+            t_fit = centroid_B - s_fit * (R_fit @ centroid_A)
+            return R_fit, t_fit, s_fit
+
+        # ICP function
+        def register_pointmap_to_world_local(pointmap, pts_world, max_iterations=25, subsample=1500):
+            if len(pointmap.shape) == 3:
+                valid_mask = ~np.all(pointmap == 0, axis=-1) & ~np.any(np.isnan(pointmap), axis=-1)
+                pts_cam = pointmap[valid_mask]
+            else:
+                pts_cam = pointmap
+            if len(pts_cam) < 10 or len(pts_world) < 10:
+                return np.eye(3), np.zeros(3), 1.0
+            if len(pts_cam) > subsample:
+                rng = np.random.default_rng(42)
+                idx = rng.choice(len(pts_cam), size=subsample, replace=False)
+                src = pts_cam[idx]
+            else:
+                src = pts_cam
+            dst = pts_world
+            tree = KDTree(dst)
+            R_fit = np.eye(3)
+            t_fit = np.mean(dst, axis=0) - np.mean(src, axis=0)
+            s_fit = 1.0
+            dist_threshold = 0.5
+            for _ in range(max_iterations):
+                src_transformed = s_fit * (src @ R_fit.T) + t_fit
+                distances, indices = tree.query(src_transformed, k=1, workers=-1)
+                valid = distances < dist_threshold
+                if np.sum(valid) < 10:
+                    break
+                src_corr = src[valid]
+                dst_corr = dst[indices[valid]]
+                R_fit, t_fit, s_fit = umeyama_fit(src_corr, dst_corr)
+            return R_fit, t_fit, s_fit
+
+        def map_pixel_to_cropped_local(u_org, v_org, W1, H1, W_crop, H_crop, size=512):
+            scale = size / max(W1, H1)
+            W_resized = int(round(W1 * scale))
+            H_resized = int(round(H1 * scale))
+            cx, cy = W_resized // 2, H_resized // 2
+            halfw = (cx // 8) * 8
+            halfh = (cy // 8) * 8
+            left = cx - halfw
+            top = cy - halfh
+            u_crop = u_org * scale - left
+            v_crop = v_org * scale - top
+            u_crop = max(0, min(W_crop - 1, int(round(u_crop))))
+            v_crop = max(0, min(H_crop - 1, int(round(v_crop))))
+            return u_crop, v_crop
+
+        def get_robust_3d_point_local(pointmap, u, v, window=15):
+            H, W, _ = pointmap.shape
+            points = []
+            for du in range(-window//2, window//2 + 1):
+                for dv in range(-window//2, window//2 + 1):
+                    nu, nv = u + du, v + dv
+                    if 0 <= nu < W and 0 <= nv < H:
+                        pt = pointmap[nv, nu]
+                        if not np.all(pt == 0) and not np.any(np.isnan(pt)):
+                            points.append(pt)
+            if len(points) == 0:
+                for r in range(1, 51):
+                    found = False
+                    for du in range(-r, r + 1):
+                        for dv in [-r, r]:
+                            nu, nv = u + du, v + dv
+                            if 0 <= nu < W and 0 <= nv < H:
+                                pt = pointmap[nv, nu]
+                                if not np.all(pt == 0) and not np.any(np.isnan(pt)):
+                                    points.append(pt)
+                                    found = True
+                    for dv in range(-r + 1, r):
+                        for du in [-r, r]:
+                            nu, nv = u + du, v + dv
+                            if 0 <= nu < W and 0 <= nv < H:
+                                pt = pointmap[nv, nu]
+                                if not np.all(pt == 0) and not np.any(np.isnan(pt)):
+                                    points.append(pt)
+                                    found = True
+                    if found:
+                        break
+            if len(points) == 0:
+                return pointmap[v, u]
+            points = sorted(points, key=lambda p: p[2])
+            n_keep = max(1, int(len(points) * 0.3))
+            return np.mean(points[:n_keep], axis=0)
+
+        # Main processing flow inside Modal function
+        center_x = None
+        center_z = None
+        
+        if p1 is not None and p2 is not None and points3d_all_bytes and len(points3d_all_bytes) > 100:
+            try:
+                pts3d = np.load(io.BytesIO(points3d_all_bytes))
+                N_f, H_crop, W_crop, _ = pts3d.shape
+                valid_counts = np.array([
+                    np.sum(~np.all(pts3d[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d[i]), axis=-1))
+                    for i in range(N_f)
+                ])
+                repr_idx = int(np.argmax(valid_counts))
+                pointmap = pts3d[repr_idx]
+
+                u1_crop, v1_crop = map_pixel_to_cropped_local(p1[0], p1[1], width, height, W_crop, H_crop)
+                u2_crop, v2_crop = map_pixel_to_cropped_local(p2[0], p2[1], width, height, W_crop, H_crop)
+
+                P1_cam = get_robust_3d_point_local(pointmap, u1_crop, v1_crop)
+                P2_cam = get_robust_3d_point_local(pointmap, u2_crop, v2_crop)
+
+                z_diff = P2_cam[2] - P1_cam[2]
+                if abs(z_diff) > 1.5:
+                    P2_cam[2] = P1_cam[2]
+
+                R, t, s = register_pointmap_to_world_local(pointmap, pts_world_raw)
+                P1_val = s * (P1_cam @ R.T) + t
+                P2_val = s * (P2_cam @ R.T) + t
+                P1_aligned = P1_val.tolist()
+                P2_aligned = P2_val.tolist()
+                center_x = P1_val[0]
+                center_z = P1_val[2]
+            except Exception as e:
+                print(f"[MODAL-ICP-ERROR] ICP Alignment failed: {e}")
+
+        # 3. Apply PLY filtering (cropping & outlier removal)
+        proj_axes = [0, 2]
+        rough_axis_idx = 1
+        
+        if center_x is not None and center_z is not None:
+            peak_h1 = center_x
+            peak_h2 = center_z
+        else:
+            h1_all = pts_world_raw[:, proj_axes[0]]
+            h2_all = pts_world_raw[:, proj_axes[1]]
+            hist, xedges, yedges = np.histogram2d(h1_all, h2_all, bins=30)
+            max_idx = np.unravel_index(np.argmax(hist), hist.shape)
+            rough_peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
+            rough_peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
+
+            ROUGH_CROP_RADIUS = 2.2
+            dist_sq_rough = (pts_world_raw[:, proj_axes[0]] - rough_peak_h1)**2 + (pts_world_raw[:, proj_axes[1]] - rough_peak_h2)**2
+            rough_cropped = pts_world_raw[dist_sq_rough <= ROUGH_CROP_RADIUS**2]
+            if len(rough_cropped) < 100:
+                rough_cropped = pts_world_raw
+
+            rough_y = rough_cropped[:, rough_axis_idx]
+            y_min = np.percentile(rough_y, 1)
+            y_max = np.percentile(rough_y, 99)
+            y_height = y_max - y_min
+
+            lower_mask = rough_y >= (y_max - y_height * 0.35)
+            lower_xyz = rough_cropped[lower_mask]
+            if len(lower_xyz) < 100:
+                lower_xyz = rough_cropped
+
+            h1 = lower_xyz[:, proj_axes[0]]
+            h2 = lower_xyz[:, proj_axes[1]]
+
+            hist_ref, xedges_ref, yedges_ref = np.histogram2d(h1, h2, bins=30)
+            max_idx_ref = np.unravel_index(np.argmax(hist_ref), hist_ref.shape)
+            peak_h1 = 0.5 * (xedges_ref[max_idx_ref[0]] + xedges_ref[max_idx_ref[0] + 1])
+            peak_h2 = 0.5 * (yedges_ref[max_idx_ref[1]] + yedges_ref[max_idx_ref[1] + 1])
+
+        dist_sq = (pts_world_raw[:, proj_axes[0]] - peak_h1)**2 + (pts_world_raw[:, proj_axes[1]] - peak_h2)**2
+        CROP_RADIUS = 1.0
+        crop_mask = dist_sq <= CROP_RADIUS**2
+
+        if np.sum(crop_mask) < 20:
+            crop_mask = np.ones(len(pts_world_raw), dtype=bool)
+
+        filtered_vertex_data = vertex_data[crop_mask]
+        filtered_xyz = pts_world_raw[crop_mask]
+
+        if len(filtered_xyz) >= 20:
+            tree = KDTree(filtered_xyz)
+            nb_neighbors = 20
+            std_ratio = 2.0
+            distances, _ = tree.query(filtered_xyz, k=nb_neighbors + 1, workers=-1)
+            mean_dists = distances[:, 1:].mean(axis=1)
+
+            global_mean = mean_dists.mean()
+            global_std  = mean_dists.std()
+            threshold   = global_mean + std_ratio * global_std
+
+            inlier_mask = mean_dists <= threshold
+            filtered_vertex_data = filtered_vertex_data[inlier_mask]
+
+        # 4. Save filtered PLY back to bytes
+        n_filtered = len(filtered_vertex_data)
+        header_lines = [
+            "ply",
+            "format binary_little_endian 1.0",
+            f"element vertex {n_filtered}",
+        ]
+        for p_type, p_name in raw_props:
+            header_lines.append(f"property {p_type} {p_name}")
+        header_lines.append("end_header")
+        header_enc = "\n".join(header_lines) + "\n"
+
+        filtered_ply_bytes = header_enc.encode("ascii") + filtered_vertex_data.tobytes()
+
+        return {
+            "P1": P1_aligned,
+            "P2": P2_aligned,
+            "filtered_ply": filtered_ply_bytes
+        }
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@app.function(image=image)
+def convert_ply_on_modal(ply_bytes: bytes) -> bytes:
+    import subprocess
+    import tempfile
+    import os
+    
+    with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as temp_in:
+        temp_in.write(ply_bytes)
+        temp_in_path = temp_in.name
+        
+    temp_out_path = temp_in_path.replace(".ply", ".ksplat")
+    
+    cmd = [
+        "node", "/workspace/GaussianSplats3D/util/create-ksplat.js",
+        temp_in_path, temp_out_path,
+        "1", "1"
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        try:
+            os.remove(temp_in_path)
+        except:
+            pass
+        raise RuntimeError(f"KSplat conversion failed: {res.stderr}")
+        
+    with open(temp_out_path, "rb") as f:
+        ksplat_bytes = f.read()
+        
+    try:
+        os.remove(temp_in_path)
+        os.remove(temp_out_path)
+    except:
+        pass
+        
+    return ksplat_bytes
 
 
 @app.local_entrypoint()
