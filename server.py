@@ -17,7 +17,7 @@ from typing import Any, List, Optional
 import cv2
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Query, UploadFile, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import boto3
@@ -668,7 +668,7 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
 
 
 # ── Background thread: frame extraction (sync, CPU+IO heavy) ─────────────────
-def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
+def _extract_thread(video_path: str, target: int, blur_thresh: int, client_to_server_s: float = None) -> None:
     try:
         upd("extracting", "Reading video file...")
         t_read_start = time.time()
@@ -681,9 +681,33 @@ def _extract_thread(video_path: str, target: int, blur_thresh: int) -> None:
         t_modal_start = time.time()
         import modal
         fn = modal.Function.from_name("instantsplat-app", "extract_video_frames_modal")
-        res = fn.remote(video_bytes, target, blur_thresh)
+        res = fn.remote(video_bytes, target, blur_thresh, t_modal_start)
         t_modal_end = time.time()
-        print(f"[TIMING] Modal remote frame extraction call: {t_modal_end - t_modal_start:.4f}s")
+
+        t_modal_enter = res.get("t_modal_enter")
+        t_modal_exit = res.get("t_modal_exit")
+        global_import_time = res.get("global_import_time")
+
+        # Calculate sub-phases
+        modal_scheduling_cold_start = 0.0
+        modal_transfer_in = 0.0
+        modal_compute = 0.0
+        modal_transfer_out = 0.0
+
+        if t_modal_enter and t_modal_exit and global_import_time:
+            modal_scheduling_cold_start = global_import_time - t_modal_start
+            modal_transfer_in = t_modal_enter - global_import_time
+            modal_compute = t_modal_exit - t_modal_enter
+            modal_transfer_out = t_modal_end - t_modal_exit
+
+        print(f"[TIMING] Modal remote frame extraction call complete.")
+        if client_to_server_s is not None:
+            print(f"  - (a) Client -> Server Upload : {client_to_server_s:.4f}s")
+        print(f"  - Total Modal Roundtrip       : {t_modal_end - t_modal_start:.4f}s")
+        print(f"  - (c) Modal Scheduling / Cold : {modal_scheduling_cold_start:.4f}s")
+        print(f"  - (b) Request Upload to Modal : {modal_transfer_in:.4f}s")
+        print(f"  - (d) Modal CV2 Compute       : {modal_compute:.4f}s")
+        print(f"  - Response Download           : {modal_transfer_out:.4f}s")
 
         frames = res.get("frames", [])
         overlap_warning = res.get("overlap_warning")
@@ -1372,6 +1396,7 @@ async def status():
 
 @app.post("/upload_video", summary="Upload a video and start frame extraction")
 async def upload_video(
+    request: Request,
     background_tasks: BackgroundTasks,
     video: UploadFile = File(..., description="Video file (MP4/MOV/AVI/WEBM/MKV, up to 4 GB)"),
     frames: int = Form(default=25, description="Target number of frames to extract"),
@@ -1391,6 +1416,17 @@ async def upload_video(
     path = os.path.join(UPLOAD_DIR, f"input{ext}")
 
     t_start = time.time()
+    
+    # Calculate client-to-server transfer time
+    upload_start = request.headers.get("X-Upload-Start-Time")
+    client_to_server_s = None
+    if upload_start:
+        try:
+            client_to_server_s = (t_start * 1000.0 - float(upload_start)) / 1000.0
+            print(f"[TIMING] Client-to-server video upload transfer: {client_to_server_s:.4f}s")
+        except Exception as e:
+            print(f"[TIMING] Failed to parse client start time: {e}")
+
     total_bytes = 0
     # Stream to disk in 1 MB chunks — safe for very large (4 GB) files
     with open(path, "wb") as out:
@@ -1407,7 +1443,7 @@ async def upload_video(
     state["cancel_requested"] = False
     upd("extracting", "Video received, starting smart extraction…")
     # BackgroundTasks dispatches sync callables to thread pool automatically
-    background_tasks.add_task(_extract_thread, path, frames, blur_thresh)
+    background_tasks.add_task(_extract_thread, path, frames, blur_thresh, client_to_server_s)
     return {"queued": True}
 
 
