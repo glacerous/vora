@@ -1279,17 +1279,26 @@ app.add_middleware(
 )
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-from fastapi import Cookie, Depends, HTTPException, status
+from fastapi import Cookie, Depends, Header, HTTPException, status
 import secrets
 import json
 
-async def get_optional_user(session_token: Optional[str] = Cookie(None)):
-    if not session_token:
+async def get_optional_user(
+    session_token: Optional[str] = Cookie(None),
+    authorization: Optional[str] = Header(None)
+):
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    else:
+        token = session_token
+
+    if not token:
         return None
     try:
         from storage.d1_client import execute_d1_query
         sql = "SELECT * FROM sessions WHERE token = ?"
-        sessions = execute_d1_query(sql, [session_token])
+        sessions = execute_d1_query(sql, [token])
         if not sessions:
             return None
         
@@ -1298,7 +1307,7 @@ async def get_optional_user(session_token: Optional[str] = Cookie(None)):
         expires_str = session["expires_at"].replace('Z', '+00:00')
         expires_at = datetime.fromisoformat(expires_str)
         if expires_at < datetime.now(timezone.utc):
-            execute_d1_query("DELETE FROM sessions WHERE token = ?", [session_token])
+            execute_d1_query("DELETE FROM sessions WHERE token = ?", [token])
             return None
         
         users = execute_d1_query("SELECT id, username, display_name, is_demo_account, created_at FROM users WHERE id = ?", [session["user_id"]])
@@ -1309,8 +1318,11 @@ async def get_optional_user(session_token: Optional[str] = Cookie(None)):
         print(f"[AUTH ERROR] Failed checking optional user session: {e}")
         return None
 
-async def get_current_user(session_token: Optional[str] = Cookie(None)):
-    user = await get_optional_user(session_token)
+async def get_current_user(
+    session_token: Optional[str] = Cookie(None),
+    authorization: Optional[str] = Header(None)
+):
+    user = await get_optional_user(session_token, authorization)
     if not user:
         raise HTTPException(
             status_code=401,
@@ -2492,11 +2504,67 @@ async def login_user(body: LoginRequest, response: Response):
     }
 
 
+@app.post("/auth/token", summary="Retrieve opaque session token for mobile clients")
+async def login_token(body: LoginRequest, response: Response):
+    username = body.username.strip().lower()
+    from storage.d1_client import execute_d1_query
+    users = execute_d1_query("SELECT * FROM users WHERE username = ?", [username])
+    if not users:
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+    
+    user = users[0]
+    from storage.auth_utils import verify_password
+    if not verify_password(body.password, user["password_hash"], user["password_salt"]):
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+    
+    # Create session
+    token = secrets.token_urlsafe(32)
+    created_at = datetime.now(timezone.utc).isoformat()
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    
+    execute_d1_query(
+        "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        [token, user["id"], created_at, expires_at]
+    )
+    
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=7 * 24 * 60 * 60, # 7 days
+        path="/"
+    )
+    
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_in": 7 * 24 * 60 * 60,
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "display_name": user["display_name"],
+            "is_demo_account": bool(user["is_demo_account"])
+        }
+    }
+
+
 @app.post("/auth/logout", summary="Logout and invalidate session token")
-async def logout_user(response: Response, session_token: Optional[str] = Cookie(None)):
-    if session_token:
+async def logout_user(
+    response: Response, 
+    session_token: Optional[str] = Cookie(None),
+    authorization: Optional[str] = Header(None)
+):
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    else:
+        token = session_token
+
+    if token:
         from storage.d1_client import execute_d1_query
-        execute_d1_query("DELETE FROM sessions WHERE token = ?", [session_token])
+        execute_d1_query("DELETE FROM sessions WHERE token = ?", [token])
     
     response.delete_cookie(
         key="session_token",
