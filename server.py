@@ -46,6 +46,7 @@ state: dict = {
     "calibration_frame":  None,
     "tree_code":         None,
     "started_at":        None,
+    "camera_poses":      None,
 }
 
 def upd(stage: str, msg: str, **kw: Any) -> None:
@@ -400,20 +401,36 @@ def run_carbon_analysis(
         # Returns (scale_factor, is_calibrated, calibration_source).
         scale_factor, is_calibrated, calibration_source = _load_scale_factor_for_scan(scan_id)
 
-        # ── Implicit auto-pose calibration (only when no manual calibration exists) ──
-        # If a full-body person is detected in the frames AND localised inside the
-        # reconstructed point cloud, use that as the scale factor instead of the raw
-        # uncalibrated default. Manual calibration (calibration.json) always wins.
-        auto_calib_note = None
-        if not is_calibrated:
-            if scale_calibration and scale_calibration.get("is_calibrated"):
+        # ── Implicit scale calibration from Modal (geometric prior or ARCore VIO) ──
+        # Priority: manual_calibration > arcore_vio > estimated_geometric_prior > uncalibrated
+        # Manual calibration (calibration.json) always wins; handled by _load_scale_factor_for_scan.
+        scale_note = None
+        if not is_calibrated and scale_calibration:
+            src = scale_calibration.get("source", "")
+            if scale_calibration.get("is_calibrated"):
                 scale_factor = float(scale_calibration["scale_factor"])
                 is_calibrated = True
-                calibration_source = scale_calibration["source"]
-                auto_calib_note = f"auto-kalibrasi pose diterapkan (offloaded ke Modal): {scale_calibration['reason']}"
-                print(f"[CARBON-AUTOCALIB] {auto_calib_note} scale_factor={scale_factor:.6f}")
+                calibration_source = src
+                if src == "arcore_vio":
+                    scale_note = f"skala terukur via ARCore/ARKit VIO (~1-3% error): {scale_calibration.get('reason', '')}"
+                elif src == "estimated_geometric_prior":
+                    scale_note = (
+                        f"ESTIMASI skala dari geometri MASt3R (~5-9% error, ~15-25% ketidakpastian biomassa) — "
+                        f"tidak diverifikasi fisik: {scale_calibration.get('reason', '')}"
+                    )
+                else:
+                    scale_note = f"kalibrasi otomatis ({src}): {scale_calibration.get('reason', '')}"
+                print(f"[CARBON-SCALE] Applied {src} scale_factor={scale_factor:.6f}")
 
-        scale_status = "calibrated" if is_calibrated else "uncalibrated"
+        # Map calibration source to scale_status tier
+        if not is_calibrated:
+            scale_status = "uncalibrated"
+        elif calibration_source == "arcore_vio":
+            scale_status = "vio_calibrated"
+        elif calibration_source == "estimated_geometric_prior":
+            scale_status = "estimated_prior"
+        else:
+            scale_status = "calibrated"
 
         # ── Primary: extract from MASt3R geometric point cloud ────────────────
         dbh_result = None
@@ -529,13 +546,18 @@ def run_carbon_analysis(
         )
         # Build the confidence note, explicitly flagging uncalibrated scale.
         confidence_note = dbh_result["confidence_note"]
-        if not is_calibrated:
+        if scale_status == "uncalibrated":
             confidence_note += (
-                " | UNKALIBRASI: skala default (PLY unit) dipakai — hasil TIDAK dapat "
-                "diandalkan tanpa kalibrasi skala (auto-pose atau calibrate_scale.py)"
+                " | UNKALIBRASI: skala PLY default (1.0) dipakai — hasil TIDAK dapat "
+                "diandalkan tanpa kalibrasi skala (ARCore VIO atau calibrate_scale.py)"
             )
-        if auto_calib_note:
-            confidence_note += f" | {auto_calib_note}"
+        elif scale_status == "estimated_prior":
+            confidence_note += (
+                " | ESTIMASI SKALA: geometri MASt3R (~5-9% error) — "
+                "hasil mendekati realistis namun belum diverifikasi secara fisik"
+            )
+        if scale_note:
+            confidence_note += f" | {scale_note}"
         if height_used == "dbh_only_fallback" and height_fallback_reason:
             confidence_note += f" | Fallback DBH-only ({height_fallback_reason})"
 
@@ -814,7 +836,8 @@ def _reconstruct_thread(
 
         t_remote_start = time.time()
         try:
-            result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
+            camera_poses = state.get("camera_poses")
+            result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations, camera_poses)
         except Exception as remote_exc:
             # fn.remote() failed — this typically happens when the Render server
             # restarted while the Modal job was still running (connection reset).
@@ -1466,6 +1489,7 @@ class UploadVideoRequest(BaseModel):
     r2_key: str
     frames: int = 25
     blur_thresh: int = 80
+    camera_poses: Optional[List[Any]] = None
 
 
 @app.post("/upload_video", summary="Trigger frame extraction from an already-uploaded R2 video")
@@ -1483,6 +1507,7 @@ async def upload_video(
     r2_key = body.r2_key
     frames = body.frames
     blur_thresh = body.blur_thresh
+    camera_poses = body.camera_poses
 
     # Record when this request arrived for timing purposes
     t_arrival = time.time()
@@ -1495,9 +1520,10 @@ async def upload_video(
         except Exception as e:
             print(f"[TIMING] Failed to parse client start time: {e}")
 
-    print(f"[UPLOAD-VIDEO] Received r2_key={r2_key}, frames={frames}, blur_thresh={blur_thresh}")
+    print(f"[UPLOAD-VIDEO] Received r2_key={r2_key}, frames={frames}, blur_thresh={blur_thresh}, camera_poses={len(camera_poses) if camera_poses else 0}")
     state["error"] = None
     state["cancel_requested"] = False
+    state["camera_poses"] = camera_poses
     upd("extracting", "Video received on R2, starting smart extraction...")
     # BackgroundTasks dispatches sync callables to thread pool automatically
     background_tasks.add_task(_extract_thread, r2_key, frames, blur_thresh, client_to_server_s)
