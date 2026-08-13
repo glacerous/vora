@@ -918,6 +918,24 @@
         const urlParams = new URLSearchParams(window.location.search);
         let splatPath = urlParams.get('url') || urlParams.get('file') || 'output/result.ply';
         const useProxy = urlParams.get('proxy') === 'true';
+        // Bearer token forwarded by the mobile app's WebView (web keeps using
+        // its httpOnly cookie session instead — this param is optional).
+        const MOBILE_TOKEN = urlParams.get('token');
+
+        // Mirrors messages to both the web parent frame (window.parent, for
+        // the <iframe> embed) and a React Native WebView host (which has no
+        // window.parent — it exposes window.ReactNativeWebView.postMessage
+        // instead, and only accepts string payloads).
+        function postToParent(data) {
+            try { window.parent.postMessage(data, '*'); } catch (e) {}
+            try {
+                if (window.ReactNativeWebView) {
+                    window.ReactNativeWebView.postMessage(
+                        typeof data === 'string' ? data : JSON.stringify(data)
+                    );
+                }
+            } catch (e) {}
+        }
 
         // Rewrite R2 URLs to use the local server streaming proxy (bypasses ISP blocks and CORS policies)
         if (useProxy && splatPath.includes('/tree_scans/') && (splatPath.startsWith('http://') || splatPath.startsWith('https://')) && !splatPath.includes('localhost') && !splatPath.includes('127.0.0.1')) {
@@ -998,9 +1016,7 @@
                 }
             })
             .then(() => {
-                try {
-                    window.parent.postMessage('vora_scene_loaded', '*');
-                } catch (e) {}
+                postToParent('vora_scene_loaded');
                 const loaderEl = document.getElementById('custom-loader-container');
                 if (loaderEl) {
                     loaderEl.style.transition = 'opacity 0.4s ease, visibility 0.4s';
@@ -1627,9 +1643,12 @@
 
                 console.log("[MANUAL ADJUST] Saving manual alignment payload:", payload);
 
+                const adjustHeaders = { 'Content-Type': 'application/json' };
+                if (MOBILE_TOKEN) adjustHeaders['Authorization'] = `Bearer ${MOBILE_TOKEN}`;
+
                 const response = await fetch(`/scan/${currentScanId}/adjust-geometry`, {
                     method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: adjustHeaders,
                     body: JSON.stringify(payload)
                 });
 
@@ -1642,13 +1661,9 @@
                 if (transformControls) {
                     transformControls.detach();
                 }
-                
+
                 // Notify parent page to reload metrics in UI
-                try {
-                    window.parent.postMessage({ type: 'vora_metrics_updated', tree_code: currentTreeCode }, '*');
-                } catch (msgErr) {
-                    console.warn("Failed to post vora_metrics_updated message to parent:", msgErr);
-                }
+                postToParent({ type: 'vora_metrics_updated', tree_code: currentTreeCode });
 
             } catch (err) {
                 console.error("[MANUAL ADJUST ERROR]", err);

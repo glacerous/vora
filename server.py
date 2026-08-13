@@ -1485,6 +1485,15 @@ async def upload_video(
     No video bytes are transferred through this endpoint.
     Poll `/status` for progress.
     """
+    # The pipeline is single-flight (one global `state`, not scoped per user
+    # or session) — reject a new upload outright if a job is actively running
+    # rather than silently overwriting/corrupting its in-progress state.
+    if state["stage"] in ("extracting", "reconstructing"):
+        raise HTTPException(
+            status_code=409,
+            detail="Another scan is currently being processed on this server. Please wait for it to finish before starting a new one.",
+        )
+
     r2_key = body.r2_key
     frames = body.frames
     blur_thresh = body.blur_thresh
@@ -1526,6 +1535,15 @@ async def reconstruct(
     Returns immediately with `tree_code` so the client can track this scan.
     If no `tree_code` is provided, one is auto-generated in format `POHON-XXXX`.
     """
+    # Single-flight guard: "reconstructing" unambiguously means another job
+    # already holds the one available GPU slot (tree_code isn't assigned
+    # until this endpoint runs, so we can't distinguish callers any more
+    # precisely than that yet).
+    if state["stage"] == "reconstructing":
+        raise HTTPException(
+            status_code=409,
+            detail="Another scan is currently being reconstructed on this server. Please wait for it to finish before starting a new one.",
+        )
     if state["stage"] not in ("extracted", "done", "error"):
         raise HTTPException(status_code=400, detail="Not ready — extract frames first")
 
@@ -1769,7 +1787,11 @@ def get_robust_3d_point(pointmap, u, v, window=15):
 
 
 @app.patch("/scan/{scan_id}/recalculate", summary="Recalculate DBH and carbon using 2D clicked coordinates mapped to MASt3R pointmap")
-async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
+async def recalculate_scan(
+    scan_id: int,
+    body: Recalculate2DRequest,
+    current_user: Optional[dict] = Depends(get_optional_user),
+):
     """
     Accepts 2D click coordinates from representative frame.
     Downloads points3D_all.npy (dense pointmap) and points3d.ply.
@@ -1787,8 +1809,16 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
         scans = execute_d1_query(sql, [scan_id])
         if not scans:
             raise HTTPException(status_code=404, detail="Scan record not found")
-        
+
         target_scan = scans[0]
+
+        # 1b. Ownership check: unclaimed scans stay open to anyone (matches
+        # today's behavior for the "just scanned, not claimed yet" flow);
+        # once claimed, only the owner may recalibrate it.
+        claimed_by = target_scan.get("claimed_by_user_id")
+        if claimed_by is not None and (not current_user or claimed_by != current_user["id"]):
+            raise HTTPException(status_code=403, detail="You do not have permission to modify this scan")
+
         tree_code = target_scan.get("tree_code")
         splat_file_url = target_scan.get("splat_file_url")
         if not splat_file_url:
@@ -2153,7 +2183,11 @@ class AdjustGeometryRequest(BaseModel):
     h_target: float
 
 @app.patch("/scan/{scan_id}/adjust-geometry", summary="Manually update CAD cylinder geometry and recalculate metrics")
-async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
+async def adjust_geometry(
+    scan_id: int,
+    body: AdjustGeometryRequest,
+    current_user: Optional[dict] = Depends(get_optional_user),
+):
     try:
         from storage.d1_client import execute_d1_query, update_scan_result
         from carbon.allometric import estimate_carbon
@@ -2164,6 +2198,14 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
         if not scans:
             raise HTTPException(status_code=404, detail="Scan record not found")
         target_scan = scans[0]
+
+        # 1b. Ownership check: unclaimed scans stay open to anyone; once
+        # claimed, only the owner may adjust its geometry. Mirrors the same
+        # rule applied in recalculate_scan above.
+        claimed_by = target_scan.get("claimed_by_user_id")
+        if claimed_by is not None and (not current_user or claimed_by != current_user["id"]):
+            raise HTTPException(status_code=403, detail="You do not have permission to modify this scan")
+
         tree_code = target_scan.get("tree_code")
         # Use the same scan-id-aware loader as every other endpoint for consistency.
         scale_factor, _is_cal3, _src3 = _load_scale_factor_for_scan(tree_code)
@@ -2363,6 +2405,8 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
             "height_validation_reason": hinfo["height_validation_reason"],
         }
 
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception as exc:
         import traceback
         traceback.print_exc()
@@ -2714,7 +2758,8 @@ async def get_plot(plot_code: str, optional_user: Optional[dict] = Depends(get_o
             "area_x2": plot.get("area_x2"),
             "area_y2": plot.get("area_y2"),
             "areas": areas_list,
-            "owner": owner_info
+            "owner": owner_info,
+            "owner_user_id": plot["owner_user_id"]
         },
         "scans_count": len(valid_scans),
         "scans": valid_scans,
