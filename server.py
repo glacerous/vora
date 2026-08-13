@@ -3120,9 +3120,18 @@ async def download_carbon_certificate(tree_code: str, request: Request):
         try:
             res_thumb = requests.get(thumbnail_url, timeout=10)
             if res_thumb.status_code == 200:
-                thumbnail_bytes = io.BytesIO(res_thumb.content)
+                from PIL import Image as PILImage
+                img_pil = PILImage.open(io.BytesIO(res_thumb.content))
+                if img_pil.width > 300:
+                    ratio = 300.0 / img_pil.width
+                    img_pil = img_pil.resize((300, int(img_pil.height * ratio)), PILImage.Resampling.LANCZOS)
+                
+                compressed_io = io.BytesIO()
+                img_pil.convert("RGB").save(compressed_io, format="JPEG", quality=75)
+                compressed_io.seek(0)
+                thumbnail_bytes = compressed_io
         except Exception as e:
-            print(f"[CERTIFICATE] Failed to download thumbnail: {e}")
+            print(f"[CERTIFICATE] Failed to download or compress thumbnail: {e}")
             
     # 5. Compile PDF with ReportLab
     try:
