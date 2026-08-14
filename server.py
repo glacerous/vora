@@ -65,6 +65,7 @@ class ReconstructRequest(BaseModel):
     width: Optional[int] = None
     height: Optional[int] = None
     iterations: Optional[int] = 2000
+    frame_idx: Optional[int] = None
 
 class StatusResponse(BaseModel):
     stage: str
@@ -96,6 +97,7 @@ class Recalculate2DRequest(BaseModel):
     p2: list[float]
     width: int
     height: int
+    frame_idx: Optional[int] = None
 
 # ── Helper: load scale_factor from calibration.json (scan-id-aware) ─────────
 import json as _json
@@ -794,6 +796,7 @@ def _reconstruct_thread(
     plot_id: int = None,
     claimed_by_user_id: int = None,
     iterations: int = 2000,
+    frame_idx: int = None,
 ) -> None:
     import modal
     progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
@@ -991,7 +994,7 @@ def _reconstruct_thread(
                 print(f"[RECONSTRUCT] Offloading alignment and filtering to Modal...")
                 import modal
                 fn_align = modal.Function.from_name("instantsplat-app", "align_and_filter_ply_modal")
-                res = fn_align.remote(ply_bytes, points3d_all_bytes, p1, p2, width, height)
+                res = fn_align.remote(ply_bytes, points3d_all_bytes, p1, p2, width, height, frame_idx)
                 
                 P1_3d = res.get("P1")
                 P2_3d = res.get("P2")
@@ -1569,11 +1572,12 @@ async def reconstruct(
     gps_lat = gps_lat_query if gps_lat_query is not None else (body.gps_lat if body else None)
     gps_lon = gps_lon_query if gps_lon_query is not None else (body.gps_lon if body else None)
 
-    # Resolve manual clicks
+    # Resolve manual clicks and frame index
     p1 = body.p1 if body else None
     p2 = body.p2 if body else None
     width = body.width if body else None
     height = body.height if body else None
+    frame_idx = body.frame_idx if body else None
 
     # Resolve iterations
     iterations = 2000
@@ -1603,7 +1607,8 @@ async def reconstruct(
         height,
         plot_id,
         claimed_by_user_id,
-        iterations
+        iterations,
+        frame_idx
     )
     return {"started": True, "tree_code": final_code}
 
@@ -1889,26 +1894,25 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
         # 6. Load pointmap and perform coordinate mapping
         pts3d = np.load(local_npy_path)
         N, H_crop, W_crop, _ = pts3d.shape
-        # Pick the representative frame by valid-pixel coverage (same logic as _reconstruct_thread)
-        valid_counts = np.array([
-            np.sum(~np.all(pts3d[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d[i]), axis=-1))
-            for i in range(N)
-        ])
-        repr_idx = int(np.argmax(valid_counts))
-        print(f"[RECALCULATE] Representative frame: idx={repr_idx}/{N} ({valid_counts[repr_idx]:,} valid pixels)")
-        pointmap = pts3d[repr_idx]
+        
+        target_idx = None
+        if body.frame_idx is not None and 0 <= body.frame_idx < N:
+            target_idx = body.frame_idx
+            print(f"[RECALCULATE] Using clicked frame index: idx={target_idx}/{N}")
+        else:
+            valid_counts = np.array([
+                np.sum(~np.all(pts3d[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d[i]), axis=-1))
+                for i in range(N)
+            ])
+            target_idx = int(np.argmax(valid_counts))
+            print(f"[RECALCULATE] Fallback representative frame: idx={target_idx}/{N} ({valid_counts[target_idx]:,} valid pixels)")
+        pointmap = pts3d[target_idx]
 
         u1_crop, v1_crop = map_pixel_to_cropped(body.p1[0], body.p1[1], body.width, body.height, W_crop, H_crop)
         u2_crop, v2_crop = map_pixel_to_cropped(body.p2[0], body.p2[1], body.width, body.height, W_crop, H_crop)
 
         P1_cam = get_robust_3d_point(pointmap, u1_crop, v1_crop)
         P2_cam = get_robust_3d_point(pointmap, u2_crop, v2_crop)
-        
-        # Hybrid depth constraint: clamp depth only if deviation is > 1.5m (background hit)
-        z_diff = P2_cam[2] - P1_cam[2]
-        if abs(z_diff) > 1.5:
-            print(f"[RECALCULATE] Z-depth deviation ({abs(z_diff):.3f}m) > 1.5m. Background hit detected. Clamping Z2 to Z1.")
-            P2_cam[2] = P1_cam[2]
 
         # Align camera space to world space using ICP (raw-to-raw) on Modal
         try:
@@ -1921,7 +1925,7 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             print(f"[RECALCULATE] Offloading alignment and filtering to Modal...")
             import modal
             fn_align = modal.Function.from_name("instantsplat-app", "align_and_filter_ply_modal")
-            res = fn_align.remote(ply_bytes, points3d_all_bytes, body.p1, body.p2, body.width, body.height)
+            res = fn_align.remote(ply_bytes, points3d_all_bytes, body.p1, body.p2, body.width, body.height, body.frame_idx)
             
             P1 = res.get("P1")
             P2 = res.get("P2")

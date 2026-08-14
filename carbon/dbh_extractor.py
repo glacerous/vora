@@ -753,46 +753,122 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     if len(points) < 10:
         return {"error": "Point cloud too sparse"}
 
-    # 1. Determine direction vector v
-    v = P2 - P1
-    v_norm = np.linalg.norm(v)
-    if v_norm < 1e-6:
+    # 1. Determine seed direction vector v_seed from user clicks
+    v_seed = P2 - P1
+    v_seed_norm = np.linalg.norm(v_seed)
+    if v_seed_norm < 1e-6:
         return {"error": "P1 and P2 are identical or too close"}
-    v = v / v_norm
+    v_seed = v_seed / v_seed_norm
 
-    # Force direction to point upwards (negative Y axis)
+    # Force seed direction to point upwards (negative Y axis in Y-down convention)
+    if v_seed[1] > 0:
+        v_seed = -v_seed
+
+    # 2. Iterative Adaptive PCA Refinement (up to 4 passes or until delta < 1.0°)
+    r_base_m = max(crop_radius_m, 0.25)
+    radii_progression = [r_base_m * 1.6, r_base_m * 1.1, r_base_m * 0.85, r_base_m * 0.70]
+    current_v = v_seed
+    current_mean = P1
+    history_dirs = [v_seed]
+    deltas = []
+    pts_current = points
+
+    max_passes = 4
+    conv_thresh_deg = 1.0
+
+    for p_idx in range(max_passes):
+        r_target_m = radii_progression[min(p_idx, len(radii_progression) - 1)]
+        r_crop = float(np.clip(r_target_m / scale, 0.08, 0.60))
+        margin = float(max(0.20 / scale, v_seed_norm * 0.10))
+
+        w = points - current_mean
+        h_proj = np.dot(w, current_v)
+        perp = w - h_proj[:, np.newaxis] * current_v[np.newaxis, :]
+        d_proj = np.linalg.norm(perp, axis=1)
+
+        h_P1 = float(np.dot(P1 - current_mean, current_v))
+        h_P2 = float(np.dot(P2 - current_mean, current_v))
+        h_min_b = min(h_P1, h_P2) - margin
+        h_max_b = max(h_P1, h_P2) + margin
+
+        mask = (d_proj <= r_crop) & (h_proj >= h_min_b) & (h_proj <= h_max_b)
+        pts_crop = points[mask]
+
+        if len(pts_crop) < 15:
+            mask = d_proj <= r_crop
+            pts_crop = points[mask]
+        if len(pts_crop) < 10:
+            pts_crop = points
+
+        # Sample mid-trunk section if enough points
+        if len(pts_crop) >= 6:
+            proj_pts = np.dot(pts_crop, current_v)
+            p_min = np.percentile(proj_pts, 5)
+            p_max = np.percentile(proj_pts, 95)
+            span = p_max - p_min
+            if span > 0:
+                mid_mask = (proj_pts >= p_min + span * 0.05) & (proj_pts <= p_min + span * 0.95)
+                pca_pts = pts_crop[mid_mask]
+                if len(pca_pts) < 6:
+                    pca_pts = pts_crop
+            else:
+                pca_pts = pts_crop
+
+            if len(pca_pts) > 10000:
+                rng = np.random.default_rng(42)
+                idx = rng.choice(len(pca_pts), size=10000, replace=False)
+                pca_pts = pca_pts[idx]
+
+            mean_k = pca_pts.mean(axis=0)
+            centered = pca_pts - mean_k
+            cov = (centered.T @ centered) / max(len(centered) - 1, 1)
+            eigvals, eigvecs = np.linalg.eigh(cov)
+
+            # Pick eigenvector with highest directional alignment with current axis
+            alignments = [abs(np.dot(eigvecs[:, i], current_v)) for i in range(3)]
+            best_eig_idx = int(np.argmax(alignments))
+            v_next = eigvecs[:, best_eig_idx]
+
+            if np.dot(v_next, current_v) < 0:
+                v_next = -v_next
+        else:
+            mean_k = current_mean
+            v_next = current_v
+
+        cos_d = np.clip(np.dot(current_v, v_next), -1.0, 1.0)
+        delta_deg = float(round(float(np.degrees(np.arccos(cos_d))), 3))
+        deltas.append(delta_deg)
+        history_dirs.append(v_next)
+
+        logger.info(f"[MANUAL DBH] PCA Pass {p_idx + 1}: CropRadius={r_crop:.3f}m, Pts={len(pts_crop)}, Dir={v_next.tolist()}, Delta={delta_deg:.2f}°")
+
+        current_v = v_next
+        current_mean = mean_k
+        pts_current = pts_crop
+
+        if delta_deg < conv_thresh_deg and p_idx >= 1:
+            logger.info(f"[MANUAL DBH] PCA converged at Pass {p_idx + 1} (delta {delta_deg:.2f}° < {conv_thresh_deg}°)")
+            break
+
+    # Final axis direction and points
+    v = current_v
     if v[1] > 0:
         v = -v
-
-    # 2. Filter point cloud within cylinder around the axis v
-    # w is the vector from P1 to each point Q
-    w = points - P1
-    # h is the projection length along v
-    h_proj = np.dot(w, v)
-    # d is the perpendicular distance to the axis v
-    d_proj = np.linalg.norm(w - h_proj[:, np.newaxis] * v[np.newaxis, :], axis=-1)
-
-    crop_radius = crop_radius_m / scale
-    # We crop points that are within crop_radius of the axis and within the span of P1 and P2 (with some margin)
-    margin = 0.2 / scale
-    trunk_mask = (d_proj <= crop_radius) & (h_proj >= -margin) & (h_proj <= v_norm + margin)
-    trunk_points = points[trunk_mask]
-
-    if len(trunk_points) < 10:
-        # Fallback: ignore height constraints, just keep all points within crop_radius of axis
-        trunk_mask = d_proj <= crop_radius
-        trunk_points = points[trunk_mask]
+    trunk_points = pts_current
+    pca_convergence_delta_deg = deltas[-1] if deltas else 0.0
 
     if len(trunk_points) < 10:
         return {"error": f"Too few points within the crop cylinder ({len(trunk_points)} points)."}
 
-    # 3. Height is defined directly by the user's manual clicks (P1 is bottom/ground, P2 is top)
+    # 4. Height is defined by user clicks projected along the PCA-refined axis
     h_min = float(np.dot(P1, v))
     h_max = float(np.dot(P2, v))
+    if h_max < h_min:
+        h_min, h_max = h_max, h_min
     total_h = h_max - h_min
     estimated_height_m = float(total_h * scale)
 
-    # 4. Set target breast height target relative to P1 (ground level)
+    # 5. Set target breast height relative to P1 (ground level)
     h_target = float(h_min + breast_height_m / scale)
 
     # Sanity guard: if the clicked trunk is too short to reach standard breast height (1.3m),
@@ -800,7 +876,7 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     if (h_target - h_min) >= total_h * 0.90:
         h_target = h_min + total_h * 0.50
 
-    # 5. Fit circle at slices around h_target
+    # 6. Fit circle at slices around h_target
     if abs(v[0]) < 0.9:
         ref = np.array([1.0, 0.0, 0.0])
     else:
@@ -832,7 +908,7 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
         total_slice_points += len(pts_slice)
         pts_2d = np.column_stack((np.dot(pts_slice, u1), np.dot(pts_slice, u2)))
         xc_slice, yc_slice, R, inlier_mask, err = fit_circle_2d(pts_2d)
-        if R is not None and R > 0 and R < crop_radius * 1.5:
+        if R is not None and R > 0 and R < r_crop * 1.5:
             radii.append(R)
             centers_2d.append((xc_slice, yc_slice))
             slice_points_list.append(pts_slice[inlier_mask])
@@ -843,8 +919,8 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
         logger.warning("[MANUAL DBH] Aligned slice failed, using fallback on selected cylinder points...")
         pts_2d = np.column_stack((np.dot(trunk_points, u1), np.dot(trunk_points, u2)))
         xc_slice, yc_slice, R, _, inlier_mask = fit_circle_robust(pts_2d)
-        if R is None or R > crop_radius * 2.0:
-            R = crop_radius / 2
+        if R is None or R > r_crop * 2.0:
+            R = r_crop / 2
             xc_slice, yc_slice = 0.0, 0.0
             slice_points_all = trunk_points
             inlier_count = 0
@@ -929,6 +1005,7 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
             "scale_factor":   scale,
             "method":         method_used,
             "slice_points_3d": [[float(round(p[0], 4)), float(round(p[1], 4)), float(round(p[2], 4))] for p in slice_points_all],
+            "pca_convergence_delta_deg": pca_convergence_delta_deg,
         }
     }
 

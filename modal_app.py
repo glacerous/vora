@@ -1431,6 +1431,7 @@ def align_and_filter_ply_modal(
     p2: list[float] = None,
     width: int = None,
     height: int = None,
+    frame_idx: int = None,
 ) -> dict:
     import os
     import io
@@ -1604,22 +1605,21 @@ def align_and_filter_ply_modal(
             try:
                 pts3d = np.load(io.BytesIO(points3d_all_bytes))
                 N_f, H_crop, W_crop, _ = pts3d.shape
-                valid_counts = np.array([
-                    np.sum(~np.all(pts3d[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d[i]), axis=-1))
-                    for i in range(N_f)
-                ])
-                repr_idx = int(np.argmax(valid_counts))
-                pointmap = pts3d[repr_idx]
+                if frame_idx is not None and 0 <= frame_idx < N_f:
+                    target_idx = frame_idx
+                else:
+                    valid_counts = np.array([
+                        np.sum(~np.all(pts3d[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d[i]), axis=-1))
+                        for i in range(N_f)
+                    ])
+                    target_idx = int(np.argmax(valid_counts))
+                pointmap = pts3d[target_idx]
 
                 u1_crop, v1_crop = map_pixel_to_cropped_local(p1[0], p1[1], width, height, W_crop, H_crop)
                 u2_crop, v2_crop = map_pixel_to_cropped_local(p2[0], p2[1], width, height, W_crop, H_crop)
 
                 P1_cam = get_robust_3d_point_local(pointmap, u1_crop, v1_crop)
                 P2_cam = get_robust_3d_point_local(pointmap, u2_crop, v2_crop)
-
-                z_diff = P2_cam[2] - P1_cam[2]
-                if abs(z_diff) > 1.5:
-                    P2_cam[2] = P1_cam[2]
 
                 R, t, s = register_pointmap_to_world_local(pointmap, pts_world_raw)
                 P1_val = s * (P1_cam @ R.T) + t
