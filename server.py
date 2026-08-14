@@ -1188,13 +1188,25 @@ def _reconstruct_thread(
                         except Exception as upload_err:
                             print(f"Failed to upload points3D_all.npy to R2: {upload_err}")
 
-                    # Select middle representative frame as thumbnail
+                    # Select representative frame matching MASt3R pointmap as thumbnail
                     thumbnail_url = None
                     if files:
-                        mid_idx = len(files) // 2
-                        representative_frame = files[mid_idx]
+                        target_thumb_idx = 0
+                        if points3d_all_path and os.path.exists(points3d_all_path):
+                            try:
+                                pts3d_local = np.load(points3d_all_path)
+                                N_local = pts3d_local.shape[0]
+                                valid_counts = [
+                                    np.sum(~np.all(pts3d_local[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d_local[i]), axis=-1))
+                                    for i in range(N_local)
+                                ]
+                                target_thumb_idx = int(np.argmax(valid_counts))
+                            except Exception:
+                                target_thumb_idx = 0
+                        
+                        representative_frame = files[min(target_thumb_idx, len(files) - 1)]
                         try:
-                            upd("reconstructing", "Uploading representative frame as thumbnail to R2...")
+                            upd("reconstructing", f"Uploading representative frame {target_thumb_idx} as thumbnail to R2...")
                             thumbnail_url = upload_thumbnail(representative_frame, tree_code)
                         except Exception as thumb_err:
                             print(f"Thumbnail upload error: {thumb_err}")

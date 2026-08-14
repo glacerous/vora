@@ -1139,9 +1139,25 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
                     os.path.join(input_dir, f) for f in os.listdir(input_dir)
                     if f.lower().endswith(('.jpg', '.jpeg', '.png'))
                 ])
-                if frame_files:
-                    mid_idx = len(frame_files) // 2
-                    thumbnail_url = upload_to_r2(frame_files[mid_idx], tree_code, custom_timestamp=ts, is_thumbnail=True)
+                target_thumb_idx = 0
+                if npy_path and os.path.exists(npy_path):
+                    try:
+                        pts3d_loaded = np.load(npy_path)
+                        N_f = pts3d_loaded.shape[0]
+                        valid_counts = [
+                            np.sum(~np.all(pts3d_loaded[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d_loaded[i]), axis=-1))
+                            for i in range(N_f)
+                        ]
+                        target_thumb_idx = int(np.argmax(valid_counts))
+                    except Exception as count_err:
+                        print(f"[MODAL-R2] Could not calculate argmax valid counts: {count_err}")
+                        target_thumb_idx = 0
+
+                if frame_files and target_thumb_idx < len(frame_files):
+                    thumbnail_url = upload_to_r2(frame_files[target_thumb_idx], tree_code, custom_timestamp=ts, is_thumbnail=True)
+                    print(f"[MODAL-R2] Uploaded thumbnail frame {target_thumb_idx}/{len(frame_files)} matching primary pointmap.")
+                elif frame_files:
+                    thumbnail_url = upload_to_r2(frame_files[0], tree_code, custom_timestamp=ts, is_thumbnail=True)
             except Exception as thumb_err:
                 print(f"[MODAL-R2-ERROR] Thumbnail upload failed: {thumb_err}")
         except Exception as r2_err:
