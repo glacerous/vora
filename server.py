@@ -786,7 +786,7 @@ def _extract_thread(tree_code: str, r2_key: str, target: int, blur_thresh: int, 
 
         import modal
         fn = modal.Function.from_name("instantsplat-app", "extract_video_frames_modal")
-        res = fn.remote(None, target, blur_thresh, t_modal_start, r2_key=r2_key, r2_config=r2_config)
+        res = fn.remote(None, target, blur_thresh, t_modal_start, r2_key=r2_key, r2_config=r2_config, tree_code=tree_code)
         t_modal_end = time.time()
 
         t_modal_enter = res.get("t_modal_enter")
@@ -816,9 +816,11 @@ def _extract_thread(tree_code: str, r2_key: str, target: int, blur_thresh: int, 
 
         frames = res.get("frames", [])
         overlap_warning = res.get("overlap_warning")
+        r2_frames_prefix = res.get("r2_frames_prefix")
+        num_frames = res.get("num_frames", len(frames))
 
-        n = len(frames)
-        if n == 0:
+        n = num_frames
+        if n == 0 or len(frames) == 0:
             raise ValueError(f"No sharp frames found (blur_thresh={blur_thresh}). Try a slower, steadier recording in good lighting.")
 
         # ── Gate 1: 2D Frame Quality & Variance Pre-Check on CPU ──
@@ -913,32 +915,39 @@ def _reconstruct_thread(
         progress_dict[tree_code] = "Uploading images"
         upd(tree_code, "reconstructing", "Connecting to Modal…")
 
-        t_disk_start = time.time()
-        job_frames_dir = get_job_frames_dir(tree_code)
-        files = sorted(glob.glob(os.path.join(job_frames_dir, "*.jpg")))
-        if not files:
-            # Fallback to root FRAMES_DIR if job dir is empty
-            files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
-        if not files:
-            raise ValueError(f"No frames found for tree_code '{tree_code}'")
-
-        imgs = []
-        for f in files:
-            with open(f, "rb") as fh:
-                imgs.append(fh.read())
-        t_disk_end = time.time()
-        print(f"[TIMING] Read {len(imgs)} frames from {job_frames_dir}: {t_disk_end - t_disk_start:.4f}s")
-
-        upd(tree_code, "reconstructing", f"Sending {len(imgs)} frames to Modal A10G GPU…")
-        
-        t0 = time.time()
-        print(f"[RECONSTRUCT] Connecting to Modal pipeline for tree_code '{tree_code}' at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t0))}")
-        print(f"[RECONSTRUCT] Uploading {len(imgs)} frames to GPU cloud (background removed on Modal: {remove_background})...")
-        
         job_st = get_job_state(tree_code)
         if job_st.get("cancel_requested", False):
             raise RuntimeError("Job cancelled by user")
-        fn     = modal.Function.from_name("instantsplat-app", "run_reconstruction")
+
+        r2_frames_prefix = job_st.get("r2_frames_prefix")
+        imgs = []
+        if not r2_frames_prefix:
+            t_disk_start = time.time()
+            job_frames_dir = get_job_frames_dir(tree_code)
+            files = sorted(glob.glob(os.path.join(job_frames_dir, "*.jpg")))
+            if not files:
+                # Fallback to root FRAMES_DIR if job dir is empty
+                files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
+            if not files:
+                raise ValueError(f"No frames found for tree_code '{tree_code}'")
+
+            for f in files:
+                with open(f, "rb") as fh:
+                    imgs.append(fh.read())
+            t_disk_end = time.time()
+            print(f"[TIMING] Read {len(imgs)} fallback frames from {job_frames_dir}: {t_disk_end - t_disk_start:.4f}s")
+            upd(tree_code, "reconstructing", f"Sending {len(imgs)} frames to Modal A10G GPU…")
+        else:
+            upd(tree_code, "reconstructing", "Connecting to Modal A10G GPU (using direct R2 frames)…")
+        
+        t0 = time.time()
+        print(f"[RECONSTRUCT] Connecting to Modal pipeline for tree_code '{tree_code}' at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t0))}")
+        if r2_frames_prefix:
+            print(f"[RECONSTRUCT] Direct Modal-to-R2 frame loading enabled (prefix: '{r2_frames_prefix}'). Zero frame bytes uploaded from Render!")
+        else:
+            print(f"[RECONSTRUCT] Uploading {len(imgs)} frames to GPU cloud (background removed on Modal: {remove_background})...")
+        
+        fn = modal.Function.from_name("instantsplat-app", "run_reconstruction")
         
         # Resolve R2 config for direct upload from Modal (prevents OOM on Render)
         r2_config = {
@@ -953,13 +962,15 @@ def _reconstruct_thread(
         try:
             camera_poses = job_st.get("camera_poses")
             try:
-                if camera_poses is not None:
+                if r2_frames_prefix:
+                    result = fn.remote(None, tree_code, remove_background, r2_config, iterations, camera_poses=camera_poses, r2_frames_prefix=r2_frames_prefix)
+                elif camera_poses is not None:
                     result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations, camera_poses=camera_poses)
                 else:
                     result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
             except TypeError as te:
                 if "takes from" in str(te) or "unexpected keyword" in str(te) or "positional argument" in str(te) or "argument" in str(te):
-                    print(f"[RECONSTRUCT] Signature mismatch on remote, falling back to 5-arg call: {te}")
+                    print(f"[RECONSTRUCT] Signature mismatch on remote, falling back to legacy call: {te}")
                     result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
                 else:
                     raise te
@@ -1092,75 +1103,11 @@ def _reconstruct_thread(
         t_dl_pts_end = time.time()
         print(f"[TIMING] Save/download points3d.ply: {t_dl_pts_end - t_dl_pts_start:.4f}s")
 
-        # Save points3d_all.npy
-        t_dl_all_start = time.time()
-        if uploaded and points3d_all_url:
-            print(f"[RECONSTRUCT] Stream-downloading points3d_all.npy from R2 URL: {points3d_all_url}")
-            import requests
-            res_dl = requests.get(points3d_all_url, stream=True)
-            with open(points3d_all_path, "wb") as f:
-                for chunk in res_dl.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            print(f"[RECONSTRUCT] points3d_all.npy stream download completed successfully")
-        elif points3d_all_bytes:
-            with open(points3d_all_path, "wb") as f:
-                f.write(points3d_all_bytes)
-            print(f"[RECONSTRUCT] Saved raw MASt3R dense pointmap: {points3d_all_path} ({len(points3d_all_bytes)/1024/1024:.1f} MB)")
-        else:
-            points3d_all_path = None
-        t_dl_all_end = time.time()
-        print(f"[TIMING] Save/download points3D_all.npy: {t_dl_all_end - t_dl_all_start:.4f}s")
-
-        t_icp_start = time.time()
+        # Note: points3d_all.npy download & fn_align.remote omitted to eliminate ~35MB outbound PLY bounce.
+        # Local ground-separated geometric cylinder detection runs directly on points3d.ply in <0.1s.
+        points3d_highres_path = None
         P1_3d = None
         P2_3d = None
-        
-        if points3d_path and os.path.exists(points3d_path):
-            try:
-                print(f"[RECONSTRUCT] Reading point cloud files for offloaded Modal alignment/filtering...")
-                with open(points3d_path, "rb") as f:
-                    pts3d_raw_bytes = f.read()
-                
-                pts3d_all_raw_bytes = None
-                if points3d_all_path and os.path.exists(points3d_all_path):
-                    with open(points3d_all_path, "rb") as f:
-                        pts3d_all_raw_bytes = f.read()
-
-                upd(tree_code, "reconstructing", "Offloading point cloud alignment to Modal GPU…")
-                fn_align = modal.Function.from_name("instantsplat-app", "align_and_filter_ply_modal")
-                align_res = fn_align.remote(
-                    pts3d_raw_bytes, 
-                    pts3d_all_raw_bytes, 
-                    p1=p1, 
-                    p2=p2, 
-                    width=width, 
-                    height=height,
-                    frame_idx=frame_idx
-                )
-                
-                if align_res:
-                    points3d_highres_bytes = align_res.get("highres_ply")
-                    points3d_filtered_bytes = align_res.get("filtered_ply")
-                    P1_3d = align_res.get("P1_3d")
-                    P2_3d = align_res.get("P2_3d")
-                    
-                    if points3d_highres_bytes:
-                        with open(points3d_highres_path, "wb") as f:
-                            f.write(points3d_highres_bytes)
-                        print(f"[RECONSTRUCT] Saved aligned high-res point cloud: {points3d_highres_path} ({len(points3d_highres_bytes)/1024:.1f} KB)")
-                        
-                    if points3d_filtered_bytes:
-                        with open(points3d_path, "wb") as f:
-                            f.write(points3d_filtered_bytes)
-                        print(f"[RECONSTRUCT] Overwrote decimated point cloud with aligned version: {points3d_path} ({len(points3d_filtered_bytes)/1024:.1f} KB)")
-            except Exception as align_err:
-                print(f"[RECONSTRUCT-ALIGN ERROR] Offloaded point cloud alignment failed: {align_err}")
-                points3d_highres_path = None
-        else:
-            points3d_highres_path = None
-
-        t_icp_end = time.time()
-        print(f"[TIMING] Modal point cloud alignment & filtering: {t_icp_end - t_icp_start:.4f}s")
 
         t_meta_start = time.time()
         # 1. Extract GPS from frames if not provided by client
@@ -1305,24 +1252,7 @@ def _reconstruct_thread(
             progress_dict[tree_code] = "Uploading results"
             
             if uploaded:
-                print(f"[RECONSTRUCT] Files were uploaded directly from Modal to R2.")
-                ts = custom_ts or int(time.time())
-                # Upload high-res version to R2
-                if points3d_highres_path and os.path.exists(points3d_highres_path):
-                    try:
-                        from storage.r2_client import upload_splat
-                        upload_splat(points3d_highres_path, tree_code, custom_timestamp=ts)
-                        print(f"[RECONSTRUCT] Uploaded high-res points3d_highres.ply to R2")
-                    except Exception as upload_err:
-                        print(f"Failed to upload points3d_highres.ply to R2: {upload_err}")
-                # Overwrite raw points3d.ply in R2 with the decimated version
-                if points3d_path and os.path.exists(points3d_path):
-                    try:
-                        from storage.r2_client import upload_splat
-                        upload_splat(points3d_path, tree_code, custom_timestamp=ts)
-                        print(f"[RECONSTRUCT] Overwrote R2 points3d.ply with decimated version")
-                    except Exception as upload_err:
-                        print(f"Failed to upload points3d.ply to R2: {upload_err}")
+                print(f"[RECONSTRUCT] Files were already uploaded directly from Modal to R2 (zero Render outbound bandwidth used).")
             else:
                 upd(tree_code, "reconstructing", "Uploading reconstruction files to Cloudflare R2...")
                 from storage.r2_client import upload_splat, upload_thumbnail

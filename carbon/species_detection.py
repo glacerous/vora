@@ -31,13 +31,30 @@ def detect_species(image_paths):
     files = []
     opened_files = []
     try:
-        # Prepare multipart files
-        # We classify tree closeups primarily as 'bark' (or fallback to 'leaf' if not specified)
+        # Prepare multipart files with in-memory downscaling (max 800px, quality 80)
+        # This reduces outbound bandwidth by ~85-95% while matching Pl@ntNet's internal resolution.
+        from PIL import Image
+        import io
+
+        total_bytes_sent = 0
         for path in target_images:
             if os.path.exists(path):
-                f = open(path, 'rb')
-                opened_files.append(f)
-                files.append(('images', (os.path.basename(path), f, 'image/jpeg')))
+                try:
+                    img = Image.open(path)
+                    if img.mode != "RGB":
+                        img = img.convert("RGB")
+                    # Maintain aspect ratio, max 800px dimension
+                    if img.width > 800 or img.height > 800:
+                        img.thumbnail((800, 800), Image.Resampling.LANCZOS)
+                    
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=80)
+                    img_bytes = buf.getvalue()
+                    total_bytes_sent += len(img_bytes)
+                    
+                    files.append(('images', (os.path.basename(path), img_bytes, 'image/jpeg')))
+                except Exception as img_err:
+                    logger.warning(f"Failed to process image {path} for Pl@ntNet: {img_err}")
                 
         if not files:
             logger.warning("No valid images found on disk for species detection.")
@@ -49,7 +66,7 @@ def detect_species(image_paths):
             'organs': ['bark'] * len(files)
         }
 
-        logger.info(f"Sending {len(files)} images to Pl@ntNet for identification...")
+        logger.info(f"Sending {len(files)} downscaled images ({total_bytes_sent / 1024:.1f} KB total outbound) to Pl@ntNet...")
         response = requests.post(url, files=files, data=data, timeout=15)
         
         if response.status_code != 200:

@@ -546,12 +546,13 @@ def upload_to_r2(file_path: str, tree_code: str, custom_timestamp: int = None, i
     timeout=1800,  # 30 minutes
     image=image
 )
-def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", remove_background: bool = False, r2_config: dict = None, iterations: int = 2000, camera_poses: list = None) -> dict:
+def run_reconstruction(images_bytes: list[bytes] = None, tree_code: str = "Unknown", remove_background: bool = False, r2_config: dict = None, iterations: int = 2000, camera_poses: list = None, r2_frames_prefix: str = None) -> dict:
     import os
     import time
     import shutil
     import subprocess
     import glob
+    from concurrent.futures import ThreadPoolExecutor
     
     if r2_config:
         for k, v in r2_config.items():
@@ -581,6 +582,43 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
         shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     
+    # Direct Modal-to-R2 frame loading (eliminates 50-70MB outbound bandwidth from Render)
+    if r2_frames_prefix and r2_config:
+        import boto3
+        from botocore.config import Config as BotoConfig
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=f"https://{r2_config['CLOUDFLARE_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+            aws_access_key_id=r2_config["R2_ACCESS_KEY_ID"],
+            aws_secret_access_key=r2_config["R2_SECRET_ACCESS_KEY"],
+            config=BotoConfig(signature_version="s3v4"),
+            region_name="auto",
+        )
+        bucket = r2_config["R2_BUCKET_NAME"]
+        res = s3.list_objects_v2(Bucket=bucket, Prefix=r2_frames_prefix)
+        frame_keys = sorted([obj["Key"] for obj in res.get("Contents", []) if obj["Key"].lower().endswith((".jpg", ".jpeg", ".png"))])
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Downloading {len(frame_keys)} frames directly from R2 prefix {r2_frames_prefix}...")
+        
+        def dl_frame(args):
+            idx, key = args
+            dest = os.path.join(input_dir, f"{idx:03d}.jpg")
+            s3.download_file(bucket, key, dest)
+            return dest
+            
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(dl_frame, enumerate(frame_keys)))
+            
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Downloaded {len(frame_keys)} frames to {input_dir} directly from R2!")
+    elif images_bytes:
+        # Legacy fallback: images sent over RPC
+        for i, img_bytes in enumerate(images_bytes):
+            img_path = os.path.join(input_dir, f"{i:03d}.jpg")
+            with open(img_path, "wb") as f:
+                f.write(img_bytes)
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Saved {len(images_bytes)} images from RPC to {input_dir}")
+    else:
+        raise ValueError("Neither r2_frames_prefix nor images_bytes provided to run_reconstruction")
+    
     # ── Background removal on Modal ──
     if remove_background:
         try:
@@ -588,41 +626,23 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
             from PIL import Image
             import io
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Initialising rembg session (u2net)...")
-            # Create the session ONCE — avoids re-downloading the model for every frame
-            # which was extremely slow (25 separate model loads).
             bg_session = new_session("u2net")
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Running background removal using rembg on {len(images_bytes)} frames...")
-            processed_bytes = []
-            for idx, img_bytes in enumerate(images_bytes):
-                input_img = Image.open(io.BytesIO(img_bytes))
+            frame_files = sorted(glob.glob(os.path.join(input_dir, "*.jpg")))
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Running background removal using rembg on {len(frame_files)} frames...")
+            for idx, f_path in enumerate(frame_files):
+                input_img = Image.open(f_path)
                 output_img = remove(input_img, session=bg_session)
                 if output_img.mode == "RGBA":
-                    # Use pure black (0,0,0) — must match InstantSplat train.py's default
-                    # renderer background color. train.py line 119:
-                    #   bg_color = [1,1,1] if dataset.white_background else [0,0,0]
-                    # Since we don't pass --white_background, the renderer uses black.
-                    # A mismatch (e.g. gray image vs black renderer) causes wrong
-                    # photometric loss on background pixels → floater artifacts.
                     background = Image.new("RGBA", output_img.size, (0, 0, 0, 255))
                     composited = Image.alpha_composite(background, output_img).convert("RGB")
                 else:
                     composited = output_img.convert("RGB")
-                out_io = io.BytesIO()
-                composited.save(out_io, format="JPEG", quality=95)
-                processed_bytes.append(out_io.getvalue())
+                composited.save(f_path, format="JPEG", quality=95)
                 if (idx + 1) % 5 == 0:
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]   rembg: processed {idx + 1}/{len(images_bytes)} frames")
-            images_bytes = processed_bytes
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]   rembg: processed {idx + 1}/{len(frame_files)} frames")
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Background removal complete on Modal.")
         except Exception as bg_err:
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Background removal failed on Modal: {bg_err}")
-
-    # Write incoming images to the input directory
-    for i, img_bytes in enumerate(images_bytes):
-        img_path = os.path.join(input_dir, f"{i:03d}.jpg")
-        with open(img_path, "wb") as f:
-            f.write(img_bytes)
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Saved {len(images_bytes)} images to {input_dir}")
     
     # ── Deterministic seed: controls PYTHONHASHSEED, CUBLAS, PyTorch, NumPy, etc. ──
     # Fix 3D alignment inconsistency: same input images → same output every time.
@@ -1288,6 +1308,7 @@ def extract_video_frames_modal(
     t_server_before_call: float = None,
     r2_key: str = None,
     r2_config: dict = None,
+    tree_code: str = None,
 ) -> dict:
     """Extract sharp, well-overlapping frames from a video.
 
@@ -1498,8 +1519,45 @@ def extract_video_frames_modal(
 
         final_frames_bytes = [candidates[idx][2] for idx in current_idxs]
 
+        # Direct R2 frame upload from Modal (eliminates 50-70MB outbound bandwidth back to Render)
+        r2_frames_prefix = None
+        if not tree_code and r2_key:
+            base_fname = os.path.basename(r2_key)
+            if "_" in base_fname:
+                tree_code = base_fname.split("_")[0]
+            else:
+                tree_code = os.path.splitext(base_fname)[0]
+
+        if r2_config and tree_code:
+            r2_frames_prefix = f"tree_scans/{tree_code}/frames/"
+            bucket = r2_config["R2_BUCKET_NAME"]
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Uploading {len(final_frames_bytes)} frames directly to R2 prefix {r2_frames_prefix}...")
+            
+            def upload_single_frame(args):
+                idx, f_bytes = args
+                key = f"{r2_frames_prefix}{idx:03d}.jpg"
+                s3.put_object(Bucket=bucket, Key=key, Body=f_bytes, ContentType="image/jpeg")
+                return key
+                
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(upload_single_frame, enumerate(final_frames_bytes)))
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Uploaded {len(final_frames_bytes)} frames to R2 directly from Modal in parallel!")
+
+            # Return only 3 representative frames to Render (first, middle, last) for Gate 1 & UI thumbnail preview
+            # This cuts response payload from ~50MB to <500KB!
+            sample_idxs = [0]
+            if len(final_frames_bytes) >= 3:
+                sample_idxs.extend([len(final_frames_bytes)//2, len(final_frames_bytes)-1])
+            elif len(final_frames_bytes) == 2:
+                sample_idxs.append(1)
+            preview_frames = [final_frames_bytes[i] for i in sample_idxs]
+        else:
+            preview_frames = final_frames_bytes
+
         return {
-            "frames": final_frames_bytes,
+            "frames": preview_frames,
+            "num_frames": len(final_frames_bytes),
+            "r2_frames_prefix": r2_frames_prefix,
             "overlap_warning": overlap_warning,
             "t_modal_enter": t_modal_enter,
             "t_modal_exit": time.time(),
