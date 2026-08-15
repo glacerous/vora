@@ -952,10 +952,20 @@ def _reconstruct_thread(
         t_remote_start = time.time()
         try:
             camera_poses = job_st.get("camera_poses")
-            result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations, camera_poses)
+            try:
+                if camera_poses is not None:
+                    result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations, camera_poses=camera_poses)
+                else:
+                    result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
+            except TypeError as te:
+                if "takes from" in str(te) or "unexpected keyword" in str(te) or "positional argument" in str(te) or "argument" in str(te):
+                    print(f"[RECONSTRUCT] Signature mismatch on remote, falling back to 5-arg call: {te}")
+                    result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
+                else:
+                    raise te
         except Exception as remote_exc:
             # If it's a TypeError / argument error / signature mismatch, fail immediately
-            if isinstance(remote_exc, (TypeError, ValueError)) or "takes from" in str(remote_exc) or "argument" in str(remote_exc):
+            if isinstance(remote_exc, (TypeError, ValueError)) and "takes from" not in str(remote_exc):
                 print(f"[RECONSTRUCT] fn.remote() failed with non-recoverable error: {remote_exc}")
                 raise remote_exc
 
