@@ -1191,7 +1191,7 @@ def _reconstruct_thread(
         upd(tree_code, "reconstructing", "✓ Reconstruction done. Estimating DBH and Carbon...")
         carbon_est = run_carbon_analysis(
             out, 
-            points3d_path=points3d_highres_path, 
+            points3d_path=points3d_path, 
             scan_id=tree_code,
             wood_density=wood_density,
             forest_type=forest_type,
