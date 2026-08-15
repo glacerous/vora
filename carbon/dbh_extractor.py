@@ -462,16 +462,22 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     peak_u1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
     peak_u2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
 
-    # 4. Crop around trunk cluster across full point cloud
-    p_u1_all = np.dot(points, u1)
-    p_u2_all = np.dot(points, u2)
+    # 4. Filter full cloud to foreground (ground stripped) and crop around trunk cluster
+    h_ground_all = np.dot(points, normal) + d
+    fg_mask_all = (h_ground_all > 0.04 / scale) & (h_ground_all < 2.5 / scale)
+    fg_points_all = points[fg_mask_all]
+    if len(fg_points_all) < 30:
+        fg_points_all = points
+
+    p_u1_all = np.dot(fg_points_all, u1)
+    p_u2_all = np.dot(fg_points_all, u2)
     dist_sq = (p_u1_all - peak_u1)**2 + (p_u2_all - peak_u2)**2
-    CROP_RADIUS = float(np.clip(0.35 / scale, 0.08, 0.50))
+    CROP_RADIUS = float(np.clip(0.25 / scale, 0.08, 0.40))
     trunk_mask = dist_sq <= CROP_RADIUS**2
-    trunk_pts = points[trunk_mask]
+    trunk_pts = fg_points_all[trunk_mask]
     if len(trunk_pts) < 20:
-        trunk_pts = points
-        logger.warning("[MAST3R DBH] Coarse crop yielded too few points, using full cloud.")
+        trunk_pts = fg_points_all
+        logger.warning("[MAST3R DBH] Coarse crop yielded too few points, using all foreground.")
 
     # 5. Refine trunk axis direction via PCA on cropped trunk points
     trunk_mean = trunk_pts.mean(axis=0)

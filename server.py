@@ -2189,14 +2189,21 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             except Exception as fb_err:
                 print(f"[RECALCULATE ERROR] Local fallback crop failed: {fb_err}")
 
-        # 7. Perform DBH extraction with 2D clicks
+        # 7. Perform DBH extraction using robust ground-separated geometric cylinder fitting
         scale_factor, _is_cal2, _src2 = _load_scale_factor_for_scan(tree_code)
-        res_override = extract_dbh_with_2d_clicks(
-            ply_path=local_ply_highres_path,
-            P1=np.array(P1),
-            P2=np.array(P2),
-            scale=scale_factor
-        )
+        
+        # Primary: robust ground-separated 3D cylinder detector
+        from carbon.dbh_extractor import extract_dbh_from_mast3r
+        res_override = extract_dbh_from_mast3r(ply_path=local_ply_highres_path, scale_factor=scale_factor)
+        
+        if "error" in res_override or not res_override.get("geometry_3d"):
+            print(f"[RECALCULATE] Mast3R robust detector fallback to 2D click PCA: {res_override.get('error')}")
+            res_override = extract_dbh_with_2d_clicks(
+                ply_path=local_ply_highres_path,
+                P1=np.array(P1),
+                P2=np.array(P2),
+                scale=scale_factor
+            )
 
         if "error" in res_override:
             raise HTTPException(status_code=400, detail=res_override["error"])
