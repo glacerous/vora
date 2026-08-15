@@ -1104,18 +1104,13 @@ def _reconstruct_thread(
         t_dl_pts_end = time.time()
         print(f"[TIMING] Save/download points3d.ply: {t_dl_pts_end - t_dl_pts_start:.4f}s")
 
-        # Filter background floaters and noise from points3d.ply locally on CPU (<0.1s)
+        # Ensure local points3d.ply is cleaned for local DBH extraction
         if points3d_path and os.path.exists(points3d_path):
             try:
                 from carbon.dbh_extractor import clean_and_filter_ply
                 clean_and_filter_ply(points3d_path)
-                print(f"[RECONSTRUCT] Cleaned points3d.ply (removed floating background noise particles)")
-                if uploaded:
-                    from storage.r2_client import upload_splat
-                    upload_splat(points3d_path, tree_code, custom_timestamp=custom_ts or int(time.time()), custom_filename="points3d.ply")
-                    print(f"[RECONSTRUCT] Uploaded clean floater-free points3d.ply to R2 ({os.path.getsize(points3d_path)/1024:.1f} KB)")
             except Exception as clean_err:
-                print(f"[RECONSTRUCT] Failed to clean points3d.ply: {clean_err}")
+                print(f"[RECONSTRUCT] Local points3d.ply clean pass: {clean_err}")
 
         # Note: points3d_all.npy download & fn_align.remote omitted to eliminate ~35MB outbound PLY bounce.
         # Local ground-separated geometric cylinder detection runs directly on points3d.ply in <0.1s.

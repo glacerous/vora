@@ -541,6 +541,138 @@ def upload_to_r2(file_path: str, tree_code: str, custom_timestamp: int = None, i
     )
     return presigned_url
 
+def _clean_ply_on_modal(ply_path: str) -> None:
+    """Cleans background air floaters and ground noise directly on Modal using RANSAC + SOR."""
+    import os
+    import numpy as np
+    from scipy.spatial import KDTree
+
+    if not os.path.exists(ply_path):
+        return
+
+    with open(ply_path, "rb") as f:
+        header_lines = []
+        num_vertices = 0
+        properties = []
+        is_binary = False
+        while True:
+            line = f.readline().decode("ascii", errors="ignore").strip()
+            header_lines.append(line)
+            if line.startswith("format binary_little_endian"):
+                is_binary = True
+            elif line.startswith("element vertex"):
+                num_vertices = int(line.split()[-1])
+            elif line.startswith("property"):
+                parts = line.split()
+                if len(parts) >= 3:
+                    properties.append((parts[1], parts[2]))
+            elif line == "end_header":
+                break
+
+        if num_vertices < 20 or not is_binary:
+            return
+
+        dtype_map = []
+        for p_type, p_name in properties:
+            if p_type in ("float", "float32"):
+                dtype_map.append((p_name, "<f4"))
+            elif p_type in ("int", "int32", "uint"):
+                dtype_map.append((p_name, "<i4"))
+            elif p_type in ("uchar", "uint8"):
+                dtype_map.append((p_name, "u1"))
+            else:
+                dtype_map.append((p_name, "<f4"))
+
+        vertex_data = np.fromfile(f, dtype=np.dtype(dtype_map), count=num_vertices)
+
+    pts = np.column_stack((vertex_data["x"], vertex_data["y"], vertex_data["z"]))
+
+    # 1. RANSAC ground plane isolation
+    sample_size = min(len(pts), 10000)
+    rng = np.random.default_rng(42)
+    sample_idx = rng.choice(len(pts), sample_size, replace=False)
+    sample_pts = pts[sample_idx]
+
+    max_iter = 100
+    thresh = 0.06
+    r_gen = np.random.default_rng(42)
+    samples = r_gen.choice(sample_size, size=(max_iter, 3), replace=True)
+    best_in = np.zeros(sample_size, dtype=bool)
+    best_pl = None
+    for s in samples:
+        p1, p2, p3 = sample_pts[s[0]], sample_pts[s[1]], sample_pts[s[2]]
+        n = np.cross(p2 - p1, p3 - p1)
+        nl = np.linalg.norm(n)
+        if nl < 1e-6:
+            continue
+        n = n / nl
+        d = -np.dot(n, p1)
+        inliers = np.abs(np.dot(sample_pts, n) + d) < thresh
+        if np.sum(inliers) > np.sum(best_in):
+            best_in = inliers
+            best_pl = (n, d)
+
+    if best_pl is not None:
+        n_g, d_g = best_pl
+        h_g = np.dot(sample_pts, n_g) + d_g
+        if np.median(h_g) < 0:
+            n_g, d_g = -n_g, -d_g
+        fg_pts = sample_pts[(np.dot(sample_pts, n_g) + d_g) > 0.04]
+    else:
+        n_g = np.array([0.0, -1.0, 0.0])
+        fg_pts = sample_pts
+
+    if len(fg_pts) < 20:
+        fg_pts = sample_pts
+
+    ref = np.array([1.0, 0.0, 0.0]) if abs(n_g[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u1 = np.cross(n_g, ref)
+    u1 = u1 / (np.linalg.norm(u1) + 1e-9)
+    u2 = np.cross(n_g, u1)
+
+    p_u1 = np.dot(fg_pts, u1)
+    p_u2 = np.dot(fg_pts, u2)
+    hist, xedges, yedges = np.histogram2d(p_u1, p_u2, bins=35)
+    max_idx = np.unravel_index(np.argmax(hist), hist.shape)
+    peak_u1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
+    peak_u2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
+
+    # 2. Crop to cylinder around primary trunk
+    p_u1_all = np.dot(pts, u1)
+    p_u2_all = np.dot(pts, u2)
+    dist_sq = (p_u1_all - peak_u1) ** 2 + (p_u2_all - peak_u2) ** 2
+    CROP_RADIUS = 0.85
+    crop_mask = dist_sq <= (CROP_RADIUS ** 2)
+
+    filtered_vertex_data = vertex_data[crop_mask]
+    filtered_xyz = pts[crop_mask]
+
+    # 3. Statistical Outlier Removal (SOR)
+    if len(filtered_xyz) >= 20:
+        tree = KDTree(filtered_xyz)
+        dists, _ = tree.query(filtered_xyz, k=21, workers=-1)
+        mean_dists = dists[:, 1:].mean(axis=1)
+        g_mean = mean_dists.mean()
+        g_std = mean_dists.std()
+        inlier_mask = mean_dists <= (g_mean + 2.0 * g_std)
+        filtered_vertex_data = filtered_vertex_data[inlier_mask]
+
+    # 4. Overwrite PLY in place
+    n_out = len(filtered_vertex_data)
+    h_lines = [
+        "ply",
+        "format binary_little_endian 1.0",
+        f"element vertex {n_out}",
+    ]
+    for p_type, p_name in properties:
+        h_lines.append(f"property {p_type} {p_name}")
+    h_lines.append("end_header\n")
+    header_bytes = "\n".join(h_lines).encode("ascii")
+
+    with open(ply_path, "wb") as f_out:
+        f_out.write(header_bytes)
+        f_out.write(filtered_vertex_data.tobytes())
+
 @app.function(
     gpu=GPU_CONFIG,
     timeout=1800,  # 30 minutes
@@ -1229,6 +1361,11 @@ def run_reconstruction(images_bytes: list[bytes] = None, tree_code: str = "Unkno
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KSPLAT conversion exception: {conv_err}. Uploading raw PLY instead.")
                     splat_url = upload_to_r2(output_file_path, tree_code, custom_timestamp=ts, custom_filename="result.ply")
             if len(mast3r_candidates) > 0 and os.path.exists(mast3r_candidates[0]):
+                try:
+                    _clean_ply_on_modal(mast3r_candidates[0])
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Cleaned floaters from MASt3R point cloud before R2 upload")
+                except Exception as clean_err:
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Modal PLY floater cleaning exception: {clean_err}")
                 points3d_url = upload_to_r2(mast3r_candidates[0], tree_code, custom_timestamp=ts, custom_filename="points3d.ply")
             npy_path = None
             for candidate in npy_candidates:
