@@ -597,11 +597,13 @@ def run_reconstruction(images_bytes: list[bytes] = None, tree_code: str = "Unkno
         bucket = r2_config["R2_BUCKET_NAME"]
         res = s3.list_objects_v2(Bucket=bucket, Prefix=r2_frames_prefix)
         frame_keys = sorted([obj["Key"] for obj in res.get("Contents", []) if obj["Key"].lower().endswith((".jpg", ".jpeg", ".png"))])
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Downloading {len(frame_keys)} frames directly from R2 prefix {r2_frames_prefix}...")
-        
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Found {len(frame_keys)} frames in R2 prefix '{r2_frames_prefix}'")
+        if not frame_keys:
+            raise ValueError(f"No frames found in R2 prefix '{r2_frames_prefix}'! Extraction upload may have failed.")
+            
         def dl_frame(args):
             idx, key = args
-            dest = os.path.join(input_dir, f"{idx:03d}.jpg")
+            dest = os.path.join(input_dir, f"{idx:04d}.jpg")
             s3.download_file(bucket, key, dest)
             return dest
             
@@ -1529,14 +1531,24 @@ def extract_video_frames_modal(
                 tree_code = os.path.splitext(base_fname)[0]
 
         if r2_config and tree_code:
+            import boto3
+            from botocore.config import Config as BotoConfig
+            s3_frame_uploader = boto3.client(
+                "s3",
+                endpoint_url=f"https://{r2_config['CLOUDFLARE_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+                aws_access_key_id=r2_config["R2_ACCESS_KEY_ID"],
+                aws_secret_access_key=r2_config["R2_SECRET_ACCESS_KEY"],
+                config=BotoConfig(signature_version="s3v4"),
+                region_name="auto",
+            )
             r2_frames_prefix = f"tree_scans/{tree_code}/frames/"
             bucket = r2_config["R2_BUCKET_NAME"]
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Uploading {len(final_frames_bytes)} frames directly to R2 prefix {r2_frames_prefix}...")
             
             def upload_single_frame(args):
                 idx, f_bytes = args
-                key = f"{r2_frames_prefix}{idx:03d}.jpg"
-                s3.put_object(Bucket=bucket, Key=key, Body=f_bytes, ContentType="image/jpeg")
+                key = f"{r2_frames_prefix}{idx:04d}.jpg"
+                s3_frame_uploader.put_object(Bucket=bucket, Key=key, Body=f_bytes, ContentType="image/jpeg")
                 return key
                 
             with ThreadPoolExecutor(max_workers=8) as executor:

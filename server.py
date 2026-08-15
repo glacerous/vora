@@ -872,6 +872,7 @@ def _extract_thread(tree_code: str, r2_key: str, target: int, blur_thresh: int, 
         job_st = get_job_state(tree_code)
         job_st["frame_count"] = n
         job_st["overlap_warning"] = overlap_warning
+        job_st["r2_frames_prefix"] = r2_frames_prefix
         job_st["calibration_frame"] = None
         job_st["timings"] = {
             "client_to_server_s": client_to_server_s,
