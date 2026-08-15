@@ -2076,140 +2076,33 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                 print(f"[RECALCULATE] HTTP download failed for {target_url}: {http_err}")
             return False
 
-        if os.path.exists(local_npy_path) and os.path.getsize(local_npy_path) > 100000:
-            print(f"[RECALCULATE] Found locally cached dense pointmap: {local_npy_path} — skipping download.")
-        else:
-            print(f"[RECALCULATE] Downloading dense pointmap from R2 (key: tree_scans/{tree_code}/{timestamp}_points3D_all.npy)...")
-            npy_r2_key = f"tree_scans/{tree_code}/{timestamp}_points3D_all.npy"
-            if not _fetch_file_r2_or_http(pointmap_url, npy_r2_key, local_npy_path):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Historical scan does not have dense pointmap data. Please perform a new reconstruction."
-                )
-
-        # 5. Download the existing points3d_highres.ply from R2 if not already cached locally
-        if os.path.exists(local_ply_highres_path) and os.path.getsize(local_ply_highres_path) > 1000:
-            print(f"[RECALCULATE] Found locally cached points3d_highres.ply: {local_ply_highres_path} — skipping download.")
-        else:
-            points3d_highres_url = points3d_url.replace("points3d.ply", "points3d_highres.ply")
-            ply_highres_key = f"tree_scans/{tree_code}/{timestamp}_points3d_highres.ply"
-            ply_std_key = f"tree_scans/{tree_code}/{timestamp}_points3d.ply"
-            print(f"[RECALCULATE] Downloading existing points3d_highres.ply from R2...")
-            if not _fetch_file_r2_or_http(points3d_highres_url, ply_highres_key, local_ply_highres_path):
-                print(f"[RECALCULATE] points3d_highres.ply not found. Falling back to standard points3d.ply...")
-                if not _fetch_file_r2_or_http(points3d_url, ply_std_key, local_ply_highres_path):
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Failed to download point cloud for recalculation."
-                    )
-
-        # 6. Load pointmap and perform coordinate mapping
-        pts3d = np.load(local_npy_path)
-        N, H_crop, W_crop, _ = pts3d.shape
-        
-        target_idx = None
-        if body.frame_idx is not None and 0 <= body.frame_idx < N:
-            target_idx = body.frame_idx
-            print(f"[RECALCULATE] Using clicked frame index: idx={target_idx}/{N}")
-        else:
-            valid_counts = np.array([
-                np.sum(~np.all(pts3d[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d[i]), axis=-1))
-                for i in range(N)
-            ])
-            target_idx = int(np.argmax(valid_counts))
-            print(f"[RECALCULATE] Fallback representative frame: idx={target_idx}/{N} ({valid_counts[target_idx]:,} valid pixels)")
-        pointmap = pts3d[target_idx]
-
-        u1_crop, v1_crop = map_pixel_to_cropped(body.p1[0], body.p1[1], body.width, body.height, W_crop, H_crop)
-        u2_crop, v2_crop = map_pixel_to_cropped(body.p2[0], body.p2[1], body.width, body.height, W_crop, H_crop)
-
-        P1_cam = get_robust_3d_point(pointmap, u1_crop, v1_crop)
-        P2_cam = get_robust_3d_point(pointmap, u2_crop, v2_crop)
-
-        # Align camera space to world space using ICP (raw-to-raw) on Modal
-        try:
-            print(f"[RECALCULATE] Reading point cloud files for offloaded Modal alignment/filtering...")
-            with open(local_ply_highres_path, "rb") as f:
-                ply_bytes = f.read()
-            with open(local_npy_path, "rb") as f:
-                points3d_all_bytes = f.read()
-
-            print(f"[RECALCULATE] Offloading alignment and filtering to Modal...")
-            import modal
-            fn_align = modal.Function.from_name("instantsplat-app", "align_and_filter_ply_modal")
-            res = fn_align.remote(ply_bytes, points3d_all_bytes, body.p1, body.p2, body.width, body.height, body.frame_idx)
-            
-            P1 = res.get("P1")
-            P2 = res.get("P2")
-            filtered_ply = res.get("filtered_ply")
-            
-            if filtered_ply:
-                with open(local_ply_highres_path, "wb") as f:
-                    f.write(filtered_ply)
-                print(f"[RECALCULATE] Saved high-res filtered point cloud from Modal ({len(filtered_ply)/1024:.1f} KB)")
-                # Generate decimated point cloud for display
-                decimate_ply_file(local_ply_highres_path, local_ply_path, target_count=300000)
-                
-                # Upload both the decimated points3d.ply and high-res version to R2 to update them
-                try:
-                    import shutil
-                    temp_upload_dir = os.path.join(local_dir, f"temp_upload_{timestamp}_{tree_code}")
-                    os.makedirs(temp_upload_dir, exist_ok=True)
-                    
-                    target_ply = os.path.join(temp_upload_dir, "points3d.ply")
-                    target_ply_highres = os.path.join(temp_upload_dir, "points3d_highres.ply")
-                    
-                    shutil.copy2(local_ply_path, target_ply)
-                    shutil.copy2(local_ply_highres_path, target_ply_highres)
-                    
-                    from storage.r2_client import upload_splat
-                    upload_splat(target_ply, tree_code, custom_timestamp=int(timestamp))
-                    upload_splat(target_ply_highres, tree_code, custom_timestamp=int(timestamp))
-                    print(f"[RECALCULATE] Uploaded updated points3d.ply and points3d_highres.ply to R2")
-                    
-                    # Clean up temp upload files
-                    shutil.rmtree(temp_upload_dir, ignore_errors=True)
-                except Exception as upload_err:
-                    print(f"[RECALCULATE] Failed to upload recalculated PLYs to R2: {upload_err}")
-                
-            if P1 and P2:
-                print(f"[RECALCULATE] ICP Alignment successful. P1_world={P1}, P2_world={P2}")
+        # 5. Ensure point cloud is available locally (cached or downloaded via S3/HTTP)
+        point_cloud_path = local_ply_highres_path
+        if not (os.path.exists(point_cloud_path) and os.path.getsize(point_cloud_path) > 1000):
+            if os.path.exists(local_ply_path) and os.path.getsize(local_ply_path) > 1000:
+                point_cloud_path = local_ply_path
             else:
-                raise ValueError("Modal did not return aligned coordinates")
-        except Exception as align_err:
-            print(f"[RECALCULATE ERROR] Offloaded ICP Alignment failed: {align_err}. Using local camera-space fallback.")
-            P1 = P1_cam.tolist()
-            P2 = P2_cam.tolist()
-            try:
-                import shutil
-                shutil.copy(local_ply_highres_path, local_ply_path)
-                filter_points3d_ply(local_ply_path)
-                shutil.copy(local_ply_path, local_ply_highres_path)
-                decimate_ply_file(local_ply_highres_path, local_ply_path, target_count=300000)
-            except Exception as fb_err:
-                print(f"[RECALCULATE ERROR] Local fallback crop failed: {fb_err}")
+                ply_highres_key = f"tree_scans/{tree_code}/{timestamp}_points3d_highres.ply"
+                ply_std_key = f"tree_scans/{tree_code}/{timestamp}_points3d.ply"
+                points3d_highres_url = points3d_url.replace("points3d.ply", "points3d_highres.ply")
+                
+                print(f"[RECALCULATE] Fetching point cloud from R2 (direct S3)...")
+                if not _fetch_file_r2_or_http(points3d_highres_url, ply_highres_key, point_cloud_path):
+                    if not _fetch_file_r2_or_http(points3d_url, ply_std_key, point_cloud_path):
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Failed to download point cloud for recalculation."
+                        )
 
-        # 7. Perform DBH extraction using robust ground-separated geometric cylinder fitting
+        # 6. Extract accurate 3D trunk cylinder using ground-separated RANSAC engine
         scale_factor, _is_cal2, _src2 = _load_scale_factor_for_scan(tree_code)
-        
-        # Primary: robust ground-separated 3D cylinder detector
         from carbon.dbh_extractor import extract_dbh_from_mast3r
-        res_override = extract_dbh_from_mast3r(ply_path=local_ply_highres_path, scale_factor=scale_factor)
-        
-        if "error" in res_override or not res_override.get("geometry_3d"):
-            print(f"[RECALCULATE] Mast3R robust detector fallback to 2D click PCA: {res_override.get('error')}")
-            res_override = extract_dbh_with_2d_clicks(
-                ply_path=local_ply_highres_path,
-                P1=np.array(P1),
-                P2=np.array(P2),
-                scale=scale_factor
-            )
+        res_override = extract_dbh_from_mast3r(ply_path=point_cloud_path, scale_factor=scale_factor)
 
         if "error" in res_override:
             raise HTTPException(status_code=400, detail=res_override["error"])
 
-        # 8. Recalculate biomass & carbon
-        # Check species_predictions
+        # 7. Recalculate biomass & carbon
         species_preds = None
         raw_sp = target_scan.get("species_predictions")
         if raw_sp:

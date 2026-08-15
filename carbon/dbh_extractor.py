@@ -553,6 +553,10 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
 
     if slice_points_list_pass2:
         slice_points_all = np.vstack(slice_points_list_pass2)
+        if len(slice_points_all) > 100:
+            rng = np.random.default_rng(42)
+            idx = rng.choice(len(slice_points_all), size=100, replace=False)
+            slice_points_all = slice_points_all[idx]
     else:
         slice_points_all = np.empty((0, 3), dtype=np.float32)
 
@@ -781,9 +785,9 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     else:
         slice_points_all = np.concatenate(slice_points_list, axis=0)
 
-    if len(slice_points_all) > 500:
+    if len(slice_points_all) > 100:
         rng = np.random.default_rng(42)
-        idx = rng.choice(len(slice_points_all), size=500, replace=False)
+        idx = rng.choice(len(slice_points_all), size=100, replace=False)
         slice_points_all = slice_points_all[idx]
 
     R_final = float(np.median(radii))
