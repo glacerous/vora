@@ -1728,47 +1728,65 @@ def align_and_filter_ply_modal(
             except Exception as e:
                 print(f"[MODAL-ICP-ERROR] ICP Alignment failed: {e}")
 
-        # 3. Apply PLY filtering (cropping & outlier removal)
-        proj_axes = [0, 2]
-        rough_axis_idx = 1
-        
-        if center_x is not None and center_z is not None:
-            peak_h1 = center_x
-            peak_h2 = center_z
+        # 3. Apply orientation-agnostic PLY filtering (cropping around dominant axis & outlier removal)
+        if len(pts_world_raw) > 10000:
+            rng = np.random.default_rng(42)
+            sample_pts = pts_world_raw[rng.choice(len(pts_world_raw), 10000, replace=False)]
         else:
-            h1_all = pts_world_raw[:, proj_axes[0]]
-            h2_all = pts_world_raw[:, proj_axes[1]]
-            hist, xedges, yedges = np.histogram2d(h1_all, h2_all, bins=30)
+            sample_pts = pts_world_raw
+
+        mean_pts = sample_pts.mean(axis=0)
+        centered = sample_pts - mean_pts
+        cov = (centered.T @ centered) / max(len(centered) - 1, 1)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+
+        candidates = [
+            eigvecs[:, -1],                 # Primary PCA elongation
+            eigvecs[:, -2],                 # Secondary PCA
+            np.array([0.0, 1.0, 0.0]),      # Canonical Y
+            np.array([0.0, 0.0, 1.0]),      # Canonical Z
+        ]
+
+        best_score = -1.0
+        best_v = None
+        best_u1 = None
+        best_u2 = None
+        best_peak_u = None
+
+        for v_cand in candidates:
+            v_cand = v_cand / (np.linalg.norm(v_cand) + 1e-9)
+            ref = np.array([1.0, 0.0, 0.0]) if abs(v_cand[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+            u1 = np.cross(v_cand, ref)
+            u1 = u1 / (np.linalg.norm(u1) + 1e-9)
+            u2 = np.cross(v_cand, u1)
+
+            p_u1 = np.dot(sample_pts, u1)
+            p_u2 = np.dot(sample_pts, u2)
+
+            hist, xedges, yedges = np.histogram2d(p_u1, p_u2, bins=35)
             max_idx = np.unravel_index(np.argmax(hist), hist.shape)
-            rough_peak_h1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
-            rough_peak_h2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
+            peak_count = hist[max_idx]
 
-            ROUGH_CROP_RADIUS = 2.2
-            dist_sq_rough = (pts_world_raw[:, proj_axes[0]] - rough_peak_h1)**2 + (pts_world_raw[:, proj_axes[1]] - rough_peak_h2)**2
-            rough_cropped = pts_world_raw[dist_sq_rough <= ROUGH_CROP_RADIUS**2]
-            if len(rough_cropped) < 100:
-                rough_cropped = pts_world_raw
+            if peak_count > best_score:
+                best_score = peak_count
+                best_v = v_cand
+                best_u1 = u1
+                best_u2 = u2
+                peak_u1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
+                peak_u2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
+                best_peak_u = (peak_u1, peak_u2)
 
-            rough_y = rough_cropped[:, rough_axis_idx]
-            y_min = np.percentile(rough_y, 1)
-            y_max = np.percentile(rough_y, 99)
-            y_height = y_max - y_min
+        if center_x is not None and center_z is not None:
+            # When manual clicks exist, center crop on P1
+            p_u1_all = np.dot(pts_world_raw - P1_val, best_u1)
+            p_u2_all = np.dot(pts_world_raw - P1_val, best_u2)
+            dist_sq = p_u1_all**2 + p_u2_all**2
+        else:
+            p_u1_all = np.dot(pts_world_raw, best_u1)
+            p_u2_all = np.dot(pts_world_raw, best_u2)
+            dist_sq = (p_u1_all - best_peak_u[0])**2 + (p_u2_all - best_peak_u[1])**2
 
-            lower_mask = rough_y >= (y_max - y_height * 0.35)
-            lower_xyz = rough_cropped[lower_mask]
-            if len(lower_xyz) < 100:
-                lower_xyz = rough_cropped
-
-            h1 = lower_xyz[:, proj_axes[0]]
-            h2 = lower_xyz[:, proj_axes[1]]
-
-            hist_ref, xedges_ref, yedges_ref = np.histogram2d(h1, h2, bins=30)
-            max_idx_ref = np.unravel_index(np.argmax(hist_ref), hist_ref.shape)
-            peak_h1 = 0.5 * (xedges_ref[max_idx_ref[0]] + xedges_ref[max_idx_ref[0] + 1])
-            peak_h2 = 0.5 * (yedges_ref[max_idx_ref[1]] + yedges_ref[max_idx_ref[1] + 1])
-
-        dist_sq = (pts_world_raw[:, proj_axes[0]] - peak_h1)**2 + (pts_world_raw[:, proj_axes[1]] - peak_h2)**2
-        CROP_RADIUS = 1.0
+        CROP_RADIUS = 0.85
         crop_mask = dist_sq <= CROP_RADIUS**2
 
         if np.sum(crop_mask) < 20:

@@ -1340,7 +1340,7 @@
             
             function displayMetrics(metrics) {
                 // ── 3D CAD Wireframe & Measurement Overlay Generator ────────
-                if (metrics.geometry_3d && window.viewer && window.viewer.threeScene) {
+                if (metrics && metrics.geometry_3d && window.viewer && window.viewer.threeScene) {
                     try {
                         const g3d = metrics.geometry_3d;
                         const scene = window.viewer.threeScene;
@@ -1349,6 +1349,11 @@
                         const prevOverlay = (syncGroup ? syncGroup.getObjectByName('cad_measurement_overlay') : null)
                                          || scene.getObjectByName('cad_measurement_overlay');
                         if (prevOverlay && prevOverlay.parent) prevOverlay.parent.remove(prevOverlay);
+
+                        if (!g3d || g3d.error || g3d.center_x === undefined || g3d.radius_units === undefined || g3d.radius_units <= 0) {
+                            console.warn('[CAD] No valid 3D cylinder geometry available in scan metrics:', g3d);
+                            return;
+                        }
 
                         const cadGroup = new THREE.Group();
                         cadGroup.name = 'cad_measurement_overlay';
@@ -1364,12 +1369,12 @@
                         actualHeight = Math.abs(actualHMax - actualHMin);
 
                         // Parse 3D coordinates & direction vector from RANSAC/PCA
-                        const cx = g3d.center_x || 0;
-                        const cy = g3d.center_y || 0;
-                        const cz = g3d.center_z || 0;
-                        const dx = g3d.dir_x !== undefined ? g3d.dir_x : 0;
-                        const dy = g3d.dir_y !== undefined ? g3d.dir_y : 0;
-                        const dz = g3d.dir_z !== undefined ? g3d.dir_z : 1;
+                        const cx = Number(g3d.center_x);
+                        const cy = Number(g3d.center_y);
+                        const cz = Number(g3d.center_z);
+                        const dx = g3d.dir_x !== undefined ? Number(g3d.dir_x) : 0;
+                        const dy = g3d.dir_y !== undefined ? Number(g3d.dir_y) : 0;
+                        const dz = g3d.dir_z !== undefined ? Number(g3d.dir_z) : 1;
 
                         center_cyl = new THREE.Vector3(cx, cy, cz);
                         let center_3d = center_cyl;

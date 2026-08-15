@@ -1479,6 +1479,7 @@ origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -2045,25 +2046,45 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
         local_ply_highres_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d_highres.ply")
 
         # 4. Download dense pointmap (NPY) from R2 if not already cached locally
+        def _fetch_file_r2_or_http(target_url, r2_key, local_dst):
+            account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+            access_key = os.environ.get("R2_ACCESS_KEY_ID")
+            secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
+            bucket_name = os.environ.get("R2_BUCKET_NAME")
+            if all([account_id, access_key, secret_key, bucket_name]):
+                try:
+                    s3 = boto3.client(
+                        "s3",
+                        endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
+                        aws_access_key_id=access_key,
+                        aws_secret_access_key=secret_key,
+                        config=Config(signature_version="s3v4"),
+                        region_name="auto"
+                    )
+                    s3.download_file(bucket_name, r2_key, local_dst)
+                    if os.path.exists(local_dst) and os.path.getsize(local_dst) > 100:
+                        return True
+                except Exception as s3_err:
+                    print(f"[RECALCULATE] S3 direct download failed for {r2_key}: {s3_err}")
+            try:
+                res = requests.get(target_url, timeout=30)
+                if res.status_code == 200:
+                    with open(local_dst, "wb") as f:
+                        f.write(res.content)
+                    return True
+            except Exception as http_err:
+                print(f"[RECALCULATE] HTTP download failed for {target_url}: {http_err}")
+            return False
+
         if os.path.exists(local_npy_path) and os.path.getsize(local_npy_path) > 100000:
             print(f"[RECALCULATE] Found locally cached dense pointmap: {local_npy_path} — skipping download.")
         else:
-            print(f"[RECALCULATE] Downloading dense pointmap from {pointmap_url}")
-            try:
-                res_npy = requests.get(pointmap_url, timeout=30)
-                if res_npy.status_code != 200:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Historical scan does not have dense pointmap data. Please perform a new reconstruction."
-                    )
-                with open(local_npy_path, "wb") as f:
-                    f.write(res_npy.content)
-            except HTTPException as he:
-                raise he
-            except Exception as npy_err:
+            print(f"[RECALCULATE] Downloading dense pointmap from R2 (key: tree_scans/{tree_code}/{timestamp}_points3D_all.npy)...")
+            npy_r2_key = f"tree_scans/{tree_code}/{timestamp}_points3D_all.npy"
+            if not _fetch_file_r2_or_http(pointmap_url, npy_r2_key, local_npy_path):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Failed to download dense pointmap: {npy_err}"
+                    detail="Historical scan does not have dense pointmap data. Please perform a new reconstruction."
                 )
 
         # 5. Download the existing points3d_highres.ply from R2 if not already cached locally
@@ -2071,30 +2092,16 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             print(f"[RECALCULATE] Found locally cached points3d_highres.ply: {local_ply_highres_path} — skipping download.")
         else:
             points3d_highres_url = points3d_url.replace("points3d.ply", "points3d_highres.ply")
-            print(f"[RECALCULATE] Downloading existing points3d_highres.ply from {points3d_highres_url}")
-            try:
-                res_ply = requests.get(points3d_highres_url, timeout=30)
-                if res_ply.status_code == 200:
-                    with open(local_ply_highres_path, "wb") as f:
-                        f.write(res_ply.content)
-                    print(f"[RECALCULATE] Successfully downloaded existing points3d_highres.ply from R2")
-                else:
-                    # Fallback to standard points3d.ply
-                    print(f"[RECALCULATE] points3d_highres.ply not found. Falling back to downloading standard points3d.ply from {points3d_url}")
-                    res_ply_std = requests.get(points3d_url, timeout=30)
-                    if res_ply_std.status_code != 200:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Failed to download points3d.ply: HTTP {res_ply_std.status_code}"
-                        )
-                    with open(local_ply_highres_path, "wb") as f:
-                        f.write(res_ply_std.content)
-                    print(f"[RECALCULATE] Successfully downloaded standard points3d.ply from R2 as fallback")
-            except Exception as ply_err:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Failed to download points3d: {ply_err}"
-                )
+            ply_highres_key = f"tree_scans/{tree_code}/{timestamp}_points3d_highres.ply"
+            ply_std_key = f"tree_scans/{tree_code}/{timestamp}_points3d.ply"
+            print(f"[RECALCULATE] Downloading existing points3d_highres.ply from R2...")
+            if not _fetch_file_r2_or_http(points3d_highres_url, ply_highres_key, local_ply_highres_path):
+                print(f"[RECALCULATE] points3d_highres.ply not found. Falling back to standard points3d.ply...")
+                if not _fetch_file_r2_or_http(points3d_url, ply_std_key, local_ply_highres_path):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Failed to download point cloud for recalculation."
+                    )
 
         # 6. Load pointmap and perform coordinate mapping
         pts3d = np.load(local_npy_path)
