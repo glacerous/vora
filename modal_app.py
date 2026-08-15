@@ -406,6 +406,83 @@ def parse_ply_coords(ply_path):
         print(f"[MODAL-CALIB-ERROR] Failed to parse PLY: {e}")
         return None
 
+def _validate_early_geometry(source_path: str, detected_n_views: int):
+    """
+    Gate 2: Early MASt3R point cloud density & camera path parallax validation.
+    Aborts execution before the expensive 2000-iteration 3D Gaussian Splatting optimization
+    if the scene geometry is invalid, empty, or lacks parallax (non-orbit).
+    """
+    import struct
+    import numpy as np
+
+    sparse_candidates = [
+        os.path.join(source_path, f"sparse_{detected_n_views}", "0"),
+        os.path.join(source_path, f"sparse_{detected_n_views}"),
+        os.path.join(source_path, "sparse", "0"),
+    ]
+    sparse_dir = None
+    for c in sparse_candidates:
+        if os.path.isdir(c):
+            sparse_dir = c
+            break
+
+    if not sparse_dir:
+        raise RuntimeError("Early geometry validation failed: No sparse reconstruction folder found after MASt3R initialization.")
+
+    # 1. Count points in points3D.bin or points3D.txt or points3D.ply
+    points_bin = os.path.join(sparse_dir, "points3D.bin")
+    points_txt = os.path.join(sparse_dir, "points3D.txt")
+    points_ply = os.path.join(sparse_dir, "points3D.ply")
+    
+    num_points = 0
+    if os.path.exists(points_bin):
+        try:
+            with open(points_bin, "rb") as f:
+                num_points = struct.unpack("<Q", f.read(8))[0]
+        except Exception:
+            pass
+    elif os.path.exists(points_txt):
+        try:
+            with open(points_txt, "r") as f:
+                num_points = sum(1 for line in f if line.strip() and not line.startswith("#"))
+        except Exception:
+            pass
+    elif os.path.exists(points_ply):
+        pts = parse_ply_coords(points_ply)
+        if pts is not None:
+            num_points = len(pts)
+
+    print(f"[GATE-2-CHECK] MASt3R triangulated point count: {num_points}")
+    MIN_REQUIRED_POINTS = 250
+    if num_points > 0 and num_points < MIN_REQUIRED_POINTS:
+        raise RuntimeError(
+            f"Early geometry validation failed: Only {num_points} 3D points were reconstructed from the video (minimum {MIN_REQUIRED_POINTS} required). "
+            f"The video lacks sufficient texture or clear tree trunk features. Please rescan in good lighting."
+        )
+
+    # 2. Check camera parallax
+    images_bin = os.path.join(sparse_dir, "images.bin")
+    images_txt = os.path.join(sparse_dir, "images.txt")
+    centers = None
+    if os.path.exists(images_bin):
+        centers = _read_colmap_camera_centers(images_bin)
+    elif os.path.exists(images_txt):
+        centers = _read_colmap_images_txt(images_txt)
+
+    if centers is not None and len(centers) >= 2:
+        diffs = np.linalg.norm(np.diff(centers, axis=0), axis=1)
+        path_length = float(np.sum(diffs))
+        print(f"[GATE-2-CHECK] Camera path length: {path_length:.4f} units across {len(centers)} views")
+        MIN_REQUIRED_PATH = 0.10
+        if path_length < MIN_REQUIRED_PATH:
+            raise RuntimeError(
+                f"Early geometry validation failed: Insufficient camera movement/parallax detected (path length {path_length:.3f} < {MIN_REQUIRED_PATH}). "
+                f"Please record a smooth orbit walking around the tree trunk instead of standing still."
+            )
+
+    print("[GATE-2-CHECK] [OK] Early geometry validation passed! Proceeding to 3D Gaussian Splatting optimization.")
+
+
 def upload_to_r2(file_path: str, tree_code: str, custom_timestamp: int = None, is_thumbnail: bool = False, custom_filename: str = None) -> str:
     import os
     import time
@@ -704,6 +781,10 @@ def run_reconstruction(images_bytes: list[bytes], tree_code: str = "Unknown", re
     if detected_n_views is None:
         raise RuntimeError("Could not find any sparse_N folder created by init_geo.py")
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] init_geo created sparse_{detected_n_views}/ — using n_views={detected_n_views} for train.py")
+
+    # Gate 2: Early MASt3R point cloud density & camera path parallax validation
+    progress_dict[tree_code] = "Validating 3D geometry"
+    _validate_early_geometry(source_path, detected_n_views)
 
     # 4. Stage 2: Fast 3D-Gaussian Optimization (train.py)
     progress_dict[tree_code] = "Training Gaussians"
