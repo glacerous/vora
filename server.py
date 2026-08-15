@@ -842,8 +842,13 @@ def _reconstruct_thread(
             camera_poses = state.get("camera_poses")
             result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations, camera_poses)
         except Exception as remote_exc:
-            # fn.remote() failed — this typically happens when the Render server
-            # restarted while the Modal job was still running (connection reset).
+            # If it's a TypeError / argument error / signature mismatch, fail immediately
+            if isinstance(remote_exc, (TypeError, ValueError)) or "takes from" in str(remote_exc) or "argument" in str(remote_exc):
+                print(f"[RECONSTRUCT] fn.remote() failed with non-recoverable error: {remote_exc}")
+                raise remote_exc
+
+            # Otherwise, fn.remote() failed due to connection drop/timeout — this typically happens
+            # when the Render server restarted while the Modal job was still running (connection reset).
             # The Modal job may have finished and written its completion marker to
             # the shared Dict. Poll for it for up to 20 minutes before giving up.
             print(f"[RECONSTRUCT] fn.remote() raised: {remote_exc}")
