@@ -1435,11 +1435,11 @@
                         // (all trunk points projected onto v_pass2) — use those directly.
                         console.log('[CAD] Cylinder extents from Python geometry_3d: h_min=' + actualHMin.toFixed(4) + ' h_max=' + actualHMax.toFixed(4) + ' h_target=' + actualHTarget.toFixed(4) + ' height=' + actualHeight.toFixed(4));
 
-                        // Calculate base, top, and center coordinates of trunk cylinder (up to breast height / h_target)
+                        // Calculate full trunk cylinder extents from h_min to h_max
+                        const totalHeight = Math.max(0.2, Math.abs(actualHMax - actualHMin));
                         const base_3d = center_3d.clone().addScaledVector(dir_3d, actualHMin - actualHTarget);
-                        const top_3d = center_3d; // top is exactly the breast height target
+                        const top_3d = center_3d.clone().addScaledVector(dir_3d, actualHMax - actualHTarget);
                         const center_geom = base_3d.clone().add(top_3d).multiplyScalar(0.5);
-                        actualHeight = Math.abs(actualHTarget - actualHMin);
 
                         // Calculate quaternion rotation to align local Y with dir_3d
                         const up = new THREE.Vector3(0, 1, 0);
@@ -1452,8 +1452,8 @@
                         cadGeomGroup.quaternion.copy(qAlign);
                         cadGroup.add(cadGeomGroup);
 
-                        // 1. Trunk Wireframe Cylinder (local Y coordinates)
-                        const cylGeo = new THREE.CylinderGeometry(radius, radius, actualHeight, 16, 8, true);
+                        // 1. Trunk Wireframe Cylinder (local Y coordinates spanning full trunk)
+                        const cylGeo = new THREE.CylinderGeometry(radius, radius, totalHeight, 16, 8, true);
                         const cylMat = new THREE.MeshBasicMaterial({
                             color: 0x06b6d4, // cyan
                             wireframe: true,
@@ -1464,7 +1464,7 @@
                         cylinder.position.set(0, 0, 0);
                         cadGeomGroup.add(cylinder);
 
-                        // 2. Glowing DBH Measurement Ring
+                        // 2. Glowing DBH Measurement Ring (placed at breast height h_target)
                         const ringGeo = new THREE.TorusGeometry(radius * 1.05, radius * 0.04, 16, 32);
                         const ringMat = new THREE.MeshBasicMaterial({
                             color: 0x10b981, // emerald green
@@ -1474,15 +1474,15 @@
                         const qTorus = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
                         ringMesh.quaternion.copy(qTorus);
                         
-                        // Ring is placed exactly at the top end of the cylinder (breast height / DBH measurement point)
-                        const ringY = actualHeight / 2;
+                        // Ring is placed at the exact breast height position relative to cylinder center
+                        const ringY = actualHTarget - (actualHMin + actualHMax) * 0.5;
                         ringMesh.position.set(0, ringY, 0);
                         cylinder.add(ringMesh);
 
                         // 3. Vertical Height Axis Line (along local Y)
                         const points = [
-                            new THREE.Vector3(0, -actualHeight/2, 0),
-                            new THREE.Vector3(0, actualHeight/2, 0)
+                            new THREE.Vector3(0, -totalHeight/2, 0),
+                            new THREE.Vector3(0, totalHeight/2, 0)
                         ];
                         const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
                         const lineMat = new THREE.LineDashedMaterial({

@@ -1728,63 +1728,74 @@ def align_and_filter_ply_modal(
             except Exception as e:
                 print(f"[MODAL-ICP-ERROR] ICP Alignment failed: {e}")
 
-        # 3. Apply orientation-agnostic PLY filtering (cropping around dominant axis & outlier removal)
+        # 3. Apply orientation-agnostic PLY filtering (ground plane separation & trunk crop)
         if len(pts_world_raw) > 10000:
             rng = np.random.default_rng(42)
             sample_pts = pts_world_raw[rng.choice(len(pts_world_raw), 10000, replace=False)]
         else:
             sample_pts = pts_world_raw
 
-        mean_pts = sample_pts.mean(axis=0)
-        centered = sample_pts - mean_pts
-        cov = (centered.T @ centered) / max(len(centered) - 1, 1)
-        eigvals, eigvecs = np.linalg.eigh(cov)
+        # RANSAC ground plane detection
+        def fit_plane_ransac_local(pts_in, max_iter=100, thresh=0.06):
+            n_pts = len(pts_in)
+            if n_pts < 10:
+                return None, np.zeros(n_pts, dtype=bool)
+            r_gen = np.random.default_rng(42)
+            samples = r_gen.choice(n_pts, size=(max_iter, 3), replace=True)
+            best_in = np.zeros(n_pts, dtype=bool)
+            best_pl = None
+            for s_idx in samples:
+                p1_s, p2_s, p3_s = pts_in[s_idx[0]], pts_in[s_idx[1]], pts_in[s_idx[2]]
+                n_vec = np.cross(p2_s - p1_s, p3_s - p1_s)
+                n_len = np.linalg.norm(n_vec)
+                if n_len < 1e-6:
+                    continue
+                n_vec = n_vec / n_len
+                d_val = -np.dot(n_vec, p1_s)
+                inliers_m = np.abs(np.dot(pts_in, n_vec) + d_val) < thresh
+                if np.sum(inliers_m) > np.sum(best_in):
+                    best_in = inliers_m
+                    best_pl = (n_vec, d_val)
+            return best_pl, best_in
 
-        candidates = [
-            eigvecs[:, -1],                 # Primary PCA elongation
-            eigvecs[:, -2],                 # Secondary PCA
-            np.array([0.0, 1.0, 0.0]),      # Canonical Y
-            np.array([0.0, 0.0, 1.0]),      # Canonical Z
-        ]
+        plane_res, grnd_mask = fit_plane_ransac_local(sample_pts)
+        if plane_res is not None and np.sum(grnd_mask) > len(sample_pts) * 0.05:
+            n_ground, d_ground = plane_res
+            h_g = np.dot(sample_pts, n_ground) + d_ground
+            if np.median(h_g) < 0:
+                n_ground = -n_ground
+                d_ground = -d_ground
+                h_g = -h_g
+            fg_pts_modal = sample_pts[h_g > 0.04]
+        else:
+            n_ground = np.array([0.0, -1.0, 0.0])
+            fg_pts_modal = sample_pts
 
-        best_score = -1.0
-        best_v = None
-        best_u1 = None
-        best_u2 = None
-        best_peak_u = None
+        if len(fg_pts_modal) < 20:
+            fg_pts_modal = sample_pts
 
-        for v_cand in candidates:
-            v_cand = v_cand / (np.linalg.norm(v_cand) + 1e-9)
-            ref = np.array([1.0, 0.0, 0.0]) if abs(v_cand[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-            u1 = np.cross(v_cand, ref)
-            u1 = u1 / (np.linalg.norm(u1) + 1e-9)
-            u2 = np.cross(v_cand, u1)
+        ref = np.array([1.0, 0.0, 0.0]) if abs(n_ground[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        u1 = np.cross(n_ground, ref)
+        u1 = u1 / (np.linalg.norm(u1) + 1e-9)
+        u2 = np.cross(n_ground, u1)
 
-            p_u1 = np.dot(sample_pts, u1)
-            p_u2 = np.dot(sample_pts, u2)
+        p_u1 = np.dot(fg_pts_modal, u1)
+        p_u2 = np.dot(fg_pts_modal, u2)
 
-            hist, xedges, yedges = np.histogram2d(p_u1, p_u2, bins=35)
-            max_idx = np.unravel_index(np.argmax(hist), hist.shape)
-            peak_count = hist[max_idx]
-
-            if peak_count > best_score:
-                best_score = peak_count
-                best_v = v_cand
-                best_u1 = u1
-                best_u2 = u2
-                peak_u1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
-                peak_u2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
-                best_peak_u = (peak_u1, peak_u2)
+        hist, xedges, yedges = np.histogram2d(p_u1, p_u2, bins=35)
+        max_idx = np.unravel_index(np.argmax(hist), hist.shape)
+        peak_u1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
+        peak_u2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
 
         if center_x is not None and center_z is not None:
             # When manual clicks exist, center crop on P1
-            p_u1_all = np.dot(pts_world_raw - P1_val, best_u1)
-            p_u2_all = np.dot(pts_world_raw - P1_val, best_u2)
+            p_u1_all = np.dot(pts_world_raw - P1_val, u1)
+            p_u2_all = np.dot(pts_world_raw - P1_val, u2)
             dist_sq = p_u1_all**2 + p_u2_all**2
         else:
-            p_u1_all = np.dot(pts_world_raw, best_u1)
-            p_u2_all = np.dot(pts_world_raw, best_u2)
-            dist_sq = (p_u1_all - best_peak_u[0])**2 + (p_u2_all - best_peak_u[1])**2
+            p_u1_all = np.dot(pts_world_raw, u1)
+            p_u2_all = np.dot(pts_world_raw, u2)
+            dist_sq = (p_u1_all - peak_u1)**2 + (p_u2_all - peak_u2)**2
 
         CROP_RADIUS = 0.85
         crop_mask = dist_sq <= CROP_RADIUS**2

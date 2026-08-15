@@ -366,9 +366,51 @@ def extract_dbh(ply_path, scale_factor=1.0, vertical_axis='z', breast_height=1.3
     }
 
 
+def fit_plane_ransac(points: np.ndarray, max_iterations: int = 150, threshold: float = 0.05):
+    """RANSAC to identify the dominant terrain/ground plane in the point cloud."""
+    n = len(points)
+    if n < 10:
+        return None, np.zeros(n, dtype=bool)
+    
+    rng = np.random.default_rng(42)
+    sample_indices = rng.choice(n, size=(max_iterations, 3), replace=True)
+    best_inliers = np.zeros(n, dtype=bool)
+    best_plane = None
+    
+    for idxs in sample_indices:
+        p1, p2, p3 = points[idxs[0]], points[idxs[1]], points[idxs[2]]
+        v1 = p2 - p1
+        v2 = p3 - p1
+        normal = np.cross(v1, v2)
+        norm_len = np.linalg.norm(normal)
+        if norm_len < 1e-6:
+            continue
+        normal = normal / norm_len
+        d = -np.dot(normal, p1)
+        
+        dists = np.abs(np.dot(points, normal) + d)
+        inliers = dists < threshold
+        if np.sum(inliers) > np.sum(best_inliers):
+            best_inliers = inliers
+            best_plane = (normal, d)
+            
+    if best_plane is not None and np.sum(best_inliers) >= 10:
+        inlier_pts = points[best_inliers]
+        centroid = inlier_pts.mean(axis=0)
+        cov = np.cov((inlier_pts - centroid).T)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        normal = eigvecs[:, 0]
+        d = -np.dot(normal, centroid)
+        dists = np.abs(np.dot(points, normal) + d)
+        best_inliers = dists < threshold
+        best_plane = (normal, d)
+        
+    return best_plane, best_inliers
+
+
 def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
                              breast_height: float = 1.3) -> dict:
-    logger.info("[MAST3R DBH] Starting orientation-agnostic DBH extraction from MASt3R point cloud...")
+    logger.info("[MAST3R DBH] Starting robust ground-plane separating DBH extraction from MASt3R point cloud...")
     scale = load_scale_factor(scale_factor)
 
     try:
@@ -380,81 +422,75 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     if len(points) < 30:
         return {"error": f"MASt3R cloud too sparse for DBH extraction ({len(points)} pts)"}
 
-    # ── 1. Orientation-agnostic trunk axis discovery via candidate PCA scoring ──
-    if len(points) > 15000:
+    # 1. Downsample for fast robust geometry analysis
+    if len(points) > 20000:
         rng = np.random.default_rng(42)
-        sample_pts = points[rng.choice(len(points), 15000, replace=False)]
+        sample_pts = points[rng.choice(len(points), 20000, replace=False)]
     else:
         sample_pts = points
 
-    mean_pts = sample_pts.mean(axis=0)
-    centered = sample_pts - mean_pts
-    cov = (centered.T @ centered) / max(len(centered) - 1, 1)
-    eigvals, eigvecs = np.linalg.eigh(cov)
+    # 2. Identify dominant terrain/ground plane via RANSAC
+    plane, ground_mask = fit_plane_ransac(sample_pts, max_iterations=150, threshold=0.05 / scale)
+    if plane is not None and np.sum(ground_mask) > len(sample_pts) * 0.05:
+        normal, d = plane
+        h_ground = np.dot(sample_pts, normal) + d
+        if np.median(h_ground) < 0:
+            normal = -normal
+            d = -d
+            h_ground = -h_ground
+        fg_mask = h_ground > (0.04 / scale)
+        fg_pts = sample_pts[fg_mask]
+        logger.info(f"[MAST3R DBH] Ground plane detected: normal={normal}, foreground points={len(fg_pts)}")
+    else:
+        normal = np.array([0.0, -1.0, 0.0])
+        fg_pts = sample_pts
 
-    candidates = [
-        eigvecs[:, -1],                 # Primary PCA elongation
-        eigvecs[:, -2],                 # Secondary PCA
-        np.array([0.0, 1.0, 0.0]),      # Canonical Y
-        np.array([0.0, 0.0, 1.0]),      # Canonical Z
-    ]
+    if len(fg_pts) < 30:
+        fg_pts = sample_pts
 
-    best_score = -1.0
-    best_v = None
-    best_u1 = None
-    best_u2 = None
-    best_peak_u = None
+    # 3. Project foreground points into cross-section plane to locate trunk cluster
+    ref = np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u1 = np.cross(normal, ref)
+    u1 = u1 / (np.linalg.norm(u1) + 1e-9)
+    u2 = np.cross(normal, u1)
 
-    for v_cand in candidates:
-        v_cand = v_cand / (np.linalg.norm(v_cand) + 1e-9)
-        ref = np.array([1.0, 0.0, 0.0]) if abs(v_cand[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-        u1 = np.cross(v_cand, ref)
-        u1 = u1 / (np.linalg.norm(u1) + 1e-9)
-        u2 = np.cross(v_cand, u1)
+    p_u1 = np.dot(fg_pts, u1)
+    p_u2 = np.dot(fg_pts, u2)
 
-        p_u1 = np.dot(sample_pts, u1)
-        p_u2 = np.dot(sample_pts, u2)
+    hist, xedges, yedges = np.histogram2d(p_u1, p_u2, bins=40)
+    max_idx = np.unravel_index(np.argmax(hist), hist.shape)
+    peak_u1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
+    peak_u2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
 
-        hist, xedges, yedges = np.histogram2d(p_u1, p_u2, bins=35)
-        max_idx = np.unravel_index(np.argmax(hist), hist.shape)
-        peak_count = hist[max_idx]
-
-        if peak_count > best_score:
-            best_score = peak_count
-            best_v = v_cand
-            best_u1 = u1
-            best_u2 = u2
-            peak_u1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
-            peak_u2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
-            best_peak_u = (peak_u1, peak_u2)
-
-    # ── 2. Coarse trunk crop around cross-section peak ───────────────────────
-    p_u1_all = np.dot(points, best_u1)
-    p_u2_all = np.dot(points, best_u2)
-    dist_sq = (p_u1_all - best_peak_u[0])**2 + (p_u2_all - best_peak_u[1])**2
-    CROP_RADIUS = float(np.clip(0.40 / scale, 0.10, 0.60))
+    # 4. Crop around trunk cluster across full point cloud
+    p_u1_all = np.dot(points, u1)
+    p_u2_all = np.dot(points, u2)
+    dist_sq = (p_u1_all - peak_u1)**2 + (p_u2_all - peak_u2)**2
+    CROP_RADIUS = float(np.clip(0.35 / scale, 0.08, 0.50))
     trunk_mask = dist_sq <= CROP_RADIUS**2
     trunk_pts = points[trunk_mask]
     if len(trunk_pts) < 20:
         trunk_pts = points
         logger.warning("[MAST3R DBH] Coarse crop yielded too few points, using full cloud.")
 
-    # ── 3. Refine axis direction on trunk cluster points via PCA ─────────────
+    # 5. Refine trunk axis direction via PCA on cropped trunk points
     trunk_mean = trunk_pts.mean(axis=0)
-    centered_trunk = trunk_pts - trunk_mean
-    cov_t = (centered_trunk.T @ centered_trunk) / max(len(centered_trunk) - 1, 1)
-    e_vals, e_vecs = np.linalg.eigh(cov_t)
-    v_pass2 = e_vecs[:, -1]
+    centered = trunk_pts - trunk_mean
+    cov = np.cov(centered.T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    v_pass2 = eigvecs[:, -1]
 
-    if np.dot(v_pass2, best_v) < 0:
+    # Ensure v_pass2 points upwards relative to ground
+    if np.dot(v_pass2, normal) < 0:
         v_pass2 = -v_pass2
 
-    ref = np.array([1.0, 0.0, 0.0]) if abs(v_pass2[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-    u1_pass2 = np.cross(v_pass2, ref)
+    # Orthonormal basis for refined trunk axis
+    ref_t = np.array([1.0, 0.0, 0.0]) if abs(v_pass2[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u1_pass2 = np.cross(v_pass2, ref_t)
     u1_pass2 = u1_pass2 / (np.linalg.norm(u1_pass2) + 1e-9)
     u2_pass2 = np.cross(v_pass2, u1_pass2)
 
-    # ── 4. Project along refined axis and fit multi-slice circles ────────────
+    # 6. Project along trunk axis and fit multi-slice circles
     proj_pass2 = np.dot(trunk_pts, v_pass2)
     h_min_pass2 = float(np.percentile(proj_pass2, 2))
     h_max_pass2 = float(np.percentile(proj_pass2, 98))
@@ -463,9 +499,9 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
 
     h_target_pass2 = h_min_pass2 + (breast_height / scale)
     if (h_target_pass2 - h_min_pass2) >= total_h_pass2 * 0.90:
-        h_target_pass2 = h_min_pass2 + total_h_pass2 * 0.30
+        h_target_pass2 = h_min_pass2 + total_h_pass2 * 0.40
 
-    tol_pass2 = min(max(0.12 / scale, total_h_pass2 * 0.02), total_h_pass2 * 0.15)
+    tol_pass2 = min(max(0.10 / scale, total_h_pass2 * 0.02), total_h_pass2 * 0.15)
     offsets = [-tol_pass2 * 0.4, 0.0, tol_pass2 * 0.4]
     radii_pass2 = []
     centers_2d_pass2 = []
@@ -488,14 +524,14 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
             slice_points_list_pass2.append(pts_slice[inlier_mask])
             inlier_count += np.sum(inlier_mask)
 
-    method_used = "MASt3R orientation-adaptive multi-slice PCA"
+    method_used = "MASt3R RANSAC ground-separated trunk cylinder"
     if not radii_pass2:
         logger.warning("[MAST3R DBH] Multi-slice circle fit failed, using robust fallback.")
         pts_2d = np.column_stack((np.dot(trunk_pts, u1_pass2), np.dot(trunk_pts, u2_pass2)))
         xc, yc, R, inlier_mask, err = fit_circle_robust(pts_2d)
         if R is None or R <= 0 or R > CROP_RADIUS * 2.0:
             R = 0.15 / scale
-            xc, yc = best_peak_u[0], best_peak_u[1]
+            xc, yc = peak_u1, peak_u2
         radii_pass2 = [R]
         centers_2d_pass2 = [(xc, yc)]
         slice_points_list_pass2 = [trunk_pts[inlier_mask] if len(inlier_mask) > 0 else trunk_pts[:10]]
@@ -561,16 +597,12 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     if len(points) < 10:
         return {"error": "Point cloud too sparse"}
 
-    # 1. Determine seed direction vector v_seed from user clicks
+    # 1. Determine seed direction vector v_seed from user clicks (Base -> Top)
     v_seed = P2 - P1
     v_seed_norm = np.linalg.norm(v_seed)
     if v_seed_norm < 1e-6:
         return {"error": "P1 and P2 are identical or too close"}
     v_seed = v_seed / v_seed_norm
-
-    # Force seed direction to point upwards (negative Y axis in Y-down convention)
-    if v_seed[1] > 0:
-        v_seed = -v_seed
 
     # 2. Iterative Adaptive PCA Refinement (up to 4 passes or until delta < 1.0°)
     r_base_m = max(crop_radius_m, 0.25)
@@ -658,9 +690,9 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
             logger.info(f"[MANUAL DBH] PCA converged at Pass {p_idx + 1} (delta {delta_deg:.2f}° < {conv_thresh_deg}°)")
             break
 
-    # Final axis direction and points
+    # Final axis direction and points (aligned with v_seed from user clicks)
     v = current_v
-    if v[1] > 0:
+    if np.dot(v, v_seed) < 0:
         v = -v
     trunk_points = pts_current
     pca_convergence_delta_deg = deltas[-1] if deltas else 0.0
