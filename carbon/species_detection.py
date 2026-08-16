@@ -4,35 +4,29 @@ import logging
 
 logger = logging.getLogger("SpeciesDetection")
 
-def detect_species(image_paths):
+def detect_species_with_status(image_paths):
     """
     Sends 1 to 3 images to the Pl@ntNet API for species identification.
     Returns:
-      A list of top-3 predictions:
-      [
-        {"scientific_name": "...", "common_name": "...", "confidence": 85.4},
-        ...
-      ]
-      Or None if API key is missing, request fails, or no matches found (graceful fallback).
+      (predictions: list | None, status_reason: str)
+      status_reason can be: 'success', 'missing_api_key', 'no_images_provided',
+      'no_valid_images_found', 'api_error_HTTP_<status>', 'no_matches_found', 'api_exception_<msg>'
     """
     api_key = os.environ.get("PLANTNET_API_KEY")
     if not api_key:
         logger.info("Pl@ntNet API key not set (PLANTNET_API_KEY env missing). Skipping species detection.")
-        return None
+        return None, "missing_api_key"
 
     if not image_paths:
         logger.warning("No images provided for species detection.")
-        return None
+        return None, "no_images_provided"
 
     # Limit to maximum 3 images
     target_images = image_paths[:3]
     url = f"https://my-api.plantnet.org/v2/identify/all?api-key={api_key}"
     
     files = []
-    opened_files = []
     try:
-        # Prepare multipart files with in-memory downscaling (max 800px, quality 80)
-        # This reduces outbound bandwidth by ~85-95% while matching Pl@ntNet's internal resolution.
         from PIL import Image
         import io
 
@@ -58,10 +52,8 @@ def detect_species(image_paths):
                 
         if not files:
             logger.warning("No valid images found on disk for species detection.")
-            return None
+            return None, "no_valid_images_found"
 
-        # Pl@ntNet requires 'organs' parameter for each image in matching order
-        # Defaulting all frames from tree trunk video to 'bark'
         data = {
             'organs': ['bark'] * len(files)
         }
@@ -71,13 +63,13 @@ def detect_species(image_paths):
         
         if response.status_code != 200:
             logger.warning(f"Pl@ntNet API returned status code {response.status_code}: {response.text}")
-            return None
+            return None, f"api_error_HTTP_{response.status_code}"
 
         res_json = response.json()
         results = res_json.get("results", [])
         if not results:
             logger.info("Pl@ntNet found no matching species.")
-            return None
+            return None, "no_matches_found"
 
         # Parse top-3 results
         predictions = []
@@ -85,7 +77,6 @@ def detect_species(image_paths):
             species = match.get("species", {})
             scientific_name = species.get("scientificNameWithoutAuthor", "")
             common_names = species.get("commonNames", [])
-            # Use the first common name if available, otherwise fallback to empty string
             common_name = common_names[0] if common_names else ""
             score = match.get("score", 0.0)
             
@@ -96,15 +87,16 @@ def detect_species(image_paths):
             })
 
         logger.info(f"Species detection success. Top prediction: {predictions[0] if predictions else 'None'}")
-        return predictions
+        return predictions, "success"
 
     except Exception as e:
         logger.error(f"Error during species detection API call: {e}")
-        return None
-    finally:
-        # Ensure all opened files are closed
-        for f in opened_files:
-            try:
-                f.close()
-            except Exception:
-                pass
+        return None, f"api_exception_{type(e).__name__}"
+
+
+def detect_species(image_paths):
+    """
+    Backward-compatible wrapper returning only predictions (list or None).
+    """
+    preds, _ = detect_species_with_status(image_paths)
+    return preds

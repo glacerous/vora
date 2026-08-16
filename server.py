@@ -1149,12 +1149,19 @@ def _reconstruct_thread(
         t_species_start = time.time()
         # 3. Detect Species via Pl@ntNet API
         species_preds = None
+        species_detection_reason = "not_attempted"
+        temp_detect_files = []
         try:
             upd(tree_code, "reconstructing", "Detecting tree species using Pl@ntNet API...")
-            from carbon.species_detection import detect_species
+            from carbon.species_detection import detect_species_with_status
+            
+            # Step A: Collect local frames from job_frames_dir
+            detect_files = []
             img_files = sorted(glob.glob(os.path.join(job_frames_dir, "*.jpg")))
+            if not img_files:
+                img_files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
+
             if img_files:
-                detect_files = []
                 if len(img_files) >= 1:
                     detect_files.append(img_files[0])
                 if len(img_files) >= 3:
@@ -1162,13 +1169,43 @@ def _reconstruct_thread(
                     detect_files.append(img_files[-1])
                 elif len(img_files) == 2:
                     detect_files.append(img_files[1])
-                species_preds = detect_species(detect_files)
+            elif thumbnail_url:
+                # Step B: Fallback when direct R2 frames were used (job_frames_dir is empty on Render)
+                try:
+                    import requests as req
+                    temp_thumb_path = os.path.join(job_output_dir, "temp_species_detect.jpg")
+                    print(f"[RECONSTRUCT-SPECIES] Local frames empty. Downloading thumbnail for species detection: {thumbnail_url}")
+                    r_thumb = req.get(thumbnail_url, timeout=15)
+                    if r_thumb.status_code == 200:
+                        with open(temp_thumb_path, "wb") as f_thumb:
+                            f_thumb.write(r_thumb.content)
+                        detect_files.append(temp_thumb_path)
+                        temp_detect_files.append(temp_thumb_path)
+                except Exception as dl_thumb_err:
+                    print(f"[RECONSTRUCT-SPECIES WARN] Failed to download thumbnail for species detection: {dl_thumb_err}")
+
+            if detect_files:
+                species_preds, species_detection_reason = detect_species_with_status(detect_files)
+                print(f"[RECONSTRUCT-SPECIES] Pl@ntNet result status: '{species_detection_reason}', predictions: {species_preds}")
+            else:
+                species_detection_reason = "no_frames_available"
+                print(f"[RECONSTRUCT-SPECIES WARN] No frames available locally or via thumbnail for species detection.")
+
         except Exception as sp_err:
+            species_detection_reason = f"exception_{type(sp_err).__name__}"
             print(f"[RECONSTRUCT] Pl@ntNet species detection exception: {sp_err}")
+        finally:
+            # Clean up any temporary downloaded detection frames
+            for tmp in temp_detect_files:
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except Exception:
+                        pass
 
         # 4. Determine Wood Density
         wood_density = 0.6
-        wood_density_source = "default_fallback"
+        wood_density_source = f"default_fallback ({species_detection_reason})" if species_detection_reason != "not_attempted" else "default_fallback"
         SPECIES_CONFIDENCE_THRESHOLD = 30.0
         if species_preds and len(species_preds) > 0:
             top_pred = species_preds[0]
@@ -1190,7 +1227,7 @@ def _reconstruct_thread(
                 wood_density = 0.6
                 wood_density_source = "default_fallback"
         t_species_end = time.time()
-        print(f"[TIMING] Pl@ntNet species detection & wood density lookup: {t_species_end - t_species_start:.4f}s")
+        print(f"[TIMING] Pl@ntNet species detection & wood density lookup: {t_species_end - t_species_start:.4f}s (status: {species_detection_reason})")
 
         t_carbon_start = time.time()
         # 5. Run Carbon Analysis using custom parameters
