@@ -921,10 +921,10 @@ def _reconstruct_thread(
             raise RuntimeError("Job cancelled by user")
 
         r2_frames_prefix = job_st.get("r2_frames_prefix")
+        job_frames_dir = get_job_frames_dir(tree_code)
         imgs = []
         if not r2_frames_prefix:
             t_disk_start = time.time()
-            job_frames_dir = get_job_frames_dir(tree_code)
             files = sorted(glob.glob(os.path.join(job_frames_dir, "*.jpg")))
             if not files:
                 # Fallback to root FRAMES_DIR if job dir is empty
@@ -1208,7 +1208,8 @@ def _reconstruct_thread(
                 # Step B: Fallback when direct R2 frames were used (job_frames_dir is empty on Render)
                 try:
                     import requests as req
-                    temp_thumb_path = os.path.join(job_output_dir, "temp_species_detect.jpg")
+                    import tempfile
+                    temp_thumb_path = os.path.join(tempfile.gettempdir(), f"{tree_code}_temp_species_detect.jpg")
                     print(f"[RECONSTRUCT-SPECIES] Local frames empty. Downloading thumbnail for species detection: {thumbnail_url}")
                     r_thumb = req.get(thumbnail_url, timeout=15)
                     if r_thumb.status_code == 200:
