@@ -19,9 +19,10 @@ import logging
 
 _logger = logging.getLogger("D1Client")
 
-def execute_d1_query(sql: str, params: list = None, max_retries: int = 3, retry_delay: float = 0.5):
+def execute_d1_query(sql: str, params: list = None, max_retries: int = 3, retry_delay: float = 0.5, return_meta: bool = False):
     """
     Sends an HTTP POST query request to the Cloudflare D1 HTTP API with exponential backoff retry.
+    If return_meta=True, returns (results, meta_dict) tuple. Otherwise returns results list.
     """
     account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
     db_id = os.environ.get("CLOUDFLARE_D1_DATABASE_ID")
@@ -59,7 +60,11 @@ def execute_d1_query(sql: str, params: list = None, max_retries: int = 3, retry_
             if not query_result.get("success"):
                 raise RuntimeError("SQL execution failed inside D1")
                 
-            return query_result.get("results", [])
+            results = query_result.get("results", [])
+            meta = query_result.get("meta", {})
+            if return_meta:
+                return results, meta
+            return results
         except Exception as exc:
             last_exc = exc
             _logger.warning(f"[D1-RETRY] Query attempt {attempt + 1}/{max_retries} failed: {exc}")

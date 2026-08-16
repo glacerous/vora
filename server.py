@@ -1168,29 +1168,27 @@ def _reconstruct_thread(
 
         # 4. Determine Wood Density
         wood_density = 0.6
-        wood_density_source = "generic-default"
-        # Species ID confidence threshold. Below this we do NOT trust top-1 for
-        # wood density and fall back to the generic default with an explicit flag
-        # instead of silently using whatever Pl@ntNet returned as top-1.
+        wood_density_source = "default_fallback"
         SPECIES_CONFIDENCE_THRESHOLD = 30.0
         if species_preds and len(species_preds) > 0:
             top_pred = species_preds[0]
             top_conf = top_pred.get("confidence", 0.0)
-            if top_conf < SPECIES_CONFIDENCE_THRESHOLD:
-                wood_density_source = "generic-default (spesies tidak pasti)"
-                print(f"[RECONSTRUCT-WD] Top species confidence {top_conf:.1f}% < {SPECIES_CONFIDENCE_THRESHOLD}% — "
-                      f"menggunakan densitas default 0.6 (spesies tidak pasti)")
-            else:
-                sci_name = top_pred.get("scientific_name")
-                try:
-                    from carbon.wood_density_lookup import get_wood_density
-                    specific_wd = get_wood_density(sci_name)
-                    if specific_wd is not None:
-                        wood_density = specific_wd
-                        wood_density_source = "species-matched"
-                        print(f"[RECONSTRUCT-WD] Matched wood density for {sci_name}: {wood_density}")
-                except Exception as wd_err:
-                    print(f"[RECONSTRUCT-WD ERROR] Wood density lookup exception: {wd_err}")
+            sci_name = top_pred.get("scientific_name")
+            try:
+                from carbon.wood_density_lookup import get_wood_density_with_metadata
+                specific_wd, wd_tier, wd_meta = get_wood_density_with_metadata(sci_name)
+                wood_density = specific_wd
+                if top_conf < SPECIES_CONFIDENCE_THRESHOLD:
+                    wood_density_source = f"{wd_tier} (spesies tidak pasti: {top_conf:.1f}%)"
+                    print(f"[RECONSTRUCT-WD] Top species confidence {top_conf:.1f}% < {SPECIES_CONFIDENCE_THRESHOLD}% — "
+                          f"menggunakan {specific_wd} g/cm³ ({wd_tier}, spesies tidak pasti)")
+                else:
+                    wood_density_source = wd_tier
+                    print(f"[RECONSTRUCT-WD] Tiered wood density for '{sci_name}': {wood_density} g/cm³ (Tier: {wd_tier})")
+            except Exception as wd_err:
+                print(f"[RECONSTRUCT-WD ERROR] Wood density lookup exception: {wd_err}")
+                wood_density = 0.6
+                wood_density_source = "default_fallback"
         t_species_end = time.time()
         print(f"[TIMING] Pl@ntNet species detection & wood density lookup: {t_species_end - t_species_start:.4f}s")
 
@@ -2075,28 +2073,30 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             except Exception as plant_err:
                 print(f"[RECALCULATE] Pl@ntNet retry failed: {plant_err}")
 
-        # Resolve wood density from species (same threshold as the automatic pipeline)
+        # Resolve wood density from species (tiered GWDD database)
         wood_density = 0.6
-        wood_density_source = "generic-default"
+        wood_density_source = "default_fallback"
         SPECIES_CONFIDENCE_THRESHOLD = 30.0
         if species_preds and len(species_preds) > 0:
             top_pred = species_preds[0]
-            if top_pred.get("confidence", 0.0) >= SPECIES_CONFIDENCE_THRESHOLD:
-                sci_name = top_pred.get("scientific_name")
-                try:
-                    from carbon.wood_density_lookup import get_wood_density
-                    specific_wd = get_wood_density(sci_name)
-                    if specific_wd is not None:
-                        wood_density = specific_wd
-                        wood_density_source = "species-matched"
-                        print(f"[RECALCULATE] Wood density matched for {sci_name}: {wood_density}")
-                except Exception as wd_err:
-                    print(f"[RECALCULATE ERROR] Wood density lookup: {wd_err}")
+            top_conf = top_pred.get("confidence", 0.0)
+            sci_name = top_pred.get("scientific_name")
+            try:
+                from carbon.wood_density_lookup import get_wood_density_with_metadata
+                specific_wd, wd_tier, wd_meta = get_wood_density_with_metadata(sci_name)
+                wood_density = specific_wd
+                if top_conf < SPECIES_CONFIDENCE_THRESHOLD:
+                    wood_density_source = f"{wd_tier} (spesies tidak pasti: {top_conf:.1f}%)"
+                else:
+                    wood_density_source = wd_tier
+                print(f"[RECALCULATE] Tiered wood density for '{sci_name}': {wood_density} g/cm³ (Tier: {wd_tier})")
+            except Exception as wd_err:
+                print(f"[RECALCULATE ERROR] Wood density lookup: {wd_err}")
 
         # Fallback to existing if not matched to specific species
-        if wood_density_source == "generic-default" and target_scan.get("wood_density_used"):
+        if wood_density_source == "default_fallback" and target_scan.get("wood_density_used"):
             wood_density = target_scan.get("wood_density_used")
-            wood_density_source = target_scan.get("wood_density_source") or "generic-default"
+            wood_density_source = target_scan.get("wood_density_source") or "default_fallback"
 
         forest_type = "moist"
         climate_zone = target_scan.get("climate_zone_detected") or "Unknown"
@@ -2981,25 +2981,34 @@ async def claim_scan(plot_id: int, body: ClaimScanRequest, current_user: dict = 
     if plot["owner_user_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Access denied")
         
-    scans = execute_d1_query("SELECT * FROM tree_scans WHERE tree_code = ?", [body.tree_code])
-    if not scans:
-        raise HTTPException(status_code=404, detail="Scan not found")
-        
-    scan = scans[0]
-    if scan.get("claimed_by_user_id") is not None:
-        raise HTTPException(status_code=409, detail="Scan has already been claimed by another user")
-        
-    execute_d1_query(
-        "UPDATE tree_scans SET plot_id = ?, claimed_by_user_id = ? WHERE tree_code = ?",
-        [plot_id, current_user["id"], body.tree_code]
+    # Atomic conditional update: succeeds ONLY if scan is unclaimed (or already owned by this user)
+    update_sql = """
+    UPDATE tree_scans 
+    SET plot_id = ?, claimed_by_user_id = ? 
+    WHERE tree_code = ? AND (claimed_by_user_id IS NULL OR claimed_by_user_id = ?)
+    """
+    _, meta = execute_d1_query(
+        update_sql,
+        [plot_id, current_user["id"], body.tree_code, current_user["id"]],
+        return_meta=True
     )
     
+    changes = meta.get("changes", 0)
+    if changes == 0:
+        # Check reason for failure: scan missing vs already claimed by another user
+        existing_scans = execute_d1_query("SELECT claimed_by_user_id FROM tree_scans WHERE tree_code = ?", [body.tree_code])
+        if not existing_scans:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        raise HTTPException(status_code=409, detail="Scan has already been claimed by another user")
+        
     # Auto update centroid if not set
-    if plot["gps_centroid_lat"] is None and scan.get("gps_lat") is not None:
-        execute_d1_query(
-            "UPDATE plots SET gps_centroid_lat = ?, gps_centroid_lon = ? WHERE id = ?",
-            [scan["gps_lat"], scan["gps_lon"], plot_id]
-        )
+    if plot["gps_centroid_lat"] is None:
+        scan_loc = execute_d1_query("SELECT gps_lat, gps_lon FROM tree_scans WHERE tree_code = ?", [body.tree_code])
+        if scan_loc and scan_loc[0].get("gps_lat") is not None:
+            execute_d1_query(
+                "UPDATE plots SET gps_centroid_lat = ?, gps_centroid_lon = ? WHERE id = ? AND gps_centroid_lat IS NULL",
+                [scan_loc[0]["gps_lat"], scan_loc[0]["gps_lon"], plot_id]
+            )
         
     return {"success": True, "message": f"Successfully claimed scan {body.tree_code}"}
 
@@ -3015,15 +3024,23 @@ async def remove_scan(plot_id: int, body: RemoveScanRequest, current_user: dict 
     if plot["owner_user_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Access denied")
         
-    scans = execute_d1_query("SELECT * FROM tree_scans WHERE tree_code = ? AND plot_id = ?", [body.tree_code, plot_id])
-    if not scans:
+    # Atomic conditional removal:
+    remove_sql = """
+    UPDATE tree_scans 
+    SET plot_id = NULL, grid_position_x = NULL, grid_position_y = NULL 
+    WHERE tree_code = ? AND plot_id = ? AND claimed_by_user_id = ?
+    """
+    _, meta = execute_d1_query(
+        remove_sql,
+        [body.tree_code, plot_id, current_user["id"]],
+        return_meta=True
+    )
+    if meta.get("changes", 0) == 0:
+        scans = execute_d1_query("SELECT plot_id FROM tree_scans WHERE tree_code = ?", [body.tree_code])
+        if not scans:
+            raise HTTPException(status_code=404, detail="Scan not found")
         raise HTTPException(status_code=404, detail="Scan not found in this plot")
         
-    execute_d1_query(
-        "UPDATE tree_scans SET plot_id = NULL, grid_position_x = NULL, grid_position_y = NULL WHERE tree_code = ?",
-        [body.tree_code]
-    )
-    
     return {"success": True, "message": f"Successfully removed scan {body.tree_code} from plot"}
 
 
