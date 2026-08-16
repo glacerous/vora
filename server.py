@@ -2064,7 +2064,7 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
         local_ply_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d.ply")
         local_ply_highres_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d_highres.ply")
 
-        # 4. Download dense pointmap (NPY) from R2 if not already cached locally
+        # 4. Helper to fetch file via R2 S3 or HTTP
         def _fetch_file_r2_or_http(target_url, r2_key, local_dst):
             account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
             access_key = os.environ.get("R2_ACCESS_KEY_ID")
@@ -2072,6 +2072,8 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             bucket_name = os.environ.get("R2_BUCKET_NAME")
             if all([account_id, access_key, secret_key, bucket_name]):
                 try:
+                    import boto3
+                    from botocore.config import Config
                     s3 = boto3.client(
                         "s3",
                         endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
@@ -2095,6 +2097,14 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                 print(f"[RECALCULATE] HTTP download failed for {target_url}: {http_err}")
             return False
 
+        # Download dense pointmap (NPY) from R2 if not already cached locally
+        pointmap_key = f"tree_scans/{tree_code}/{timestamp}_points3D_all.npy"
+        has_npy = False
+        if os.path.exists(local_npy_path) and os.path.getsize(local_npy_path) > 1000:
+            has_npy = True
+        else:
+            has_npy = _fetch_file_r2_or_http(pointmap_url, pointmap_key, local_npy_path)
+
         # 5. Ensure point cloud is available locally (cached or downloaded via S3/HTTP)
         point_cloud_path = local_ply_highres_path
         if not (os.path.exists(point_cloud_path) and os.path.getsize(point_cloud_path) > 1000):
@@ -2113,10 +2123,43 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                             detail="Failed to download point cloud for recalculation."
                         )
 
-        # 6. Extract accurate 3D trunk cylinder using ground-separated RANSAC engine
+        # 6. Map 2D clicked coordinates to 3D point cloud & run extract_dbh_with_2d_clicks
         scale_factor, _is_cal2, _src2 = _load_scale_factor_for_scan(tree_code)
-        from carbon.dbh_extractor import extract_dbh_from_mast3r
-        res_override = extract_dbh_from_mast3r(ply_path=point_cloud_path, scale_factor=scale_factor)
+        P1_3d = None
+        P2_3d = None
+        if has_npy and os.path.exists(local_npy_path) and os.path.getsize(local_npy_path) > 100:
+            try:
+                pts3d = np.load(local_npy_path)
+                N, H_crop, W_crop, _ = pts3d.shape
+                target_idx = body.frame_idx if (body.frame_idx is not None and 0 <= body.frame_idx < N) else 0
+                if body.frame_idx is None:
+                    valid_counts = np.array([
+                        np.sum(~np.all(pts3d[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d[i]), axis=-1))
+                        for i in range(N)
+                    ])
+                    target_idx = int(np.argmax(valid_counts))
+                pointmap = pts3d[target_idx]
+
+                u1_crop, v1_crop = map_pixel_to_cropped(body.p1[0], body.p1[1], body.width, body.height, W_crop, H_crop)
+                u2_crop, v2_crop = map_pixel_to_cropped(body.p2[0], body.p2[1], body.width, body.height, W_crop, H_crop)
+
+                P1_3d = get_robust_3d_point(pointmap, u1_crop, v1_crop)
+                P2_3d = get_robust_3d_point(pointmap, u2_crop, v2_crop)
+                print(f"[RECALCULATE] Mapped 2D clicks ({body.p1}, {body.p2}) to 3D: P1={P1_3d.round(4)}, P2={P2_3d.round(4)}")
+            except Exception as map_err:
+                print(f"[RECALCULATE ERROR] Failed to map 2D coordinates: {map_err}")
+
+        if P1_3d is not None and P2_3d is not None:
+            from carbon.dbh_extractor import extract_dbh_with_2d_clicks
+            res_override = extract_dbh_with_2d_clicks(
+                ply_path=point_cloud_path,
+                P1=np.array(P1_3d),
+                P2=np.array(P2_3d),
+                scale=scale_factor
+            )
+        else:
+            from carbon.dbh_extractor import extract_dbh_from_mast3r
+            res_override = extract_dbh_from_mast3r(ply_path=point_cloud_path, scale_factor=scale_factor)
 
         if "error" in res_override:
             raise HTTPException(status_code=400, detail=res_override["error"])
