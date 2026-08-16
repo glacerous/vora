@@ -60,11 +60,16 @@ def test_carbon_pipeline(ply_path, scale_factor):
 
 if __name__ == "__main__":
     ply_file = os.path.join("output", "result.ply")
-    if not os.path.exists(ply_file):
-        print(f"Error: {ply_file} not found. Please place a reconstructed .ply file in output/ before running.")
-        sys.exit(1)
+    if not os.path.exists(ply_file) or os.path.getsize(ply_file) < 100:
+        if os.path.exists("pohon_4497_pts.ply"):
+            ply_file = "pohon_4497_pts.ply"
+        elif os.path.exists("temp_cleaned.ply"):
+            ply_file = "temp_cleaned.ply"
+        else:
+            print(f"Error: No valid .ply point cloud file found.")
+            sys.exit(1)
         
-    # We test multiple scale factors to demonstrate the sensitivity and assist in calibration
+    print(f"Using point cloud file: {ply_file} ({os.path.getsize(ply_file) / 1024 / 1024:.2f} MB)")
     scale_factors = [1.0, 10.0, 15.0, 20.0]
     for sf in scale_factors:
         test_carbon_pipeline(ply_file, sf)
