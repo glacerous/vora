@@ -34,6 +34,7 @@ def get_koppen_classification(lat: float, lon: float) -> str:
 def classify_koppen_to_forest_type(koppen_code: str) -> str:
     """
     Maps Köppen climate code to a Chave forest type: "dry", "moist", or "wet".
+    Handles composite codes such as "As/Aw", "Aw/As", "Af/Am".
     Tropical climates start with "A":
       - "Af": Wet forest
       - "Am": Moist forest
@@ -44,16 +45,24 @@ def classify_koppen_to_forest_type(koppen_code: str) -> str:
     if not koppen_code:
         return "moist"
         
-    code = koppen_code.strip()
-    if not code.startswith("A"):
-        # Not a tropical climate zone, default to moist for tropical carbon models
+    code_raw = koppen_code.strip()
+    sub_codes = [c.strip() for c in code_raw.replace("-", "/").replace(",", "/").split("/") if c.strip()]
+    if not sub_codes:
         return "moist"
         
-    if code == "Af":
-        return "wet"
-    elif code == "Am":
+    all_tropical = all(c.startswith("A") for c in sub_codes)
+    if not all_tropical:
         return "moist"
-    elif code in ("Aw", "As"):
+        
+    has_wet = any(c == "Af" for c in sub_codes)
+    all_dry = all(c in ("Aw", "As") for c in sub_codes)
+    has_dry = any(c in ("Aw", "As") for c in sub_codes)
+
+    if has_wet:
+        return "wet"
+    if all_dry or (has_dry and not any(c in ("Af", "Am") for c in sub_codes)):
         return "dry"
+    if any(c == "Am" for c in sub_codes):
+        return "moist"
         
     return "moist"
