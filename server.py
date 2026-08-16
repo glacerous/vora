@@ -1147,28 +1147,63 @@ def _reconstruct_thread(
         print(f"[TIMING] EXIF GPS and Koppen Climate Zone classification: {t_meta_end - t_meta_start:.4f}s")
 
         t_species_start = time.time()
-        # 3. Detect Species via Pl@ntNet API
+        # 3. Detect Species via Pl@ntNet API (Multi-Frame Candidates)
         species_preds = None
-        species_detection_reason = "not_attempted"
+        species_detection_status = "not_attempted"
+        species_detection_frame_used = None
         temp_detect_files = []
         try:
             upd(tree_code, "reconstructing", "Detecting tree species using Pl@ntNet API...")
             from carbon.species_detection import detect_species_with_status
             
             # Step A: Collect local frames from job_frames_dir
-            detect_files = []
             img_files = sorted(glob.glob(os.path.join(job_frames_dir, "*.jpg")))
             if not img_files:
                 img_files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
 
             if img_files:
-                if len(img_files) >= 1:
-                    detect_files.append(img_files[0])
-                if len(img_files) >= 3:
-                    detect_files.append(img_files[len(img_files)//2])
-                    detect_files.append(img_files[-1])
-                elif len(img_files) == 2:
-                    detect_files.append(img_files[1])
+                # Multi-frame candidate selection: try first frame first
+                first_frame = img_files[0]
+                preds_first, status_first = detect_species_with_status([first_frame])
+                
+                # Check confidence of first frame
+                first_conf = (preds_first[0].get("confidence", 0.0)) if (preds_first and len(preds_first) > 0) else 0.0
+                if first_conf >= 30.0:
+                    species_preds = preds_first
+                    species_detection_status = "success"
+                    species_detection_frame_used = os.path.basename(first_frame)
+                    print(f"[RECONSTRUCT-SPECIES] High confidence match ({first_conf:.1f}%) on primary frame {species_detection_frame_used}")
+                elif len(img_files) > 1:
+                    # Multi-frame composite candidate: combine start, middle, and end frames across the orbit
+                    composite_candidates = [first_frame]
+                    if len(img_files) >= 3:
+                        composite_candidates.append(img_files[len(img_files)//2])
+                        composite_candidates.append(img_files[-1])
+                    else:
+                        composite_candidates.append(img_files[1])
+                    
+                    print(f"[RECONSTRUCT-SPECIES] Primary frame confidence low ({first_conf:.1f}%). Retrying with {len(composite_candidates)} composite frames...")
+                    preds_comp, status_comp = detect_species_with_status(composite_candidates)
+                    comp_conf = (preds_comp[0].get("confidence", 0.0)) if (preds_comp and len(preds_comp) > 0) else 0.0
+                    
+                    if comp_conf > first_conf:
+                        species_preds = preds_comp
+                        species_detection_status = "success" if comp_conf >= 30.0 else "low_confidence"
+                        species_detection_frame_used = f"multi_frame_composite ({len(composite_candidates)} frames)"
+                        print(f"[RECONSTRUCT-SPECIES] Multi-frame composite yielded higher confidence: {comp_conf:.1f}%")
+                    elif preds_first:
+                        species_preds = preds_first
+                        species_detection_status = "low_confidence"
+                        species_detection_frame_used = os.path.basename(first_frame)
+                    else:
+                        species_detection_status = status_comp or status_first or "no_matches_found"
+                elif preds_first:
+                    species_preds = preds_first
+                    species_detection_status = "low_confidence"
+                    species_detection_frame_used = os.path.basename(first_frame)
+                else:
+                    species_detection_status = status_first or "no_matches_found"
+
             elif thumbnail_url:
                 # Step B: Fallback when direct R2 frames were used (job_frames_dir is empty on Render)
                 try:
@@ -1179,20 +1214,27 @@ def _reconstruct_thread(
                     if r_thumb.status_code == 200:
                         with open(temp_thumb_path, "wb") as f_thumb:
                             f_thumb.write(r_thumb.content)
-                        detect_files.append(temp_thumb_path)
                         temp_detect_files.append(temp_thumb_path)
+                        
+                        thumb_preds, thumb_status = detect_species_with_status([temp_thumb_path])
+                        if thumb_preds:
+                            species_preds = thumb_preds
+                            thumb_conf = thumb_preds[0].get("confidence", 0.0)
+                            species_detection_status = "success" if thumb_conf >= 30.0 else "low_confidence"
+                            species_detection_frame_used = "thumbnail_0000"
+                        else:
+                            species_detection_status = thumb_status or "no_matches_found"
                 except Exception as dl_thumb_err:
+                    species_detection_status = f"thumbnail_download_error"
                     print(f"[RECONSTRUCT-SPECIES WARN] Failed to download thumbnail for species detection: {dl_thumb_err}")
-
-            if detect_files:
-                species_preds, species_detection_reason = detect_species_with_status(detect_files)
-                print(f"[RECONSTRUCT-SPECIES] Pl@ntNet result status: '{species_detection_reason}', predictions: {species_preds}")
             else:
-                species_detection_reason = "no_frames_available"
+                species_detection_status = "no_frames_available"
                 print(f"[RECONSTRUCT-SPECIES WARN] No frames available locally or via thumbnail for species detection.")
 
+            print(f"[RECONSTRUCT-SPECIES] Final Pl@ntNet status: '{species_detection_status}', frame used: '{species_detection_frame_used}', predictions: {species_preds}")
+
         except Exception as sp_err:
-            species_detection_reason = f"exception_{type(sp_err).__name__}"
+            species_detection_status = f"exception_{type(sp_err).__name__}"
             print(f"[RECONSTRUCT] Pl@ntNet species detection exception: {sp_err}")
         finally:
             # Clean up any temporary downloaded detection frames
@@ -1203,9 +1245,9 @@ def _reconstruct_thread(
                     except Exception:
                         pass
 
-        # 4. Determine Wood Density
+        # 4. Determine Wood Density (Pure tier representation)
         wood_density = 0.6
-        wood_density_source = f"default_fallback ({species_detection_reason})" if species_detection_reason != "not_attempted" else "default_fallback"
+        wood_density_source = "default_fallback"
         SPECIES_CONFIDENCE_THRESHOLD = 30.0
         if species_preds and len(species_preds) > 0:
             top_pred = species_preds[0]
@@ -1214,20 +1256,21 @@ def _reconstruct_thread(
             try:
                 from carbon.wood_density_lookup import get_wood_density_with_metadata
                 specific_wd, wd_tier, wd_meta = get_wood_density_with_metadata(sci_name)
-                wood_density = specific_wd
-                if top_conf < SPECIES_CONFIDENCE_THRESHOLD:
-                    wood_density_source = f"{wd_tier} (spesies tidak pasti: {top_conf:.1f}%)"
-                    print(f"[RECONSTRUCT-WD] Top species confidence {top_conf:.1f}% < {SPECIES_CONFIDENCE_THRESHOLD}% — "
-                          f"menggunakan {specific_wd} g/cm³ ({wd_tier}, spesies tidak pasti)")
-                else:
+                if top_conf >= SPECIES_CONFIDENCE_THRESHOLD:
+                    wood_density = specific_wd
                     wood_density_source = wd_tier
                     print(f"[RECONSTRUCT-WD] Tiered wood density for '{sci_name}': {wood_density} g/cm³ (Tier: {wd_tier})")
+                else:
+                    wood_density = 0.6
+                    wood_density_source = "default_fallback"
+                    print(f"[RECONSTRUCT-WD] Top species confidence {top_conf:.1f}% < {SPECIES_CONFIDENCE_THRESHOLD}% — "
+                          f"fallback ke {wood_density} g/cm³ (default_fallback)")
             except Exception as wd_err:
                 print(f"[RECONSTRUCT-WD ERROR] Wood density lookup exception: {wd_err}")
                 wood_density = 0.6
                 wood_density_source = "default_fallback"
         t_species_end = time.time()
-        print(f"[TIMING] Pl@ntNet species detection & wood density lookup: {t_species_end - t_species_start:.4f}s (status: {species_detection_reason})")
+        print(f"[TIMING] Pl@ntNet species detection & wood density lookup: {t_species_end - t_species_start:.4f}s (status: {species_detection_status})")
 
         t_carbon_start = time.time()
         # 5. Run Carbon Analysis using custom parameters
@@ -1387,6 +1430,8 @@ def _reconstruct_thread(
                 co2e_high_kg=carbon_est.get("co2e_high_kg"),
                 plot_id=plot_id,
                 claimed_by_user_id=claimed_by_user_id,
+                species_detection_status=species_detection_status,
+                species_detection_frame_used=species_detection_frame_used,
             )
             t_persistence_end = time.time()
             print(f"[TIMING] R2 upload & D1 database persistence: {t_persistence_end - t_persistence_start:.4f}s")
@@ -2090,6 +2135,8 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
 
         # Pl@ntNet opportunistic retry if species_predictions is missing/empty
         thumbnail_url = target_scan.get("thumbnail_url")
+        species_detection_status = target_scan.get("species_detection_status")
+        species_detection_frame_used = target_scan.get("species_detection_frame_used")
         if not species_preds and thumbnail_url:
             print(f"[RECALCULATE] species_predictions is empty. Retrying Pl@ntNet with thumbnail {thumbnail_url}...")
             try:
@@ -2098,16 +2145,22 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                 if res_thumb.status_code == 200:
                     with open(temp_thumb_path, "wb") as f:
                         f.write(res_thumb.content)
-                    from carbon.species_detection import detect_species
-                    species_preds = detect_species([temp_thumb_path])
-                    print(f"[RECALCULATE] Pl@ntNet retry result: {species_preds}")
+                    from carbon.species_detection import detect_species_with_status
+                    species_preds, species_detection_status = detect_species_with_status([temp_thumb_path])
+                    if species_preds:
+                        thumb_conf = species_preds[0].get("confidence", 0.0)
+                        species_detection_status = "success" if thumb_conf >= 30.0 else "low_confidence"
+                        species_detection_frame_used = "thumbnail_0000"
+                    print(f"[RECALCULATE] Pl@ntNet retry result: {species_preds} (status: {species_detection_status})")
                     try:
                         os.remove(temp_thumb_path)
                     except Exception:
                         pass
                 else:
+                    species_detection_status = "thumbnail_download_failed"
                     print(f"[RECALCULATE] Thumbnail download failed (HTTP {res_thumb.status_code})")
             except Exception as plant_err:
+                species_detection_status = f"exception_{type(plant_err).__name__}"
                 print(f"[RECALCULATE] Pl@ntNet retry failed: {plant_err}")
 
         # Resolve wood density from species (tiered GWDD database)
@@ -2121,12 +2174,14 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             try:
                 from carbon.wood_density_lookup import get_wood_density_with_metadata
                 specific_wd, wd_tier, wd_meta = get_wood_density_with_metadata(sci_name)
-                wood_density = specific_wd
-                if top_conf < SPECIES_CONFIDENCE_THRESHOLD:
-                    wood_density_source = f"{wd_tier} (spesies tidak pasti: {top_conf:.1f}%)"
-                else:
+                if top_conf >= SPECIES_CONFIDENCE_THRESHOLD:
+                    wood_density = specific_wd
                     wood_density_source = wd_tier
-                print(f"[RECALCULATE] Tiered wood density for '{sci_name}': {wood_density} g/cm³ (Tier: {wd_tier})")
+                    print(f"[RECALCULATE] Tiered wood density for '{sci_name}': {wood_density} g/cm³ (Tier: {wd_tier})")
+                else:
+                    wood_density = 0.6
+                    wood_density_source = "default_fallback"
+                    print(f"[RECALCULATE] Low confidence ({top_conf:.1f}%), using default fallback 0.6 g/cm³")
             except Exception as wd_err:
                 print(f"[RECALCULATE ERROR] Wood density lookup: {wd_err}")
 
@@ -2215,6 +2270,8 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             co2e_uncertainty_pct=carbon_result["co2e_uncertainty_pct"],
             co2e_low_kg=carbon_result["co2e_low_kg"],
             co2e_high_kg=carbon_result["co2e_high_kg"],
+            species_detection_status=species_detection_status,
+            species_detection_frame_used=species_detection_frame_used,
         )
         print(f"[RECALCULATE] Successfully updated D1 record id {scan_id} for {tree_code} via 2D clicks override.")
 
@@ -3148,7 +3205,7 @@ async def export_plot_carbon_data(plot_code: str, format: str = "csv", optional_
         "Scientific Name", "Local Name (from Pl@ntNet)", 
         "DBH (cm)", "Height (m)", "Wood Density (g/cm³)", 
         "Biomass (kg)", "Carbon Content (kg C)", "CO2 Equivalent (kg CO2e)", 
-        "Confidence Score", "Scan Date"
+        "Confidence Score", "Data Quality Flag", "Scan Date"
     ]
     
     # Parse species predictions and prepare rows
@@ -3172,6 +3229,19 @@ async def export_plot_carbon_data(plot_code: str, format: str = "csv", optional_
             local_name = top.get("common_name") or "N/A"
             conf = top.get("confidence", 0.0)
             conf_score = f"{conf:.1f}%"
+
+        # Determine data quality flag
+        scale_status = s.get("scale_status") or "uncalibrated"
+        height_used = s.get("height_used") or "dbh_only_fallback"
+        h_val = s.get("tinggi_m") or 0.0
+        
+        flags = []
+        if scale_status == "uncalibrated":
+            flags.append("UNCALIBRATED_SCALE")
+        if height_used != "full_height" or h_val < 1.3:
+            flags.append("TRUNCATED_HEIGHT")
+            
+        quality_flag = "VALIDATED" if not flags else f"PRELIMINARY ({' & '.join(flags)})"
             
         rows.append([
             s.get("tree_code") or "",
@@ -3186,6 +3256,7 @@ async def export_plot_carbon_data(plot_code: str, format: str = "csv", optional_
             s.get("karbon_kg"),
             s.get("co2e_kg"),
             conf_score,
+            quality_flag,
             s.get("scan_date") or ""
         ])
         
@@ -3247,6 +3318,14 @@ async def download_carbon_certificate(tree_code: str, request: Request):
     splat_file_url = scan.get("splat_file_url")
     if not splat_file_url:
         raise HTTPException(status_code=400, detail="Splat file URL not found for this scan")
+
+    # Assess Preliminary Warning Status
+    scale_status = scan.get("scale_status") or "uncalibrated"
+    height_used = scan.get("height_used") or "dbh_only_fallback"
+    h_val = scan.get("tinggi_m") or 0.0
+    is_uncalibrated = (scale_status == "uncalibrated")
+    is_height_insufficient = (height_used != "full_height" or h_val < 1.3)
+    is_preliminary = is_uncalibrated or is_height_insufficient
         
     # 2. Compute or Read Precomputed PLY SHA-256 Hash
     sha256_hash = "N/A"
@@ -3375,10 +3454,10 @@ async def download_carbon_certificate(tree_code: str, request: Request):
         'CertTitle',
         parent=styles['Heading1'],
         fontName='Helvetica-Bold',
-        fontSize=20,
+        fontSize=18,
         textColor=colors.white,
         alignment=1, # Center
-        spaceAfter=5
+        spaceAfter=4
     )
     
     subtitle_style = ParagraphStyle(
@@ -3388,7 +3467,7 @@ async def download_carbon_certificate(tree_code: str, request: Request):
         fontSize=9,
         textColor=colors.HexColor("#a7f3d0"), # Pale light emerald
         alignment=1, # Center
-        spaceAfter=5
+        spaceAfter=4
     )
     
     section_title_style = ParagraphStyle(
@@ -3428,22 +3507,59 @@ async def download_carbon_certificate(tree_code: str, request: Request):
     story = []
     
     # Header Banner Table
+    cert_title_text = "VORA CARBON CERTIFICATE" if not is_preliminary else "VORA CARBON CERTIFICATE (PRELIMINARY DRAFT)"
     banner_data = [
-        [Paragraph("VORA VERIFIED CARBON CERTIFICATE", title_style)],
+        [Paragraph(cert_title_text, title_style)],
         [Paragraph(f"TREE SCAN RECORD: {tree_code} (Certificate ID: VORA-{scan.get('id') or 0:04d})", subtitle_style)]
     ]
+    banner_bg = primary_color if not is_preliminary else colors.HexColor("#78350f") # Warm amber for preliminary
     banner_table = Table(banner_data, colWidths=[530])
     banner_table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,-1), primary_color),
+        ('BACKGROUND', (0,0), (-1,-1), banner_bg),
         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('TOPPADDING', (0,0), (-1,-1), 12),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 12),
+        ('TOPPADDING', (0,0), (-1,-1), 10),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 10),
         ('LEFTPADDING', (0,0), (-1,-1), 20),
         ('RIGHTPADDING', (0,0), (-1,-1), 20),
     ]))
     story.append(banner_table)
-    story.append(Spacer(1, 12))
+
+    # If preliminary, render prominent disclaimer banner
+    if is_preliminary:
+        story.append(Spacer(1, 6))
+        warning_title_style = ParagraphStyle(
+            'WarnTitle',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=9,
+            textColor=colors.HexColor("#991b1b"),
+            spaceAfter=2
+        )
+        warning_body_style = ParagraphStyle(
+            'WarnBody',
+            parent=styles['Normal'],
+            fontName='Helvetica',
+            fontSize=7.5,
+            textColor=colors.HexColor("#7f1d1d"),
+            leading=10
+        )
+        warn_data = [
+            [Paragraph("<b>PRELIMINARY DRAFT — SCALE / HEIGHT NOT PHYSICALLY VALIDATED</b>", warning_title_style)],
+            [Paragraph("<b>NOTICE:</b> This scan was reconstructed from uncalibrated video frames and/or only captures a lower trunk segment (&lt;1.3m). DBH and carbon values are estimated volumetric approximations and contain potential measurement bias. This certificate is a preliminary draft and MUST NOT be used for certified carbon offset claims without field physical validation.", warning_body_style)]
+        ]
+        warn_table = Table(warn_data, colWidths=[530])
+        warn_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), colors.HexColor("#fef2f2")),
+            ('BOX', (0,0), (-1,-1), 1.2, colors.HexColor("#f87171")),
+            ('TOPPADDING', (0,0), (-1,-1), 6),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+            ('LEFTPADDING', (0,0), (-1,-1), 10),
+            ('RIGHTPADDING', (0,0), (-1,-1), 10),
+        ]))
+        story.append(warn_table)
+
+    story.append(Spacer(1, 10))
     
     # Tree Metadata Block
     species_preds = []
