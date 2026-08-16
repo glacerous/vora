@@ -2123,51 +2123,10 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                             detail="Failed to download point cloud for recalculation."
                         )
 
-        # 6. Map 2D clicked coordinates to 3D point cloud & run extract_dbh_with_2d_clicks
+        # 6. Extract accurate 3D trunk cylinder using ground-separated RANSAC engine
         scale_factor, _is_cal2, _src2 = _load_scale_factor_for_scan(tree_code)
-        P1_3d = None
-        P2_3d = None
-        if has_npy and os.path.exists(local_npy_path) and os.path.getsize(local_npy_path) > 100:
-            try:
-                pts3d = np.load(local_npy_path)
-                N, H_crop, W_crop, _ = pts3d.shape
-                target_idx = body.frame_idx if (body.frame_idx is not None and 0 <= body.frame_idx < N) else 0
-                if body.frame_idx is None:
-                    valid_counts = np.array([
-                        np.sum(~np.all(pts3d[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d[i]), axis=-1))
-                        for i in range(N)
-                    ])
-                    target_idx = int(np.argmax(valid_counts))
-                pointmap = pts3d[target_idx]
-
-                u1_crop, v1_crop = map_pixel_to_cropped(body.p1[0], body.p1[1], body.width, body.height, W_crop, H_crop)
-                u2_crop, v2_crop = map_pixel_to_cropped(body.p2[0], body.p2[1], body.width, body.height, W_crop, H_crop)
-
-                P1_cam = get_robust_3d_point(pointmap, u1_crop, v1_crop)
-                P2_cam = get_robust_3d_point(pointmap, u2_crop, v2_crop)
-                
-                # Transform camera space (P1_cam, P2_cam) to world space (point cloud space) via ICP
-                from carbon.dbh_extractor import register_pointmap_to_world, parse_ply_points
-                pts_world_raw = parse_ply_points(point_cloud_path)
-                R, t, s = register_pointmap_to_world(pointmap, pts_world_raw)
-                
-                P1_3d = s * (P1_cam @ R.T) + t
-                P2_3d = s * (P2_cam @ R.T) + t
-                print(f"[RECALCULATE] Aligned 2D clicks to world space: P1={P1_3d.round(4)}, P2={P2_3d.round(4)} (scale={s:.3f})")
-            except Exception as map_err:
-                print(f"[RECALCULATE ERROR] Failed to map 2D coordinates: {map_err}")
-
-        if P1_3d is not None and P2_3d is not None:
-            from carbon.dbh_extractor import extract_dbh_with_2d_clicks
-            res_override = extract_dbh_with_2d_clicks(
-                ply_path=point_cloud_path,
-                P1=np.array(P1_3d),
-                P2=np.array(P2_3d),
-                scale=scale_factor
-            )
-        else:
-            from carbon.dbh_extractor import extract_dbh_from_mast3r
-            res_override = extract_dbh_from_mast3r(ply_path=point_cloud_path, scale_factor=scale_factor)
+        from carbon.dbh_extractor import extract_dbh_from_mast3r
+        res_override = extract_dbh_from_mast3r(ply_path=point_cloud_path, scale_factor=scale_factor)
 
         if "error" in res_override:
             raise HTTPException(status_code=400, detail=res_override["error"])
