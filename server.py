@@ -2126,10 +2126,36 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                             detail="Failed to download point cloud for recalculation."
                         )
 
-        # 6. Extract accurate 3D trunk cylinder using ground-separated RANSAC engine
+        # 6. Extract accurate 3D trunk cylinder using 2D user clicks or ground-separated RANSAC engine
         scale_factor, _is_cal2, _src2 = _load_scale_factor_for_scan(tree_code)
-        from carbon.dbh_extractor import extract_dbh_from_mast3r
-        res_override = extract_dbh_from_mast3r(ply_path=point_cloud_path, scale_factor=scale_factor)
+        from carbon.dbh_extractor import (
+            extract_dbh_from_mast3r, extract_dbh_with_2d_clicks,
+            unproject_2d_clicks_to_3d, parse_ply_points
+        )
+        
+        res_override = None
+        if body.p1 and body.p2 and len(body.p1) >= 2 and len(body.p2) >= 2:
+            try:
+                pts_cloud = parse_ply_points(point_cloud_path)
+                P1_3d, P2_3d = unproject_2d_clicks_to_3d(
+                    pts_cloud, body.p1, body.p2,
+                    img_w=body.width or 640.0,
+                    img_h=body.height or 480.0
+                )
+                if P1_3d is not None and P2_3d is not None:
+                    print(f"[RECALCULATE] Aligned 2D clicks to 3D point cloud: P1={P1_3d.round(4)}, P2={P2_3d.round(4)}")
+                    res_override = extract_dbh_with_2d_clicks(
+                        ply_path=point_cloud_path,
+                        P1=P1_3d,
+                        P2=P2_3d,
+                        scale=scale_factor
+                    )
+            except Exception as click_err:
+                print(f"[RECALCULATE] 2D clicks unprojection warning: {click_err}")
+                res_override = None
+
+        if res_override is None or "error" in res_override:
+            res_override = extract_dbh_from_mast3r(ply_path=point_cloud_path, scale_factor=scale_factor)
 
         if "error" in res_override:
             raise HTTPException(status_code=400, detail=res_override["error"])

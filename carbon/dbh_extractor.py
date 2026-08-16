@@ -7,6 +7,52 @@ import numpy as np
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("DBH_Extractor")
 
+def unproject_2d_clicks_to_3d(points_3d: np.ndarray, p1_2d: list, p2_2d: list,
+                              img_w: float = 640.0, img_h: float = 480.0, fov_deg: float = 60.0) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Casts rays from camera frame (Frame 0 in MASt3R coordinate space) through 2D pixel coordinates
+    to find the corresponding 3D trunk points P1 and P2 in the point cloud.
+    """
+    if points_3d is None or len(points_3d) < 10 or not p1_2d or not p2_2d:
+        return None, None
+
+    f = (img_w / 2.0) / np.tan(np.radians(fov_deg / 2.0))
+    cx = img_w / 2.0
+    cy = img_h / 2.0
+
+    ray1 = np.array([(p1_2d[0] - cx) / f, (p1_2d[1] - cy) / f, 1.0])
+    ray1 = ray1 / np.linalg.norm(ray1)
+
+    ray2 = np.array([(p2_2d[0] - cx) / f, (p2_2d[1] - cy) / f, 1.0])
+    ray2 = ray2 / np.linalg.norm(ray2)
+
+    def find_nearest_3d_point(ray, points, max_perp_dist=0.20):
+        proj = np.dot(points, ray)
+        valid = proj > 0.05
+        if not np.any(valid):
+            return None
+        valid_pts = points[valid]
+        valid_proj = proj[valid]
+
+        perp_vec = valid_pts - np.outer(valid_proj, ray)
+        perp_dist = np.linalg.norm(perp_vec, axis=1)
+
+        close_mask = perp_dist < max_perp_dist
+        if not np.any(close_mask):
+            idx = np.argsort(perp_dist)[:50]
+            close_pts = valid_pts[idx]
+        else:
+            close_pts = valid_pts[close_mask]
+
+        dists_to_cam = np.linalg.norm(close_pts, axis=1)
+        p_idx = np.argsort(dists_to_cam)[int(len(dists_to_cam) * 0.25)]
+        return close_pts[p_idx]
+
+    P1 = find_nearest_3d_point(ray1, points_3d)
+    P2 = find_nearest_3d_point(ray2, points_3d)
+    return P1, P2
+
+
 def compute_enclosed_alpha_shape_area_and_dbh(pts_2d_cm, alpha=None):
     """
     Computes the enclosed cross-sectional area of a trunk boundary from 2D points (in cm).
