@@ -92,7 +92,8 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
                      grid_position_x: int = None, grid_position_y: int = None,
                      inlier_ratio: float = None,
                      species_detection_status: str = None,
-                     species_detection_frame_used: str = None):
+                     species_detection_frame_used: str = None,
+                     dbh_equivalent_cm: float = None):
     """
     Inserts a new scan record into the tree_scans database table on Cloudflare D1.
     """
@@ -106,9 +107,9 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
         total_height_used_m, segment_height_m, height_fallback_reason, quality_status,
         root_to_shoot_ratio, co2e_uncertainty_pct, co2e_low_kg, co2e_high_kg,
         plot_id, claimed_by_user_id, grid_position_x, grid_position_y, inlier_ratio,
-        species_detection_status, species_detection_frame_used
+        species_detection_status, species_detection_frame_used, dbh_equivalent_cm
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     # Use ISO 8601 UTC format for scan_date
     scan_date = datetime.now(timezone.utc).isoformat()
@@ -153,7 +154,8 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
         grid_position_y,
         inlier_ratio,
         species_detection_status,
-        species_detection_frame_used
+        species_detection_frame_used,
+        dbh_equivalent_cm
     ]
     try:
         execute_d1_query(sql, params)
@@ -190,7 +192,8 @@ def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg
                        co2e_low_kg: float = None, co2e_high_kg: float = None,
                        inlier_ratio: float = None,
                        species_detection_status: str = None,
-                       species_detection_frame_used: str = None):
+                       species_detection_frame_used: str = None,
+                     dbh_equivalent_cm: float = None):
     """
     Updates an existing scan record in the tree_scans database table on Cloudflare D1 by scan_id.
     All accuracy-metadata fields are optional and default to None (no change / preserve column).
@@ -207,7 +210,8 @@ def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg
         quality_status = ?, root_to_shoot_ratio = ?, co2e_uncertainty_pct = ?,
         co2e_low_kg = ?, co2e_high_kg = ?, inlier_ratio = ?,
         species_detection_status = COALESCE(?, species_detection_status),
-        species_detection_frame_used = COALESCE(?, species_detection_frame_used)
+        species_detection_frame_used = COALESCE(?, species_detection_frame_used),
+        dbh_equivalent_cm = COALESCE(?, dbh_equivalent_cm)
     WHERE id = ?
     """
     geom_str = json.dumps(geometry_3d) if geometry_3d else None
@@ -247,6 +251,7 @@ def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg
         inlier_ratio,
         species_detection_status,
         species_detection_frame_used,
+        dbh_equivalent_cm,
         scan_id
     ])
 

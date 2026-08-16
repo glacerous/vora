@@ -7,6 +7,96 @@ import numpy as np
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("DBH_Extractor")
 
+def compute_enclosed_alpha_shape_area_and_dbh(pts_2d_cm, alpha=None):
+    """
+    Computes the enclosed cross-sectional area of a trunk boundary from 2D points (in cm).
+    1. Extracts alpha-shape boundary / interior triangulation.
+    2. Fallback to robust radial boundary ordering around center.
+    3. Returns (area_cm2, dbh_equivalent_cm) where D_eq = 2 * sqrt(Area / pi).
+    """
+    if pts_2d_cm is None or len(pts_2d_cm) < 3:
+        return 0.0, 0.0
+    
+    import math
+    try:
+        import scipy.spatial
+    except ImportError:
+        scipy = None
+
+    pts = np.unique(np.round(pts_2d_cm, 4), axis=0)
+    if len(pts) < 3:
+        return 0.0, 0.0
+
+    # 1. Method A: Alpha-shape triangulation with enclosed interior
+    if scipy is not None:
+        try:
+            tri = scipy.spatial.Delaunay(pts)
+            tri_pts = pts[tri.simplices]
+            a = np.linalg.norm(tri_pts[:, 0] - tri_pts[:, 1], axis=1)
+            b = np.linalg.norm(tri_pts[:, 1] - tri_pts[:, 2], axis=1)
+            c = np.linalg.norm(tri_pts[:, 2] - tri_pts[:, 0], axis=1)
+            
+            cross = (tri_pts[:, 1, 0] - tri_pts[:, 0, 0]) * (tri_pts[:, 2, 1] - tri_pts[:, 0, 1]) -                     (tri_pts[:, 2, 0] - tri_pts[:, 0, 0]) * (tri_pts[:, 1, 1] - tri_pts[:, 0, 1])
+            tri_areas = 0.5 * np.abs(cross)
+            valid = tri_areas > 1e-6
+            
+            if np.any(valid):
+                a_v, b_v, c_v, areas_v = a[valid], b[valid], c[valid], tri_areas[valid]
+                simplices_v = tri.simplices[valid]
+                circumradii = (a_v * b_v * c_v) / (4.0 * areas_v + 1e-9)
+                
+                span_x = pts[:, 0].max() - pts[:, 0].min()
+                span_y = pts[:, 1].max() - pts[:, 1].min()
+                span_max = max(span_x, span_y, 0.1)
+                
+                if alpha is None:
+                    alpha = span_max * 0.75
+                
+                mask = circumradii <= alpha
+                if np.any(mask):
+                    total_area_cm2 = float(np.sum(areas_v[mask]))
+                    if total_area_cm2 > 0:
+                        dbh_eq = float(2.0 * math.sqrt(total_area_cm2 / math.pi))
+                        return total_area_cm2, dbh_eq
+        except Exception:
+            pass
+
+    # 2. Method B: Radial boundary ordering around center (robust concave boundary fallback)
+    try:
+        center = np.median(pts, axis=0)
+        centered = pts - center
+        angles = np.arctan2(centered[:, 1], centered[:, 0])
+        
+        num_sectors = 36
+        sector_bins = np.linspace(-np.pi, np.pi, num_sectors + 1)
+        boundary_pts = []
+        
+        for i in range(num_sectors):
+            in_sec = (angles >= sector_bins[i]) & (angles < sector_bins[i+1])
+            if np.any(in_sec):
+                sec_pts = centered[in_sec]
+                dists = np.linalg.norm(sec_pts, axis=1)
+                p_idx = np.argsort(dists)[int(len(dists) * 0.85)]
+                boundary_pts.append(pts[in_sec][p_idx])
+                
+        if len(boundary_pts) >= 3:
+            b_pts = np.array(boundary_pts)
+            b_centered = b_pts - center
+            b_angles = np.arctan2(b_centered[:, 1], b_centered[:, 0])
+            order = np.argsort(b_angles)
+            b_ordered = b_pts[order]
+            
+            x = b_ordered[:, 0]
+            y = b_ordered[:, 1]
+            area = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+            dbh_eq = float(2.0 * math.sqrt(area / math.pi))
+            return float(area), dbh_eq
+    except Exception:
+        pass
+
+    return 0.0, 0.0
+
+
 def load_scale_factor(manual_scale=1.0):
     import json
     paths = [
@@ -551,6 +641,15 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
 
     dbh_cm = float(2.0 * R_final * scale * 100.0)
 
+    dbh_equivalent_cm = None
+    if slice_points_list_pass2:
+        inlier_slice_pts = np.vstack(slice_points_list_pass2)
+        if len(inlier_slice_pts) >= 3:
+            pts_2d_m = np.column_stack([np.dot(inlier_slice_pts, u1_pass2), np.dot(inlier_slice_pts, u2_pass2)])
+            _, dbh_eq = compute_enclosed_alpha_shape_area_and_dbh(pts_2d_m * scale * 100.0)
+            if dbh_eq > 0:
+                dbh_equivalent_cm = float(round(dbh_eq, 2))
+
     if slice_points_list_pass2:
         slice_points_all = np.vstack(slice_points_list_pass2)
         if len(slice_points_all) > 100:
@@ -573,6 +672,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
 
     return {
         "dbh_cm":             float(round(dbh_cm, 2)),
+        "dbh_equivalent_cm":  dbh_equivalent_cm,
         "height_m":           float(round(estimated_height_m, 2)),
         "confidence_note":    confidence,
         "method":             method_used,
@@ -794,6 +894,13 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     dbh_m = R_final * 2.0 * scale
     dbh_cm = dbh_m * 100.0
 
+    dbh_equivalent_cm = None
+    if slice_points_all is not None and len(slice_points_all) >= 3:
+        pts_2d_m = np.column_stack([np.dot(slice_points_all, u1), np.dot(slice_points_all, u2)])
+        _, dbh_eq = compute_enclosed_alpha_shape_area_and_dbh(pts_2d_m * scale * 100.0)
+        if dbh_eq > 0:
+            dbh_equivalent_cm = float(round(dbh_eq, 2))
+
     xc_2d = float(np.median([c[0] for c in centers_2d]))
     yc_2d = float(np.median([c[1] for c in centers_2d]))
 
@@ -834,6 +941,7 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
 
     return {
         "dbh_cm":             float(round(dbh_cm, 2)),
+        "dbh_equivalent_cm":  dbh_equivalent_cm,
         "height_m":           float(round(estimated_height_m, 2)),
         "confidence_note":    confidence_note,
         "method":             method_used,

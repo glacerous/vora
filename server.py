@@ -643,6 +643,7 @@ def run_carbon_analysis(
 
         return {
             "dbh_cm":                  dbh_result["dbh_cm"],
+            "dbh_equivalent_cm":       dbh_result.get("dbh_equivalent_cm"),
             "height_m":                dbh_result["height_m"],
             "confidence":              confidence_note,
             "method":                  dbh_result["method"],
@@ -1433,6 +1434,7 @@ def _reconstruct_thread(
                 claimed_by_user_id=claimed_by_user_id,
                 species_detection_status=species_detection_status,
                 species_detection_frame_used=species_detection_frame_used,
+            dbh_equivalent_cm=carbon_est.get("dbh_equivalent_cm"),
             )
             t_persistence_end = time.time()
             print(f"[TIMING] R2 upload & D1 database persistence: {t_persistence_end - t_persistence_start:.4f}s")
@@ -2283,6 +2285,7 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
             co2e_high_kg=carbon_result["co2e_high_kg"],
             species_detection_status=species_detection_status,
             species_detection_frame_used=species_detection_frame_used,
+            dbh_equivalent_cm=carbon_est.get("dbh_equivalent_cm"),
         )
         print(f"[RECALCULATE] Successfully updated D1 record id {scan_id} for {tree_code} via 2D clicks override.")
 
