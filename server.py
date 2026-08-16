@@ -171,10 +171,10 @@ class ScansResponse(BaseModel):
 
 
 class Recalculate2DRequest(BaseModel):
-    p1: list[float]
-    p2: list[float]
-    width: int
-    height: int
+    p1: Optional[list[float]] = None
+    p2: Optional[list[float]] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
     frame_idx: Optional[int] = None
 
 # ── Helper: load scale_factor from calibration.json (scan-id-aware) ─────────

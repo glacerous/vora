@@ -673,7 +673,8 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
         xc, yc, R, inlier_mask, err = fit_circle_robust(pts_2d)
         if R is None or R <= 0 or R > CROP_RADIUS * 2.0:
             R = 0.15 / scale
-            xc, yc = peak_u1, peak_u2
+            xc = float(np.dot(trunk_pts.mean(axis=0), u1_pass2))
+            yc = float(np.dot(trunk_pts.mean(axis=0), u2_pass2))
         radii_pass2 = [R]
         centers_2d_pass2 = [(xc, yc)]
         slice_points_list_pass2 = [trunk_pts[inlier_mask] if len(inlier_mask) > 0 else trunk_pts[:10]]
