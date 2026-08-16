@@ -2143,9 +2143,17 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                 u1_crop, v1_crop = map_pixel_to_cropped(body.p1[0], body.p1[1], body.width, body.height, W_crop, H_crop)
                 u2_crop, v2_crop = map_pixel_to_cropped(body.p2[0], body.p2[1], body.width, body.height, W_crop, H_crop)
 
-                P1_3d = get_robust_3d_point(pointmap, u1_crop, v1_crop)
-                P2_3d = get_robust_3d_point(pointmap, u2_crop, v2_crop)
-                print(f"[RECALCULATE] Mapped 2D clicks ({body.p1}, {body.p2}) to 3D: P1={P1_3d.round(4)}, P2={P2_3d.round(4)}")
+                P1_cam = get_robust_3d_point(pointmap, u1_crop, v1_crop)
+                P2_cam = get_robust_3d_point(pointmap, u2_crop, v2_crop)
+                
+                # Transform camera space (P1_cam, P2_cam) to world space (point cloud space) via ICP
+                from carbon.dbh_extractor import register_pointmap_to_world, parse_ply_points
+                pts_world_raw = parse_ply_points(point_cloud_path)
+                R, t, s = register_pointmap_to_world(pointmap, pts_world_raw)
+                
+                P1_3d = s * (P1_cam @ R.T) + t
+                P2_3d = s * (P2_cam @ R.T) + t
+                print(f"[RECALCULATE] Aligned 2D clicks to world space: P1={P1_3d.round(4)}, P2={P2_3d.round(4)} (scale={s:.3f})")
             except Exception as map_err:
                 print(f"[RECALCULATE ERROR] Failed to map 2D coordinates: {map_err}")
 
