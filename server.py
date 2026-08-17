@@ -142,7 +142,7 @@ class ReconstructRequest(BaseModel):
     p2: Optional[List[float]] = None
     width: Optional[int] = None
     height: Optional[int] = None
-    iterations: Optional[int] = 2000
+    iterations: Optional[int] = 500
     frame_idx: Optional[int] = None
     plot_id: Optional[int] = None
 
@@ -909,7 +909,7 @@ def _reconstruct_thread(
     height: int = None,
     plot_id: int = None,
     claimed_by_user_id: int = None,
-    iterations: int = 2000,
+    iterations: int = 500,
     frame_idx: int = None,
 ) -> None:
     import modal
@@ -1805,7 +1805,7 @@ async def reconstruct(
     height = body.height if body else None
     frame_idx = body.frame_idx if body else None
 
-    iterations = 2000
+    iterations = 500
     if iterations_query is not None:
         iterations = iterations_query
     elif body and body.iterations is not None:

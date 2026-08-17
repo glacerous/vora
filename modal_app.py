@@ -409,7 +409,7 @@ def parse_ply_coords(ply_path):
 def _validate_early_geometry(source_path: str, detected_n_views: int):
     """
     Gate 2: Early MASt3R point cloud density & camera path parallax validation.
-    Aborts execution before the expensive 2000-iteration 3D Gaussian Splatting optimization
+    Aborts execution before the 3D Gaussian Splatting optimization (500 iterations)
     if the scene geometry is invalid, empty, or lacks parallax (non-orbit).
     """
     import struct
@@ -678,7 +678,7 @@ def _clean_ply_on_modal(ply_path: str) -> None:
     timeout=1800,  # 30 minutes
     image=image
 )
-def run_reconstruction(images_bytes: list[bytes] = None, tree_code: str = "Unknown", remove_background: bool = False, r2_config: dict = None, iterations: int = 2000, camera_poses: list = None, r2_frames_prefix: str = None) -> dict:
+def run_reconstruction(images_bytes: list[bytes] = None, tree_code: str = "Unknown", remove_background: bool = False, r2_config: dict = None, iterations: int = 500, camera_poses: list = None, r2_frames_prefix: str = None) -> dict:
     import os
     import time
     import shutil
