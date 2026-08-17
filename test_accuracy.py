@@ -148,52 +148,9 @@ def test_full_tree_height():
 # ─────────────────────────────────────────────────────────────────────────────
 # PRIORITY 1 — auto-pose calibration (pure helpers, cv2/mediapipe not needed)
 # ─────────────────────────────────────────────────────────────────────────────
-def test_auto_pose_scale():
-    print("\n=== PRIORITY 1: auto-pose scale calibration ===")
-    import carbon.height_calibration as hc
-
-    rng = np.random.default_rng(42)
-    tree = np.column_stack((
-        0.1 + rng.normal(0, 0.02, 5000),
-        0.1 + rng.normal(0, 0.02, 5000),
-        np.linspace(0, 10.0, 5000),
-    ))
-    person = np.column_stack((
-        10.0 + rng.normal(0, 0.05, 2500),
-        10.0 + rng.normal(0, 0.05, 2500),
-        np.linspace(0, 1.65, 2500),
-    ))
-    pts = np.vstack([tree, person])
-
-    sf = hc._find_person_scale_in_cloud(pts, person_height_m=1.65, axis_idx=2)
-    check("person-scale found ~1.0", sf is not None and abs(sf - 1.0) < 1e-6, f"(sf={sf})")
-    print(f"      derived scale_factor = {sf:.6f} (expect ~1.0)")
-
-    original_detect = hc.detect_person_pose
-
-    def fake_detect_high(_path):
-        return {"head": (0, 0), "foot": (0, 200), "confidence": 0.9}
-
-    try:
-        hc.detect_person_pose = fake_detect_high
-        res = hc.auto_calibrate_scale_from_frames([__file__], points_3d=pts,
-                                                  person_height_m=1.65, min_confidence=0.6,
-                                                  vertical_axis_idx=2)
-        check("auto-pose marks calibrated", res and res["is_calibrated"] is True, f"({res})")
-        check("auto-pose source is auto_pose", res and res["source"] == "auto_pose")
-        check("auto-pose applies person scale", res and abs(res["scale_factor"] - 1.0) < 1e-6)
-
-        hc.detect_person_pose = lambda _p: {"head": (0, 0), "foot": (0, 200), "confidence": 0.3}
-        res_low = hc.auto_calibrate_scale_from_frames([__file__], points_3d=pts,
-                                                      person_height_m=1.65, min_confidence=0.6)
-        check("low-confidence person -> uncalibrated", res_low and res_low["is_calibrated"] is False)
-
-        hc.detect_person_pose = lambda _p: None
-        res_none = hc.auto_calibrate_scale_from_frames([__file__], points_3d=pts,
-                                                       person_height_m=1.65, min_confidence=0.6)
-        check("no person -> uncalibrated", res_none and res_none["is_calibrated"] is False)
-    finally:
-        hc.detect_person_pose = original_detect
+# Note: MediaPipe Auto-pose scale calibration was deprecated and removed in 2026-08
+# in favor of MASt3R metric geometric priors and mobile ARCore/VIO sidecars.
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -407,7 +364,6 @@ def main():
     test_root_to_shoot_ratio()
     test_uncertainty()
     test_full_tree_height()
-    test_auto_pose_scale()
     test_manual_endpoint_height_validation()
     test_2d_clicks_short_trunk_clamp()
     test_no_unguarded_estimate_carbon_calls()

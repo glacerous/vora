@@ -13,9 +13,16 @@ def get_d1_headers():
         "Content-Type": "application/json"
     }
 
-def execute_d1_query(sql: str, params: list = None):
+import time
+import json
+import logging
+
+_logger = logging.getLogger("D1Client")
+
+def execute_d1_query(sql: str, params: list = None, max_retries: int = 3, retry_delay: float = 0.5, return_meta: bool = False):
     """
-    Sends an HTTP POST query request to the Cloudflare D1 HTTP API.
+    Sends an HTTP POST query request to the Cloudflare D1 HTTP API with exponential backoff retry.
+    If return_meta=True, returns (results, meta_dict) tuple. Otherwise returns results list.
     """
     account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
     db_id = os.environ.get("CLOUDFLARE_D1_DATABASE_ID")
@@ -30,26 +37,41 @@ def execute_d1_query(sql: str, params: list = None):
     }
     
     headers = get_d1_headers()
-    response = requests.post(url, json=payload, headers=headers)
-    
-    if response.status_code != 200:
-        raise RuntimeError(f"Cloudflare D1 API request failed with status {response.status_code}: {response.text}")
-        
-    resp_data = response.json()
-    if not resp_data.get("success"):
-        errors = resp_data.get("errors", [])
-        error_msg = "; ".join([e.get("message", "") for e in errors]) or "Unknown API error"
-        raise RuntimeError(f"Cloudflare D1 Query execution failed: {error_msg}")
-        
-    result_list = resp_data.get("result", [])
-    if not result_list:
-        raise RuntimeError("Cloudflare D1 Query returned empty results wrapper")
-        
-    query_result = result_list[0]
-    if not query_result.get("success"):
-        raise RuntimeError("SQL execution failed inside D1")
-        
-    return query_result.get("results", [])
+    last_exc = None
+
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=15)
+            
+            if response.status_code != 200:
+                raise RuntimeError(f"Cloudflare D1 API request failed with status {response.status_code}: {response.text}")
+                
+            resp_data = response.json()
+            if not resp_data.get("success"):
+                errors = resp_data.get("errors", [])
+                error_msg = "; ".join([e.get("message", "") for e in errors]) or "Unknown API error"
+                raise RuntimeError(f"Cloudflare D1 Query execution failed: {error_msg}")
+                
+            result_list = resp_data.get("result", [])
+            if not result_list:
+                raise RuntimeError("Cloudflare D1 Query returned empty results wrapper")
+                
+            query_result = result_list[0]
+            if not query_result.get("success"):
+                raise RuntimeError("SQL execution failed inside D1")
+                
+            results = query_result.get("results", [])
+            meta = query_result.get("meta", {})
+            if return_meta:
+                return results, meta
+            return results
+        except Exception as exc:
+            last_exc = exc
+            _logger.warning(f"[D1-RETRY] Query attempt {attempt + 1}/{max_retries} failed: {exc}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (2 ** attempt))
+
+    raise last_exc
 
 import json
 
@@ -68,7 +90,10 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
                      co2e_low_kg: float = None, co2e_high_kg: float = None,
                      plot_id: int = None, claimed_by_user_id: int = None,
                      grid_position_x: int = None, grid_position_y: int = None,
-                     inlier_ratio: float = None):
+                     inlier_ratio: float = None,
+                     species_detection_status: str = None,
+                     species_detection_frame_used: str = None,
+                     dbh_equivalent_cm: float = None):
     """
     Inserts a new scan record into the tree_scans database table on Cloudflare D1.
     """
@@ -81,15 +106,16 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
         scale_status, scale_factor_used, calibration_source, height_used,
         total_height_used_m, segment_height_m, height_fallback_reason, quality_status,
         root_to_shoot_ratio, co2e_uncertainty_pct, co2e_low_kg, co2e_high_kg,
-        plot_id, claimed_by_user_id, grid_position_x, grid_position_y, inlier_ratio
+        plot_id, claimed_by_user_id, grid_position_x, grid_position_y, inlier_ratio,
+        species_detection_status, species_detection_frame_used, dbh_equivalent_cm
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     # Use ISO 8601 UTC format for scan_date
     scan_date = datetime.now(timezone.utc).isoformat()
     geom_str = json.dumps(geometry_3d) if geometry_3d else None
     species_str = json.dumps(species_predictions) if species_predictions else None
-    execute_d1_query(sql, [
+    params = [
         tree_code, 
         scan_date, 
         dbh_cm, 
@@ -126,8 +152,29 @@ def save_scan_result(tree_code: str, dbh_cm: float, tinggi_m: float, biomassa_kg
         claimed_by_user_id,
         grid_position_x,
         grid_position_y,
-        inlier_ratio
-    ])
+        inlier_ratio,
+        species_detection_status,
+        species_detection_frame_used,
+        dbh_equivalent_cm
+    ]
+    try:
+        execute_d1_query(sql, params)
+    except Exception as exc:
+        _logger.error(f"[D1-SAVE-FAIL] Failed to save scan to D1 after retries: {exc}. Writing to local disk buffer.")
+        try:
+            backup_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads", "failed_scans_buffer")
+            os.makedirs(backup_dir, exist_ok=True)
+            backup_file = os.path.join(backup_dir, f"{tree_code}_{int(time.time())}.json")
+            with open(backup_file, "w") as bf:
+                json.dump({
+                    "tree_code": tree_code,
+                    "scan_date": scan_date,
+                    "params": [p if not isinstance(p, (bytes, bytearray)) else "<bytes>" for p in params],
+                    "error": str(exc),
+                }, bf, indent=2)
+        except Exception as buf_err:
+            _logger.error(f"[D1-BUFFER-ERROR] Could not write fallback buffer: {buf_err}")
+        raise exc
 
 def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg: float,
                        karbon_kg: float, co2e_kg: float, confidence_note: str,
@@ -143,7 +190,10 @@ def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg
                        height_validation_reason: str = None, quality_status: str = None,
                        root_to_shoot_ratio: float = None, co2e_uncertainty_pct: float = None,
                        co2e_low_kg: float = None, co2e_high_kg: float = None,
-                       inlier_ratio: float = None):
+                       inlier_ratio: float = None,
+                       species_detection_status: str = None,
+                       species_detection_frame_used: str = None,
+                     dbh_equivalent_cm: float = None):
     """
     Updates an existing scan record in the tree_scans database table on Cloudflare D1 by scan_id.
     All accuracy-metadata fields are optional and default to None (no change / preserve column).
@@ -158,7 +208,10 @@ def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg
         height_used = ?, total_height_used_m = ?, segment_height_m = ?,
         height_fallback_reason = ?, height_validated = ?, height_validation_reason = ?,
         quality_status = ?, root_to_shoot_ratio = ?, co2e_uncertainty_pct = ?,
-        co2e_low_kg = ?, co2e_high_kg = ?, inlier_ratio = ?
+        co2e_low_kg = ?, co2e_high_kg = ?, inlier_ratio = ?,
+        species_detection_status = COALESCE(?, species_detection_status),
+        species_detection_frame_used = COALESCE(?, species_detection_frame_used),
+        dbh_equivalent_cm = COALESCE(?, dbh_equivalent_cm)
     WHERE id = ?
     """
     geom_str = json.dumps(geometry_3d) if geometry_3d else None
@@ -196,6 +249,9 @@ def update_scan_result(scan_id: int, dbh_cm: float, tinggi_m: float, biomassa_kg
         co2e_low_kg,
         co2e_high_kg,
         inlier_ratio,
+        species_detection_status,
+        species_detection_frame_used,
+        dbh_equivalent_cm,
         scan_id
     ])
 

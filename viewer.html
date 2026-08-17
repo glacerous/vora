@@ -911,6 +911,46 @@
             document.body.classList.add('embed-mode');
         }
 
+        // ─── VORA TIMING INSTRUMENTATION ─────────────────────────────────────────
+        // Measures (a) network fetch, (b) GS3D library init, (c) first frame render.
+        // Results are posted back to React Native WebView and parent iframe.
+        const _t0 = performance.now();
+        let _tLibInitStart = null;
+        let _tLibInitEnd = null;
+        let _tFetchStart = null;
+        let _tFetchEnd = null;
+        let _tFirstFrameRendered = null;
+
+        function _postTiming(phase, ms, extra) {
+            const payload = JSON.stringify({ type: 'vora_timing', phase, ms: Math.round(ms), extra: extra || null });
+            try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(payload); } catch(e) {}
+            try { window.parent && window.parent.postMessage(JSON.parse(payload), '*'); } catch(e) {}
+            console.info('[VORA TIMING]', phase, Math.round(ms) + 'ms', extra ? JSON.stringify(extra) : '');
+        }
+
+        // Intercept XHR/fetch to measure (a) network phase
+        // We wrap fetch at the module level — captures the .ksplat/.ply download
+        const _origFetch = window.fetch;
+        window.fetch = function(input, init) {
+            const url = typeof input === 'string' ? input : (input && input.url);
+            const isSplatFile = url && (url.endsWith('.ksplat') || url.endsWith('.ply') || url.endsWith('.splat') || url.includes('tree_scans'));
+            if (isSplatFile) {
+                _tFetchStart = performance.now();
+                return _origFetch.apply(this, arguments).then(response => {
+                    // Clone to measure actual download time (body not yet read)
+                    const origBody = response.body;
+                    if (origBody) {
+                        return response;
+                    }
+                    _tFetchEnd = performance.now();
+                    _postTiming('network_fetch_headers', _tFetchEnd - _tFetchStart, { url });
+                    return response;
+                });
+            }
+            return _origFetch.apply(this, arguments);
+        };
+        // ─────────────────────────────────────────────────────────────────────────
+
 
         // =========================================================================
         // CONFIGURATION: CHANGE YOUR SPLAT / PLY FILE PATH HERE
@@ -985,6 +1025,9 @@
         const statusBadge = document.getElementById('status-badge');
 
         try {
+            // (b) Measure library init time
+            _tLibInitStart = performance.now();
+
             // 3D Gaussian Splatting uses OpenCV / Y-down convention, so cameraUp is [0, -1, 0]
             // to make the scene appear right-side up in the browser.
             viewer = new GaussianSplats3D.Viewer({
@@ -999,15 +1042,29 @@
             });
 
             viewer.init();
+            _tLibInitEnd = performance.now();
+            _postTiming('lib_init', _tLibInitEnd - _tLibInitStart, {
+                sincePageLoad: Math.round(_tLibInitEnd - _t0)
+            });
             
             statusBadge.textContent = "Loading Splat...";
             
+            // (a) Network fetch start — track when addSplatScene begins downloading
+            const _tSplatFetchStart = performance.now();
+            let _splatFetchPhaseReported = false;
+
             viewer.addSplatScene(SPLAT_PATH, {
                 'showLoadingUI': false,
                 'onProgress': (percent, percentLabel, loaderStatus) => {
                     const labelEl = document.getElementById('loader-percent-label');
                     if (labelEl) {
                         if (loaderStatus === 1) { // LoaderStatus.Processing is 1
+                            // Transition from download → processing
+                            if (!_splatFetchPhaseReported) {
+                                _splatFetchPhaseReported = true;
+                                const fetchMs = performance.now() - _tSplatFetchStart;
+                                _postTiming('splat_network_fetch', fetchMs, { percent100: percent >= 100, url: SPLAT_PATH });
+                            }
                             labelEl.textContent = 'Processing Splat...';
                         } else {
                             labelEl.textContent = `Downloading: ${percentLabel || '0%'}`;
@@ -1016,7 +1073,16 @@
                 }
             })
             .then(() => {
+                // (b) parse/init complete — time from fetch-start to scene ready
+                const _tSceneReady = performance.now();
+                const _totalFetchAndParse = _tSceneReady - _tSplatFetchStart;
+                _postTiming('splat_parse_and_init', _totalFetchAndParse, {
+                    sincePageLoad: Math.round(_tSceneReady - _t0),
+                    url: SPLAT_PATH
+                });
+
                 postToParent('vora_scene_loaded');
+
                 const loaderEl = document.getElementById('custom-loader-container');
                 if (loaderEl) {
                     loaderEl.style.transition = 'opacity 0.4s ease, visibility 0.4s';
@@ -1035,6 +1101,16 @@
 
                 // Start the render loop FIRST so viewer.controls is initialized
                 viewer.start();
+
+                // (c) Measure first frame render time — wait for next rAF after start()
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        _tFirstFrameRendered = performance.now();
+                        _postTiming('first_frame_render', _tFirstFrameRendered - _tSceneReady, {
+                            totalSincePageLoad: Math.round(_tFirstFrameRendered - _t0)
+                        });
+                    });
+                });
 
                 // Create the scene-root sync group for CAD/point cloud objects.
                 // Its matrix is kept in sync with splatMesh every frame so that
@@ -1279,7 +1355,7 @@
             
             function displayMetrics(metrics) {
                 // ── 3D CAD Wireframe & Measurement Overlay Generator ────────
-                if (metrics.geometry_3d && window.viewer && window.viewer.threeScene) {
+                if (metrics && metrics.geometry_3d && window.viewer && window.viewer.threeScene) {
                     try {
                         const g3d = metrics.geometry_3d;
                         const scene = window.viewer.threeScene;
@@ -1288,6 +1364,11 @@
                         const prevOverlay = (syncGroup ? syncGroup.getObjectByName('cad_measurement_overlay') : null)
                                          || scene.getObjectByName('cad_measurement_overlay');
                         if (prevOverlay && prevOverlay.parent) prevOverlay.parent.remove(prevOverlay);
+
+                        if (!g3d || g3d.error || g3d.center_x === undefined || g3d.radius_units === undefined || g3d.radius_units <= 0) {
+                            console.warn('[CAD] No valid 3D cylinder geometry available in scan metrics:', g3d);
+                            return;
+                        }
 
                         const cadGroup = new THREE.Group();
                         cadGroup.name = 'cad_measurement_overlay';
@@ -1303,12 +1384,12 @@
                         actualHeight = Math.abs(actualHMax - actualHMin);
 
                         // Parse 3D coordinates & direction vector from RANSAC/PCA
-                        const cx = g3d.center_x || 0;
-                        const cy = g3d.center_y || 0;
-                        const cz = g3d.center_z || 0;
-                        const dx = g3d.dir_x !== undefined ? g3d.dir_x : 0;
-                        const dy = g3d.dir_y !== undefined ? g3d.dir_y : 0;
-                        const dz = g3d.dir_z !== undefined ? g3d.dir_z : 1;
+                        const cx = Number(g3d.center_x);
+                        const cy = Number(g3d.center_y);
+                        const cz = Number(g3d.center_z);
+                        const dx = g3d.dir_x !== undefined ? Number(g3d.dir_x) : 0;
+                        const dy = g3d.dir_y !== undefined ? Number(g3d.dir_y) : 0;
+                        const dz = g3d.dir_z !== undefined ? Number(g3d.dir_z) : 1;
 
                         center_cyl = new THREE.Vector3(cx, cy, cz);
                         let center_3d = center_cyl;
@@ -1369,11 +1450,11 @@
                         // (all trunk points projected onto v_pass2) — use those directly.
                         console.log('[CAD] Cylinder extents from Python geometry_3d: h_min=' + actualHMin.toFixed(4) + ' h_max=' + actualHMax.toFixed(4) + ' h_target=' + actualHTarget.toFixed(4) + ' height=' + actualHeight.toFixed(4));
 
-                        // Calculate base, top, and center coordinates of trunk cylinder (up to breast height / h_target)
+                        // Calculate full trunk cylinder extents from h_min to h_max
+                        const totalHeight = Math.max(0.2, Math.abs(actualHMax - actualHMin));
                         const base_3d = center_3d.clone().addScaledVector(dir_3d, actualHMin - actualHTarget);
-                        const top_3d = center_3d; // top is exactly the breast height target
+                        const top_3d = center_3d.clone().addScaledVector(dir_3d, actualHMax - actualHTarget);
                         const center_geom = base_3d.clone().add(top_3d).multiplyScalar(0.5);
-                        actualHeight = Math.abs(actualHTarget - actualHMin);
 
                         // Calculate quaternion rotation to align local Y with dir_3d
                         const up = new THREE.Vector3(0, 1, 0);
@@ -1386,8 +1467,8 @@
                         cadGeomGroup.quaternion.copy(qAlign);
                         cadGroup.add(cadGeomGroup);
 
-                        // 1. Trunk Wireframe Cylinder (local Y coordinates)
-                        const cylGeo = new THREE.CylinderGeometry(radius, radius, actualHeight, 16, 8, true);
+                        // 1. Trunk Wireframe Cylinder (local Y coordinates spanning full trunk)
+                        const cylGeo = new THREE.CylinderGeometry(radius, radius, totalHeight, 16, 8, true);
                         const cylMat = new THREE.MeshBasicMaterial({
                             color: 0x06b6d4, // cyan
                             wireframe: true,
@@ -1398,7 +1479,7 @@
                         cylinder.position.set(0, 0, 0);
                         cadGeomGroup.add(cylinder);
 
-                        // 2. Glowing DBH Measurement Ring
+                        // 2. Glowing DBH Measurement Ring (placed at breast height h_target)
                         const ringGeo = new THREE.TorusGeometry(radius * 1.05, radius * 0.04, 16, 32);
                         const ringMat = new THREE.MeshBasicMaterial({
                             color: 0x10b981, // emerald green
@@ -1408,15 +1489,15 @@
                         const qTorus = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
                         ringMesh.quaternion.copy(qTorus);
                         
-                        // Ring is placed exactly at the top end of the cylinder (breast height / DBH measurement point)
-                        const ringY = actualHeight / 2;
+                        // Ring is placed at the exact breast height position relative to cylinder center
+                        const ringY = actualHTarget - (actualHMin + actualHMax) * 0.5;
                         ringMesh.position.set(0, ringY, 0);
                         cylinder.add(ringMesh);
 
                         // 3. Vertical Height Axis Line (along local Y)
                         const points = [
-                            new THREE.Vector3(0, -actualHeight/2, 0),
-                            new THREE.Vector3(0, actualHeight/2, 0)
+                            new THREE.Vector3(0, -totalHeight/2, 0),
+                            new THREE.Vector3(0, totalHeight/2, 0)
                         ];
                         const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
                         const lineMat = new THREE.LineDashedMaterial({

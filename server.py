@@ -34,9 +34,37 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 for _d in (UPLOAD_DIR, FRAMES_DIR, OUTPUT_DIR):
     os.makedirs(_d, exist_ok=True)
 
-# ── Global pipeline state ────────────────────────────────────────────────────
+def get_job_frames_dir(tree_code: str = None) -> str:
+    if not tree_code:
+        return FRAMES_DIR
+    d = os.path.join(BASE_DIR, "test_images", tree_code)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def get_job_output_dir(tree_code: str = None) -> str:
+    if not tree_code:
+        return OUTPUT_DIR
+    d = os.path.join(BASE_DIR, "output", tree_code)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def get_job_upload_dir(tree_code: str = None) -> str:
+    if not tree_code:
+        return UPLOAD_DIR
+    d = os.path.join(BASE_DIR, "uploads", tree_code)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+# ── Multi-Job Pipeline State & Thread-Safe Registry ─────────────────────────
+import threading
+
+active_jobs: dict[str, dict] = {}
+latest_job_code: Optional[str] = None
+_jobs_lock = threading.Lock()
+
+# Fallback global state object for backward compatibility
 state: dict = {
-    "stage":             "idle",   # idle | extracting | extracted | reconstructing | done | error
+    "stage":             "idle",
     "message":           "Ready.",
     "frame_count":       0,
     "error":             None,
@@ -46,10 +74,61 @@ state: dict = {
     "calibration_frame":  None,
     "tree_code":         None,
     "started_at":        None,
+    "camera_poses":      None,
 }
 
-def upd(stage: str, msg: str, **kw: Any) -> None:
-    state.update({"stage": stage, "message": msg, **kw})
+def get_job_state(tree_code: Optional[str] = None) -> dict:
+    with _jobs_lock:
+        if tree_code and tree_code in active_jobs:
+            return active_jobs[tree_code]
+        if latest_job_code and latest_job_code in active_jobs:
+            return active_jobs[latest_job_code]
+        return state
+
+def init_job_state(tree_code: str, **initial_kw) -> dict:
+    global latest_job_code
+    with _jobs_lock:
+        latest_job_code = tree_code
+        job_state = {
+            "stage":             "idle",
+            "message":           "Ready.",
+            "frame_count":       0,
+            "error":             None,
+            "carbon_estimation": None,
+            "overlap_warning":   None,
+            "cancel_requested":  False,
+            "calibration_frame":  None,
+            "tree_code":         tree_code,
+            "started_at":        time.time(),
+            "camera_poses":      None,
+            **initial_kw
+        }
+        active_jobs[tree_code] = job_state
+        state.update(job_state)
+        return job_state
+
+def upd(stage_or_code: str, msg_or_stage: str = None, msg: str = None, **kw: Any) -> None:
+    # Supports both upd("reconstructing", "message...") and upd("POHON-1234", "reconstructing", "message...")
+    if msg is not None:
+        tree_code = stage_or_code
+        stage = msg_or_stage
+        message = msg
+    else:
+        tree_code = None
+        stage = stage_or_code
+        message = msg_or_stage
+
+    with _jobs_lock:
+        target = None
+        if tree_code and tree_code in active_jobs:
+            target = active_jobs[tree_code]
+        elif latest_job_code and latest_job_code in active_jobs:
+            target = active_jobs[latest_job_code]
+        else:
+            target = state
+        
+        target.update({"stage": stage, "message": message, **kw})
+        state.update({"stage": stage, "message": message, **kw})
 
 # ── Pydantic request / response models ───────────────────────────────────────
 
@@ -64,6 +143,7 @@ class ReconstructRequest(BaseModel):
     width: Optional[int] = None
     height: Optional[int] = None
     iterations: Optional[int] = 2000
+    frame_idx: Optional[int] = None
 
 class StatusResponse(BaseModel):
     stage: str
@@ -91,10 +171,11 @@ class ScansResponse(BaseModel):
 
 
 class Recalculate2DRequest(BaseModel):
-    p1: list[float]
-    p2: list[float]
-    width: int
-    height: int
+    p1: Optional[list[float]] = None
+    p2: Optional[list[float]] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    frame_idx: Optional[int] = None
 
 # ── Helper: load scale_factor from calibration.json (scan-id-aware) ─────────
 import json as _json
@@ -400,20 +481,36 @@ def run_carbon_analysis(
         # Returns (scale_factor, is_calibrated, calibration_source).
         scale_factor, is_calibrated, calibration_source = _load_scale_factor_for_scan(scan_id)
 
-        # ── Implicit auto-pose calibration (only when no manual calibration exists) ──
-        # If a full-body person is detected in the frames AND localised inside the
-        # reconstructed point cloud, use that as the scale factor instead of the raw
-        # uncalibrated default. Manual calibration (calibration.json) always wins.
-        auto_calib_note = None
-        if not is_calibrated:
-            if scale_calibration and scale_calibration.get("is_calibrated"):
+        # ── Implicit scale calibration from Modal (geometric prior or ARCore VIO) ──
+        # Priority: manual_calibration > arcore_vio > estimated_geometric_prior > uncalibrated
+        # Manual calibration (calibration.json) always wins; handled by _load_scale_factor_for_scan.
+        scale_note = None
+        if not is_calibrated and scale_calibration:
+            src = scale_calibration.get("source", "")
+            if scale_calibration.get("is_calibrated"):
                 scale_factor = float(scale_calibration["scale_factor"])
                 is_calibrated = True
-                calibration_source = scale_calibration["source"]
-                auto_calib_note = f"auto-kalibrasi pose diterapkan (offloaded ke Modal): {scale_calibration['reason']}"
-                print(f"[CARBON-AUTOCALIB] {auto_calib_note} scale_factor={scale_factor:.6f}")
+                calibration_source = src
+                if src == "arcore_vio":
+                    scale_note = f"skala terukur via ARCore/ARKit VIO (~1-3% error): {scale_calibration.get('reason', '')}"
+                elif src == "estimated_geometric_prior":
+                    scale_note = (
+                        f"ESTIMASI skala dari geometri MASt3R (~5-9% error, ~15-25% ketidakpastian biomassa) — "
+                        f"tidak diverifikasi fisik: {scale_calibration.get('reason', '')}"
+                    )
+                else:
+                    scale_note = f"kalibrasi otomatis ({src}): {scale_calibration.get('reason', '')}"
+                print(f"[CARBON-SCALE] Applied {src} scale_factor={scale_factor:.6f}")
 
-        scale_status = "calibrated" if is_calibrated else "uncalibrated"
+        # Map calibration source to scale_status tier
+        if not is_calibrated:
+            scale_status = "uncalibrated"
+        elif calibration_source == "arcore_vio":
+            scale_status = "vio_calibrated"
+        elif calibration_source == "estimated_geometric_prior":
+            scale_status = "estimated_prior"
+        else:
+            scale_status = "calibrated"
 
         # ── Primary: extract from MASt3R geometric point cloud ────────────────
         dbh_result = None
@@ -529,18 +626,24 @@ def run_carbon_analysis(
         )
         # Build the confidence note, explicitly flagging uncalibrated scale.
         confidence_note = dbh_result["confidence_note"]
-        if not is_calibrated:
+        if scale_status == "uncalibrated":
             confidence_note += (
-                " | UNKALIBRASI: skala default (PLY unit) dipakai — hasil TIDAK dapat "
-                "diandalkan tanpa kalibrasi skala (auto-pose atau calibrate_scale.py)"
+                " | UNKALIBRASI: skala PLY default (1.0) dipakai — hasil TIDAK dapat "
+                "diandalkan tanpa kalibrasi skala (ARCore VIO atau calibrate_scale.py)"
             )
-        if auto_calib_note:
-            confidence_note += f" | {auto_calib_note}"
+        elif scale_status == "estimated_prior":
+            confidence_note += (
+                " | ESTIMASI SKALA: geometri MASt3R (~5-9% error) — "
+                "hasil mendekati realistis namun belum diverifikasi secara fisik"
+            )
+        if scale_note:
+            confidence_note += f" | {scale_note}"
         if height_used == "dbh_only_fallback" and height_fallback_reason:
             confidence_note += f" | Fallback DBH-only ({height_fallback_reason})"
 
         return {
             "dbh_cm":                  dbh_result["dbh_cm"],
+            "dbh_equivalent_cm":       dbh_result.get("dbh_equivalent_cm"),
             "height_m":                dbh_result["height_m"],
             "confidence":              confidence_note,
             "method":                  dbh_result["method"],
@@ -669,9 +772,9 @@ def _check_overlap_and_resample(candidates: list, initial_idxs: list, threshold:
 
 
 # ── Background thread: frame extraction (sync, CPU+IO heavy) ─────────────────
-def _extract_thread(r2_key: str, target: int, blur_thresh: int, client_to_server_s: float = None) -> None:
+def _extract_thread(tree_code: str, r2_key: str, target: int, blur_thresh: int, client_to_server_s: float = None) -> None:
     try:
-        upd("extracting", "Offloading frame extraction to Modal (pulling from R2)...")
+        upd(tree_code, "extracting", f"Offloading frame extraction to Modal for {tree_code} (pulling from R2)...")
         t_modal_start = time.time()
 
         # Build R2 config dict to pass to Modal so it can download the video
@@ -684,7 +787,7 @@ def _extract_thread(r2_key: str, target: int, blur_thresh: int, client_to_server
 
         import modal
         fn = modal.Function.from_name("instantsplat-app", "extract_video_frames_modal")
-        res = fn.remote(None, target, blur_thresh, t_modal_start, r2_key=r2_key, r2_config=r2_config)
+        res = fn.remote(None, target, blur_thresh, t_modal_start, r2_key=r2_key, r2_config=r2_config, tree_code=tree_code)
         t_modal_end = time.time()
 
         t_modal_enter = res.get("t_modal_enter")
@@ -703,7 +806,7 @@ def _extract_thread(r2_key: str, target: int, blur_thresh: int, client_to_server
             modal_compute = t_modal_exit - t_modal_enter
             modal_transfer_out = t_modal_end - t_modal_exit
 
-        print(f"[TIMING] Modal remote frame extraction call complete.")
+        print(f"[TIMING] Modal remote frame extraction call complete for {tree_code}.")
         if client_to_server_s is not None:
             print(f"  - (a) Client -> Server Upload : {client_to_server_s:.4f}s")
         print(f"  - Total Modal Roundtrip       : {t_modal_end - t_modal_start:.4f}s")
@@ -714,31 +817,65 @@ def _extract_thread(r2_key: str, target: int, blur_thresh: int, client_to_server
 
         frames = res.get("frames", [])
         overlap_warning = res.get("overlap_warning")
+        r2_frames_prefix = res.get("r2_frames_prefix")
+        num_frames = res.get("num_frames", len(frames))
 
-        n = len(frames)
-        if n == 0:
-            raise ValueError(f"No sharp frames found (blur_thresh={blur_thresh}). Try a slower, steadier recording.")
+        n = num_frames
+        if n == 0 or len(frames) == 0:
+            raise ValueError(f"No sharp frames found (blur_thresh={blur_thresh}). Try a slower, steadier recording in good lighting.")
 
-        upd("extracting", f"Saving {n} frames from Modal to disk...")
+        # ── Gate 1: 2D Frame Quality & Variance Pre-Check on CPU ──
+        if frames:
+            sample_idxs = [0, len(frames)//2, len(frames)-1]
+            for s_idx in sample_idxs:
+                try:
+                    nparr = np.frombuffer(frames[s_idx], np.uint8)
+                    img_mat = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if img_mat is not None:
+                        gray = cv2.cvtColor(img_mat, cv2.COLOR_BGR2GRAY)
+                        mean_brightness = float(np.mean(gray))
+                        if mean_brightness < 10.0:
+                            raise ValueError("Video is too dark (average brightness near zero). Please record in daylight or good lighting.")
+                        if mean_brightness > 248.0:
+                            raise ValueError("Video is completely overexposed / pure white. Please adjust camera exposure.")
+
+                        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                        if lap_var < 3.0:
+                            raise ValueError("Video frames lack visual texture (flat screen, blank wall, or out of focus). Please record a clear tree trunk.")
+                except Exception as gate1_err:
+                    if isinstance(gate1_err, ValueError):
+                        raise gate1_err
+                    print(f"[GATE-1-WARN] Exception in 2D pre-check: {gate1_err}")
+
+        upd(tree_code, "extracting", f"Saving {n} frames to disk...")
         t_save_start = time.time()
-        for f in glob.glob(os.path.join(FRAMES_DIR, "*")):
+        job_frames_dir = get_job_frames_dir(tree_code)
+        for f in glob.glob(os.path.join(job_frames_dir, "*")):
             try:
                 os.remove(f)
             except Exception:
                 pass
 
         for j, frame_bytes in enumerate(frames):
-            img_path = os.path.join(FRAMES_DIR, f"{j:04d}.jpg")
+            img_path = os.path.join(job_frames_dir, f"{j:04d}.jpg")
             with open(img_path, "wb") as f_out:
                 f_out.write(frame_bytes)
+            # Also mirror to default FRAMES_DIR for legacy single-scan compatibility
+            try:
+                with open(os.path.join(FRAMES_DIR, f"{j:04d}.jpg"), "wb") as legacy_f:
+                    legacy_f.write(frame_bytes)
+            except Exception:
+                pass
 
         t_save_end = time.time()
-        print(f"[TIMING] Saved {n} frames to disk: {t_save_end - t_save_start:.4f}s")
+        print(f"[TIMING] Saved {n} frames to disk: {t_save_end - t_save_start:.4f}s in {job_frames_dir}")
 
-        state["frame_count"] = n
-        state["overlap_warning"] = overlap_warning
-        state["calibration_frame"] = None
-        state["timings"] = {
+        job_st = get_job_state(tree_code)
+        job_st["frame_count"] = n
+        job_st["overlap_warning"] = overlap_warning
+        job_st["r2_frames_prefix"] = r2_frames_prefix
+        job_st["calibration_frame"] = None
+        job_st["timings"] = {
             "client_to_server_s": client_to_server_s,
             "modal_roundtrip_s": t_modal_end - t_modal_start,
             "modal_scheduling_cold_start_s": modal_scheduling_cold_start,
@@ -752,12 +889,12 @@ def _extract_thread(r2_key: str, target: int, blur_thresh: int, client_to_server
         if overlap_warning:
             print(overlap_warning)
 
-        upd("extracted", f"✓ {n} sharp frames ready")
-        print(f"[EXTRACT] Completed. {n} frames written to {FRAMES_DIR}")
+        upd(tree_code, "extracted", f"✓ {n} sharp frames ready", frame_count=n, overlap_warning=overlap_warning)
+        print(f"[EXTRACT] Completed. {n} frames written for {tree_code} to {job_frames_dir}")
 
     except Exception as exc:
-        print(f"[EXTRACT ERROR] During frame processing: {exc}")
-        upd("error", str(exc), error=str(exc))
+        print(f"[EXTRACT ERROR] During frame processing for {tree_code}: {exc}")
+        upd(tree_code, "error", str(exc), error=str(exc))
 
 # ── Background thread: GPU reconstruction + R2/D1 persistence (sync, IO heavy) ─
 def _reconstruct_thread(
@@ -772,36 +909,47 @@ def _reconstruct_thread(
     plot_id: int = None,
     claimed_by_user_id: int = None,
     iterations: int = 2000,
+    frame_idx: int = None,
 ) -> None:
     import modal
     progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
     try:
         progress_dict[tree_code] = "Uploading images"
-        if state.get("cancel_requested", False):
+        upd(tree_code, "reconstructing", "Connecting to Modal…")
+
+        job_st = get_job_state(tree_code)
+        if job_st.get("cancel_requested", False):
             raise RuntimeError("Job cancelled by user")
-        upd("reconstructing", "Connecting to Modal…")
 
-        t_disk_start = time.time()
-        files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
-        if not files:
-            raise ValueError("No frames found in test_images/")
-
+        r2_frames_prefix = job_st.get("r2_frames_prefix")
+        job_frames_dir = get_job_frames_dir(tree_code)
         imgs = []
-        for f in files:
-            with open(f, "rb") as fh:
-                imgs.append(fh.read())
-        t_disk_end = time.time()
-        print(f"[TIMING] Read {len(imgs)} frames from local disk: {t_disk_end - t_disk_start:.4f}s")
+        if not r2_frames_prefix:
+            t_disk_start = time.time()
+            files = sorted(glob.glob(os.path.join(job_frames_dir, "*.jpg")))
+            if not files:
+                # Fallback to root FRAMES_DIR if job dir is empty
+                files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
+            if not files:
+                raise ValueError(f"No frames found for tree_code '{tree_code}'")
 
-        upd("reconstructing", f"Sending {len(imgs)} frames to Modal A10G GPU…")
+            for f in files:
+                with open(f, "rb") as fh:
+                    imgs.append(fh.read())
+            t_disk_end = time.time()
+            print(f"[TIMING] Read {len(imgs)} fallback frames from {job_frames_dir}: {t_disk_end - t_disk_start:.4f}s")
+            upd(tree_code, "reconstructing", f"Sending {len(imgs)} frames to Modal A10G GPU…")
+        else:
+            upd(tree_code, "reconstructing", "Connecting to Modal A10G GPU (using direct R2 frames)…")
         
         t0 = time.time()
         print(f"[RECONSTRUCT] Connecting to Modal pipeline for tree_code '{tree_code}' at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t0))}")
-        print(f"[RECONSTRUCT] Uploading {len(imgs)} frames to GPU cloud (background removed on Modal: {remove_background})...")
+        if r2_frames_prefix:
+            print(f"[RECONSTRUCT] Direct Modal-to-R2 frame loading enabled (prefix: '{r2_frames_prefix}'). Zero frame bytes uploaded from Render!")
+        else:
+            print(f"[RECONSTRUCT] Uploading {len(imgs)} frames to GPU cloud (background removed on Modal: {remove_background})...")
         
-        if state.get("cancel_requested", False):
-            raise RuntimeError("Job cancelled by user")
-        fn     = modal.Function.from_name("instantsplat-app", "run_reconstruction")
+        fn = modal.Function.from_name("instantsplat-app", "run_reconstruction")
         
         # Resolve R2 config for direct upload from Modal (prevents OOM on Render)
         r2_config = {
@@ -814,10 +962,28 @@ def _reconstruct_thread(
 
         t_remote_start = time.time()
         try:
-            result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
+            camera_poses = job_st.get("camera_poses")
+            try:
+                if r2_frames_prefix:
+                    result = fn.remote(None, tree_code, remove_background, r2_config, iterations, camera_poses=camera_poses, r2_frames_prefix=r2_frames_prefix)
+                elif camera_poses is not None:
+                    result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations, camera_poses=camera_poses)
+                else:
+                    result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
+            except TypeError as te:
+                if "takes from" in str(te) or "unexpected keyword" in str(te) or "positional argument" in str(te) or "argument" in str(te):
+                    print(f"[RECONSTRUCT] Signature mismatch on remote, falling back to legacy call: {te}")
+                    result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
+                else:
+                    raise te
         except Exception as remote_exc:
-            # fn.remote() failed — this typically happens when the Render server
-            # restarted while the Modal job was still running (connection reset).
+            # If it's a TypeError / argument error / signature mismatch, fail immediately
+            if isinstance(remote_exc, (TypeError, ValueError)) and "takes from" not in str(remote_exc):
+                print(f"[RECONSTRUCT] fn.remote() failed with non-recoverable error: {remote_exc}")
+                raise remote_exc
+
+            # Otherwise, fn.remote() failed due to connection drop/timeout — this typically happens
+            # when the Render server restarted while the Modal job was still running (connection reset).
             # The Modal job may have finished and written its completion marker to
             # the shared Dict. Poll for it for up to 20 minutes before giving up.
             print(f"[RECONSTRUCT] fn.remote() raised: {remote_exc}")
@@ -835,7 +1001,7 @@ def _reconstruct_thread(
                         break
                 except Exception:
                     pass
-                upd("reconstructing", f"Server restarted mid-job — waiting for Modal to finish… ({_attempt * 10}s)")
+                upd(tree_code, "reconstructing", f"Server restarted mid-job — waiting for Modal to finish… ({_attempt * 10}s)")
                 time.sleep(10)
             if result is None:
                 raise RuntimeError(f"fn.remote() failed and Modal did not complete within 20 min: {remote_exc}") from remote_exc
@@ -875,12 +1041,13 @@ def _reconstruct_thread(
             # Backward compat: old Modal version returned raw bytes
             splat_bytes = result
 
-        out = os.path.join(OUTPUT_DIR, "result.ply")
-        points3d_path = os.path.join(OUTPUT_DIR, "points3d.ply")
-        points3d_highres_path = os.path.join(OUTPUT_DIR, "points3d_highres.ply")
-        points3d_all_path = os.path.join(OUTPUT_DIR, "points3D_all.npy")
+        job_output_dir = get_job_output_dir(tree_code)
+        out = os.path.join(job_output_dir, "result.ply")
+        points3d_path = os.path.join(job_output_dir, "points3d.ply")
+        points3d_highres_path = os.path.join(job_output_dir, "points3d_highres.ply")
+        points3d_all_path = os.path.join(job_output_dir, "points3D_all.npy")
 
-        # Clean old files to free up disk space
+        # Clean old files in job output dir
         for p in (out, points3d_path, points3d_highres_path, points3d_all_path):
             if os.path.exists(p):
                 try:
@@ -905,6 +1072,13 @@ def _reconstruct_thread(
             print("[RECONSTRUCT] WARNING: No Gaussian splat PLY received!")
         t_dl_splat_end = time.time()
         print(f"[TIMING] Save/download result.ply: {t_dl_splat_end - t_dl_splat_start:.4f}s")
+
+        # Also mirror to root OUTPUT_DIR for legacy viewer compatibility
+        try:
+            if os.path.exists(out):
+                shutil.copy2(out, os.path.join(OUTPUT_DIR, "result.ply"))
+        except Exception:
+            pass
 
         mb = 0.0
         if os.path.exists(out):
@@ -931,91 +1105,33 @@ def _reconstruct_thread(
         t_dl_pts_end = time.time()
         print(f"[TIMING] Save/download points3d.ply: {t_dl_pts_end - t_dl_pts_start:.4f}s")
 
-        # Save points3d_all.npy
-        t_dl_all_start = time.time()
-        if uploaded and points3d_all_url:
-            print(f"[RECONSTRUCT] Stream-downloading points3d_all.npy from R2 URL: {points3d_all_url}")
-            import requests
-            res_dl = requests.get(points3d_all_url, stream=True)
-            with open(points3d_all_path, "wb") as f:
-                for chunk in res_dl.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            print(f"[RECONSTRUCT] points3d_all.npy stream download completed successfully")
-        elif points3d_all_bytes:
-            with open(points3d_all_path, "wb") as f:
-                f.write(points3d_all_bytes)
-            print(f"[RECONSTRUCT] Saved raw MASt3R dense pointmap: {points3d_all_path} ({len(points3d_all_bytes)/1024/1024:.1f} MB)")
-        else:
-            points3d_all_path = None
-        t_dl_all_end = time.time()
-        print(f"[TIMING] Save/download points3D_all.npy: {t_dl_all_end - t_dl_all_start:.4f}s")
-
-        t_icp_start = time.time()
-        P1_3d = None
-        P2_3d = None
-        
+        # Ensure local points3d.ply is cleaned for local DBH extraction
         if points3d_path and os.path.exists(points3d_path):
             try:
-                print(f"[RECONSTRUCT] Reading point cloud files for offloaded Modal alignment/filtering...")
-                with open(points3d_path, "rb") as f:
-                    ply_bytes = f.read()
-                    
-                points3d_all_bytes = b""
-                if points3d_all_path and os.path.exists(points3d_all_path):
-                    with open(points3d_all_path, "rb") as f:
-                        points3d_all_bytes = f.read()
-                
-                print(f"[RECONSTRUCT] Offloading alignment and filtering to Modal...")
-                import modal
-                fn_align = modal.Function.from_name("instantsplat-app", "align_and_filter_ply_modal")
-                res = fn_align.remote(ply_bytes, points3d_all_bytes, p1, p2, width, height)
-                
-                P1_3d = res.get("P1")
-                P2_3d = res.get("P2")
-                filtered_ply = res.get("filtered_ply")
-                
-                if filtered_ply:
-                    with open(points3d_highres_path, "wb") as f:
-                        f.write(filtered_ply)
-                    print(f"[RECONSTRUCT] Saved high-res filtered point cloud from Modal ({len(filtered_ply)/1024:.1f} KB)")
-                    # Generate decimated point cloud for display
-                    decimate_ply_file(points3d_highres_path, points3d_path, target_count=300000)
-                
-                if P1_3d and P2_3d:
-                    print(f"[RECONSTRUCT] ICP Alignment successful: P1_3d={P1_3d}, P2_3d={P2_3d}")
-                else:
-                    print(f"[RECONSTRUCT] Auto-filtering complete (no coordinates mapped)")
-            except Exception as align_err:
-                print(f"[RECONSTRUCT ERROR] Offloaded alignment/filtering failed: {align_err}")
-                # Fallback to local crop if it fails
-                try:
-                    filter_points3d_ply(points3d_path)
-                    import shutil
-                    shutil.copy(points3d_path, points3d_highres_path)
-                    decimate_ply_file(points3d_highres_path, points3d_path, target_count=300000)
-                except Exception as fb_err:
-                    print(f"[RECONSTRUCT ERROR] Local fallback crop failed: {fb_err}")
-        t_icp_end = time.time()
-        print(f"[TIMING] Mapping pixel and ICP alignment / filter_points3d_ply: {t_icp_end - t_icp_start:.4f}s")
+                from carbon.dbh_extractor import clean_and_filter_ply
+                clean_and_filter_ply(points3d_path)
+            except Exception as clean_err:
+                print(f"[RECONSTRUCT] Local points3d.ply clean pass: {clean_err}")
 
-        elapsed = time.time() - t0
-        print(f"[RECONSTRUCT] Total pipeline runtime: {elapsed:.2f} seconds")
+        # Note: points3d_all.npy download & fn_align.remote omitted to eliminate ~35MB outbound PLY bounce.
+        # Local ground-separated geometric cylinder detection runs directly on points3d.ply in <0.1s.
+        points3d_highres_path = None
+        P1_3d = None
+        P2_3d = None
 
         t_meta_start = time.time()
-        # 1. Resolve GPS coordinates from EXIF metadata if not provided manually
+        # 1. Extract GPS from frames if not provided by client
         if gps_lat is None or gps_lon is None:
             try:
-                from carbon.gps_exif import get_exif_gps
-                for f in files:
-                    coords = get_exif_gps(f)
-                    if coords:
-                        gps_lat, gps_lon = coords
-                        print(f"[RECONSTRUCT-GPS] EXIF GPS detected: ({gps_lat}, {gps_lon})")
-                        break
-            except Exception as gps_exif_err:
-                print(f"[RECONSTRUCT-GPS ERROR] EXIF scan failed: {gps_exif_err}")
+                from carbon.gps_exif import extract_gps_from_frames
+                gps_res = extract_gps_from_frames(job_frames_dir)
+                if gps_res:
+                    gps_lat, gps_lon = gps_res
+                    print(f"[RECONSTRUCT-GPS] Extracted EXIF GPS: lat={gps_lat:.6f}, lon={gps_lon:.6f}")
+            except Exception as gps_err:
+                print(f"[RECONSTRUCT-GPS ERROR] Failed to extract GPS: {gps_err}")
 
-        # 2. Resolve Climate Zone from GPS coordinates
+        # 2. Determine Climate Zone & Forest Type
         climate_zone = "Unknown"
         forest_type = "moist"
         if gps_lat is not None and gps_lon is not None:
@@ -1032,60 +1148,139 @@ def _reconstruct_thread(
         print(f"[TIMING] EXIF GPS and Koppen Climate Zone classification: {t_meta_end - t_meta_start:.4f}s")
 
         t_species_start = time.time()
-        # 3. Detect Species via Pl@ntNet API
+        # 3. Detect Species via Pl@ntNet API (Multi-Frame Candidates)
         species_preds = None
+        species_detection_status = "not_attempted"
+        species_detection_frame_used = None
+        temp_detect_files = []
         try:
-            upd("reconstructing", "Detecting tree species using Pl@ntNet API...")
-            from carbon.species_detection import detect_species
-            img_files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
-            if img_files:
-                detect_files = []
-                if len(img_files) >= 1:
-                    detect_files.append(img_files[0])
-                if len(img_files) >= 3:
-                    detect_files.append(img_files[len(img_files)//2])
-                    detect_files.append(img_files[-1])
-                elif len(img_files) == 2:
-                    detect_files.append(img_files[1])
-                species_preds = detect_species(detect_files)
-        except Exception as sp_err:
-            print(f"[RECONSTRUCT] Pl@ntNet species detection exception: {sp_err}")
+            upd(tree_code, "reconstructing", "Detecting tree species using Pl@ntNet API...")
+            from carbon.species_detection import detect_species_with_status
+            
+            # Step A: Collect local frames from job_frames_dir
+            img_files = sorted(glob.glob(os.path.join(job_frames_dir, "*.jpg")))
+            if not img_files:
+                img_files = sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
 
-        # 4. Determine Wood Density
+            if img_files:
+                # Multi-frame candidate selection: try first frame first
+                first_frame = img_files[0]
+                preds_first, status_first = detect_species_with_status([first_frame])
+                
+                # Check confidence of first frame
+                first_conf = (preds_first[0].get("confidence", 0.0)) if (preds_first and len(preds_first) > 0) else 0.0
+                if first_conf >= 30.0:
+                    species_preds = preds_first
+                    species_detection_status = "success"
+                    species_detection_frame_used = os.path.basename(first_frame)
+                    print(f"[RECONSTRUCT-SPECIES] High confidence match ({first_conf:.1f}%) on primary frame {species_detection_frame_used}")
+                elif len(img_files) > 1:
+                    # Multi-frame composite candidate: combine start, middle, and end frames across the orbit
+                    composite_candidates = [first_frame]
+                    if len(img_files) >= 3:
+                        composite_candidates.append(img_files[len(img_files)//2])
+                        composite_candidates.append(img_files[-1])
+                    else:
+                        composite_candidates.append(img_files[1])
+                    
+                    print(f"[RECONSTRUCT-SPECIES] Primary frame confidence low ({first_conf:.1f}%). Retrying with {len(composite_candidates)} composite frames...")
+                    preds_comp, status_comp = detect_species_with_status(composite_candidates)
+                    comp_conf = (preds_comp[0].get("confidence", 0.0)) if (preds_comp and len(preds_comp) > 0) else 0.0
+                    
+                    if comp_conf > first_conf:
+                        species_preds = preds_comp
+                        species_detection_status = "success" if comp_conf >= 30.0 else "low_confidence"
+                        species_detection_frame_used = f"multi_frame_composite ({len(composite_candidates)} frames)"
+                        print(f"[RECONSTRUCT-SPECIES] Multi-frame composite yielded higher confidence: {comp_conf:.1f}%")
+                    elif preds_first:
+                        species_preds = preds_first
+                        species_detection_status = "low_confidence"
+                        species_detection_frame_used = os.path.basename(first_frame)
+                    else:
+                        species_detection_status = status_comp or status_first or "no_matches_found"
+                elif preds_first:
+                    species_preds = preds_first
+                    species_detection_status = "low_confidence"
+                    species_detection_frame_used = os.path.basename(first_frame)
+                else:
+                    species_detection_status = status_first or "no_matches_found"
+
+            elif thumbnail_url:
+                # Step B: Fallback when direct R2 frames were used (job_frames_dir is empty on Render)
+                try:
+                    import requests as req
+                    import tempfile
+                    temp_thumb_path = os.path.join(tempfile.gettempdir(), f"{tree_code}_temp_species_detect.jpg")
+                    print(f"[RECONSTRUCT-SPECIES] Local frames empty. Downloading thumbnail for species detection: {thumbnail_url}")
+                    r_thumb = req.get(thumbnail_url, timeout=15)
+                    if r_thumb.status_code == 200:
+                        with open(temp_thumb_path, "wb") as f_thumb:
+                            f_thumb.write(r_thumb.content)
+                        temp_detect_files.append(temp_thumb_path)
+                        
+                        thumb_preds, thumb_status = detect_species_with_status([temp_thumb_path])
+                        if thumb_preds:
+                            species_preds = thumb_preds
+                            thumb_conf = thumb_preds[0].get("confidence", 0.0)
+                            species_detection_status = "success" if thumb_conf >= 30.0 else "low_confidence"
+                            species_detection_frame_used = "thumbnail_0000"
+                        else:
+                            species_detection_status = thumb_status or "no_matches_found"
+                except Exception as dl_thumb_err:
+                    species_detection_status = f"thumbnail_download_error"
+                    print(f"[RECONSTRUCT-SPECIES WARN] Failed to download thumbnail for species detection: {dl_thumb_err}")
+            else:
+                species_detection_status = "no_frames_available"
+                print(f"[RECONSTRUCT-SPECIES WARN] No frames available locally or via thumbnail for species detection.")
+
+            print(f"[RECONSTRUCT-SPECIES] Final Pl@ntNet status: '{species_detection_status}', frame used: '{species_detection_frame_used}', predictions: {species_preds}")
+
+        except Exception as sp_err:
+            species_detection_status = f"exception_{type(sp_err).__name__}"
+            print(f"[RECONSTRUCT] Pl@ntNet species detection exception: {sp_err}")
+        finally:
+            # Clean up any temporary downloaded detection frames
+            for tmp in temp_detect_files:
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except Exception:
+                        pass
+
+        # 4. Determine Wood Density (Pure tier representation)
         wood_density = 0.6
-        wood_density_source = "generic-default"
-        # Species ID confidence threshold. Below this we do NOT trust top-1 for
-        # wood density and fall back to the generic default with an explicit flag
-        # instead of silently using whatever Pl@ntNet returned as top-1.
+        wood_density_source = "default_fallback"
         SPECIES_CONFIDENCE_THRESHOLD = 30.0
         if species_preds and len(species_preds) > 0:
             top_pred = species_preds[0]
             top_conf = top_pred.get("confidence", 0.0)
-            if top_conf < SPECIES_CONFIDENCE_THRESHOLD:
-                wood_density_source = "generic-default (spesies tidak pasti)"
-                print(f"[RECONSTRUCT-WD] Top species confidence {top_conf:.1f}% < {SPECIES_CONFIDENCE_THRESHOLD}% — "
-                      f"menggunakan densitas default 0.6 (spesies tidak pasti)")
-            else:
-                sci_name = top_pred.get("scientific_name")
-                try:
-                    from carbon.wood_density_lookup import get_wood_density
-                    specific_wd = get_wood_density(sci_name)
-                    if specific_wd is not None:
-                        wood_density = specific_wd
-                        wood_density_source = "species-matched"
-                        print(f"[RECONSTRUCT-WD] Matched wood density for {sci_name}: {wood_density}")
-                except Exception as wd_err:
-                    print(f"[RECONSTRUCT-WD ERROR] Wood density lookup exception: {wd_err}")
+            sci_name = top_pred.get("scientific_name")
+            try:
+                from carbon.wood_density_lookup import get_wood_density_with_metadata
+                specific_wd, wd_tier, wd_meta = get_wood_density_with_metadata(sci_name)
+                if top_conf >= SPECIES_CONFIDENCE_THRESHOLD:
+                    wood_density = specific_wd
+                    wood_density_source = wd_tier
+                    print(f"[RECONSTRUCT-WD] Tiered wood density for '{sci_name}': {wood_density} g/cm³ (Tier: {wd_tier})")
+                else:
+                    wood_density = 0.6
+                    wood_density_source = "default_fallback"
+                    print(f"[RECONSTRUCT-WD] Top species confidence {top_conf:.1f}% < {SPECIES_CONFIDENCE_THRESHOLD}% — "
+                          f"fallback ke {wood_density} g/cm³ (default_fallback)")
+            except Exception as wd_err:
+                print(f"[RECONSTRUCT-WD ERROR] Wood density lookup exception: {wd_err}")
+                wood_density = 0.6
+                wood_density_source = "default_fallback"
         t_species_end = time.time()
-        print(f"[TIMING] Pl@ntNet species detection & wood density lookup: {t_species_end - t_species_start:.4f}s")
+        print(f"[TIMING] Pl@ntNet species detection & wood density lookup: {t_species_end - t_species_start:.4f}s (status: {species_detection_status})")
 
         t_carbon_start = time.time()
         # 5. Run Carbon Analysis using custom parameters
         progress_dict[tree_code] = "Computing DBH & carbon"
-        upd("reconstructing", "✓ Reconstruction done. Estimating DBH and Carbon...")
+        upd(tree_code, "reconstructing", "✓ Reconstruction done. Estimating DBH and Carbon...")
         carbon_est = run_carbon_analysis(
             out, 
-            points3d_path=points3d_highres_path, 
+            points3d_path=points3d_path, 
             scan_id=tree_code,
             wood_density=wood_density,
             forest_type=forest_type,
@@ -1104,131 +1299,164 @@ def _reconstruct_thread(
             else:
                 carbon_est["confidence"] = "GPS data not available - fallback to moist forest assumption"
                 
-        state["carbon_estimation"] = carbon_est
+        job_st = get_job_state(tree_code)
+        job_st["carbon_estimation"] = carbon_est
         t_carbon_end = time.time()
         print(f"[TIMING] Local carbon estimation analysis: {t_carbon_end - t_carbon_start:.4f}s")
 
-        if carbon_est and "error" not in carbon_est:
-            try:
-                t_persistence_start = time.time()
-                progress_dict[tree_code] = "Uploading results"
-                
-                if uploaded:
-                    print(f"[RECONSTRUCT] Files were uploaded directly from Modal to R2.")
-                    ts = custom_ts or int(time.time())
-                    # Upload high-res version to R2
-                    if points3d_highres_path and os.path.exists(points3d_highres_path):
-                        try:
-                            from storage.r2_client import upload_splat
-                            upload_splat(points3d_highres_path, tree_code, custom_timestamp=ts)
-                            print(f"[RECONSTRUCT] Uploaded high-res points3d_highres.ply to R2")
-                        except Exception as upload_err:
-                            print(f"Failed to upload points3d_highres.ply to R2: {upload_err}")
-                    # Overwrite raw points3d.ply in R2 with the decimated version
-                    if points3d_path and os.path.exists(points3d_path):
-                        try:
-                            from storage.r2_client import upload_splat
-                            upload_splat(points3d_path, tree_code, custom_timestamp=ts)
-                            print(f"[RECONSTRUCT] Overwrote R2 points3d.ply with decimated version")
-                        except Exception as upload_err:
-                            print(f"Failed to upload points3d.ply to R2: {upload_err}")
-                else:
-                    upd("reconstructing", "Uploading reconstruction files to Cloudflare R2...")
-                    from storage.r2_client import upload_splat, upload_thumbnail
-                    ts = int(time.time())
-                    splat_url = upload_splat(out, tree_code, custom_timestamp=ts)
-                    
-                    # Upload high-res version
-                    if points3d_highres_path and os.path.exists(points3d_highres_path):
-                        try:
-                            upload_splat(points3d_highres_path, tree_code, custom_timestamp=ts)
-                            print(f"[RECONSTRUCT] Uploaded high-res points3d_highres.ply to R2")
-                        except Exception as upload_err:
-                            print(f"Failed to upload points3d_highres.ply to R2: {upload_err}")
-                            
-                    # Upload decimated points3d.ply
-                    if points3d_path and os.path.exists(points3d_path):
-                        try:
-                            upload_splat(points3d_path, tree_code, custom_timestamp=ts)
-                            print(f"[RECONSTRUCT] Uploaded decimated points3d.ply to R2")
-                        except Exception as upload_err:
-                            print(f"Failed to upload points3d.ply to R2: {upload_err}")
+        # Check if carbon estimation succeeded or hit geometry failure
+        is_geometry_failed = False
+        if not carbon_est or "error" in carbon_est:
+            is_geometry_failed = True
+            err_msg = (carbon_est or {}).get("error", "Automatic cylinder fitting could not detect trunk in point cloud")
+            print(f"[RECONSTRUCT-WARN] Carbon estimation error: {err_msg}. Saving scan as uncalibrated_geometry_failed.")
+            carbon_est = {
+                "dbh_cm": None,
+                "height_m": None,
+                "biomass_kg": None,
+                "carbon_kg": None,
+                "co2e_kg": None,
+                "confidence": f"Automatic cylinder detection failed: {err_msg}. Please use Recalibrate to mark trunk.",
+                "quality_status": "uncalibrated_geometry_failed",
+                "geometry_3d": {"error": err_msg},
+            }
 
-                    # If MASt3R points3D_all.npy was computed, upload it too
+        # ── Precompute SHA-256 hash of PLY ──
+        import hashlib
+        sha256_hash = None
+        if os.path.exists(out):
+            try:
+                with open(out, "rb") as pf:
+                    sha256_hash = hashlib.sha256(pf.read()).hexdigest()
+            except Exception:
+                pass
+        
+        geom_dict = carbon_est.get("geometry_3d") or {}
+        if sha256_hash:
+            geom_dict["ply_sha256"] = sha256_hash
+        carbon_est["geometry_3d"] = geom_dict
+
+        try:
+            t_persistence_start = time.time()
+            progress_dict[tree_code] = "Uploading results"
+            
+            if uploaded:
+                print(f"[RECONSTRUCT] Files were already uploaded directly from Modal to R2 (zero Render outbound bandwidth used).")
+            else:
+                upd(tree_code, "reconstructing", "Uploading reconstruction files to Cloudflare R2...")
+                from storage.r2_client import upload_splat, upload_thumbnail
+                ts = int(time.time())
+                splat_url = upload_splat(out, tree_code, custom_timestamp=ts)
+                
+                # Upload high-res version
+                if points3d_highres_path and os.path.exists(points3d_highres_path):
+                    try:
+                        upload_splat(points3d_highres_path, tree_code, custom_timestamp=ts)
+                        print(f"[RECONSTRUCT] Uploaded high-res points3d_highres.ply to R2")
+                    except Exception as upload_err:
+                        print(f"Failed to upload points3d_highres.ply to R2: {upload_err}")
+                        
+                # Upload decimated points3d.ply
+                if points3d_path and os.path.exists(points3d_path):
+                    try:
+                        upload_splat(points3d_path, tree_code, custom_timestamp=ts)
+                        print(f"[RECONSTRUCT] Uploaded decimated points3d.ply to R2")
+                    except Exception as upload_err:
+                        print(f"Failed to upload points3d.ply to R2: {upload_err}")
+
+                # If MASt3R points3D_all.npy was computed, upload it too
+                if points3d_all_path and os.path.exists(points3d_all_path):
+                    try:
+                        upload_splat(points3d_all_path, tree_code, custom_timestamp=ts)
+                        print(f"[RECONSTRUCT] Uploaded MASt3R points3D_all.npy with timestamp {ts}")
+                    except Exception as upload_err:
+                        print(f"Failed to upload points3D_all.npy to R2: {upload_err}")
+
+                # Select representative frame matching MASt3R pointmap as thumbnail
+                thumbnail_url = None
+                if files:
+                    target_thumb_idx = 0
                     if points3d_all_path and os.path.exists(points3d_all_path):
                         try:
-                            upload_splat(points3d_all_path, tree_code, custom_timestamp=ts)
-                            print(f"[RECONSTRUCT] Uploaded MASt3R points3D_all.npy with timestamp {ts}")
-                        except Exception as upload_err:
-                            print(f"Failed to upload points3D_all.npy to R2: {upload_err}")
+                            pts3d_local = np.load(points3d_all_path)
+                            N_local = pts3d_local.shape[0]
+                            valid_counts = [
+                                np.sum(~np.all(pts3d_local[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d_local[i]), axis=-1))
+                                for i in range(N_local)
+                            ]
+                            target_thumb_idx = int(np.argmax(valid_counts))
+                        except Exception:
+                            target_thumb_idx = 0
+                    
+                    representative_frame = files[min(target_thumb_idx, len(files) - 1)]
+                    try:
+                        upd(tree_code, "reconstructing", f"Uploading representative frame {target_thumb_idx} as thumbnail to R2...")
+                        thumbnail_url = upload_thumbnail(representative_frame, tree_code)
+                    except Exception as thumb_err:
+                        print(f"Thumbnail upload error: {thumb_err}")
 
-                    # Select middle representative frame as thumbnail
-                    thumbnail_url = None
-                    if files:
-                        mid_idx = len(files) // 2
-                        representative_frame = files[mid_idx]
-                        try:
-                            upd("reconstructing", "Uploading representative frame as thumbnail to R2...")
-                            thumbnail_url = upload_thumbnail(representative_frame, tree_code)
-                        except Exception as thumb_err:
-                            print(f"Thumbnail upload error: {thumb_err}")
-
-                upd("reconstructing", "Saving scan results to Cloudflare D1...")
-                from storage.d1_client import save_scan_result
-                save_scan_result(
-                    tree_code=tree_code,
-                    dbh_cm=carbon_est.get("dbh_cm"),
-                    tinggi_m=carbon_est.get("height_m"),
-                    biomassa_kg=carbon_est.get("biomass_kg"),
-                    karbon_kg=carbon_est.get("carbon_kg"),
-                    co2e_kg=carbon_est.get("co2e_kg"),
-                    splat_file_url=splat_url,
-                    confidence_note=carbon_est.get("confidence"),
-                    thumbnail_url=thumbnail_url,
-                    geometry_3d=carbon_est.get("geometry_3d"),
-                    species_predictions=species_preds,
-                    wood_density_used=carbon_est.get("wood_density_used"),
-                    wood_density_source=carbon_est.get("wood_density_source"),
-                    climate_zone_detected=carbon_est.get("climate_zone_detected"),
-                    formula_used=carbon_est.get("formula_used"),
-                    agb_kg=carbon_est.get("above_ground_biomass_kg"),
-                    bgb_kg=carbon_est.get("below_ground_biomass_kg"),
-                    gps_lat=gps_lat,
-                    gps_lon=gps_lon,
-                    scale_status=carbon_est.get("scale_status"),
-                    scale_factor_used=carbon_est.get("scale_factor_used"),
-                    calibration_source=carbon_est.get("calibration_source"),
-                    height_used=carbon_est.get("height_used"),
-                    total_height_used_m=carbon_est.get("total_height_used_m"),
-                    segment_height_m=carbon_est.get("segment_height_m"),
-                    height_fallback_reason=carbon_est.get("height_fallback_reason"),
-                    quality_status=carbon_est.get("quality_status"),
-                    inlier_ratio=carbon_est.get("inlier_ratio"),
-                    root_to_shoot_ratio=carbon_est.get("root_to_shoot_ratio"),
-                    co2e_uncertainty_pct=carbon_est.get("co2e_uncertainty_pct"),
-                    co2e_low_kg=carbon_est.get("co2e_low_kg"),
-                    co2e_high_kg=carbon_est.get("co2e_high_kg"),
-                    plot_id=plot_id,
-                    claimed_by_user_id=claimed_by_user_id,
-                )
-                t_persistence_end = time.time()
-                print(f"[TIMING] R2 upload & D1 database persistence: {t_persistence_end - t_persistence_start:.4f}s")
-                upd("done", f"✓ Done in {elapsed:.0f}s — {mb:.1f} MB Gaussian Splat ready! (Tree code: {tree_code})")
-            except Exception as exc:
-                print(f"Persistence error: {exc}")
-                upd("error", f"Reconstruction done, but failed to save: {exc}", error=str(exc))
-        else:
-            err = (carbon_est or {}).get("error", "Unknown carbon analysis error")
-            upd("error", f"Reconstruction done, but carbon analysis failed: {err}", error=err)
+            upd(tree_code, "reconstructing", "Saving scan results to Cloudflare D1...")
+            from storage.d1_client import save_scan_result
+            save_scan_result(
+                tree_code=tree_code,
+                dbh_cm=carbon_est.get("dbh_cm"),
+                tinggi_m=carbon_est.get("height_m"),
+                biomassa_kg=carbon_est.get("biomass_kg"),
+                karbon_kg=carbon_est.get("carbon_kg"),
+                co2e_kg=carbon_est.get("co2e_kg"),
+                splat_file_url=splat_url,
+                confidence_note=carbon_est.get("confidence"),
+                thumbnail_url=thumbnail_url,
+                geometry_3d=carbon_est.get("geometry_3d"),
+                species_predictions=species_preds,
+                wood_density_used=carbon_est.get("wood_density_used"),
+                wood_density_source=carbon_est.get("wood_density_source"),
+                climate_zone_detected=carbon_est.get("climate_zone_detected"),
+                formula_used=carbon_est.get("formula_used"),
+                agb_kg=carbon_est.get("above_ground_biomass_kg"),
+                bgb_kg=carbon_est.get("below_ground_biomass_kg"),
+                gps_lat=gps_lat,
+                gps_lon=gps_lon,
+                scale_status=carbon_est.get("scale_status"),
+                scale_factor_used=carbon_est.get("scale_factor_used"),
+                calibration_source=carbon_est.get("calibration_source"),
+                height_used=carbon_est.get("height_used"),
+                total_height_used_m=carbon_est.get("total_height_used_m"),
+                segment_height_m=carbon_est.get("segment_height_m"),
+                height_fallback_reason=carbon_est.get("height_fallback_reason"),
+                quality_status=carbon_est.get("quality_status"),
+                inlier_ratio=carbon_est.get("inlier_ratio"),
+                root_to_shoot_ratio=carbon_est.get("root_to_shoot_ratio"),
+                co2e_uncertainty_pct=carbon_est.get("co2e_uncertainty_pct"),
+                co2e_low_kg=carbon_est.get("co2e_low_kg"),
+                co2e_high_kg=carbon_est.get("co2e_high_kg"),
+                plot_id=plot_id,
+                claimed_by_user_id=claimed_by_user_id,
+                species_detection_status=species_detection_status,
+                species_detection_frame_used=species_detection_frame_used,
+                dbh_equivalent_cm=carbon_est.get("dbh_equivalent_cm"),
+            )
+            t_persistence_end = time.time()
+            print(f"[TIMING] R2 upload & D1 database persistence: {t_persistence_end - t_persistence_start:.4f}s")
+            
+            elapsed = time.time() - t0
+            if is_geometry_failed:
+                upd(tree_code, "done", f"✓ 3D Gaussian Splat generated ({mb:.1f} MB), but trunk could not be detected automatically. Use Recalibrate to mark trunk.")
+            else:
+                upd(tree_code, "done", f"✓ Done in {elapsed:.0f}s — {mb:.1f} MB Gaussian Splat ready! (Tree code: {tree_code})")
+        except Exception as exc:
+            print(f"Persistence error: {exc}")
+            upd(tree_code, "error", f"Reconstruction done, but failed to save: {exc}", error=str(exc))
 
     except BaseException as exc:
-        if state.get("cancel_requested", False):
-            print("[RECONSTRUCT] Cancel requested by user. Aborting...")
-            upd("idle", "Ready.")
-            state["cancel_requested"] = False
+        job_st = get_job_state(tree_code)
+        if job_st.get("cancel_requested", False):
+            print(f"[RECONSTRUCT] Cancel requested by user for {tree_code}. Aborting...")
+            upd(tree_code, "idle", "Ready.")
+            job_st["cancel_requested"] = False
         else:
-            print(f"[RECONSTRUCT ERROR] Critical pipeline failure: {exc}")
-            upd("error", str(exc), error=str(exc))
+            print(f"[RECONSTRUCT ERROR] Critical pipeline failure for {tree_code}: {exc}")
+            upd(tree_code, "error", str(exc), error=str(exc))
     finally:
         try:
             del progress_dict[tree_code]
@@ -1273,13 +1501,14 @@ origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-from fastapi import Cookie, Depends, HTTPException, status
+from fastapi import Cookie, Depends, Header, HTTPException, status
 import secrets
 import json
 
@@ -1322,6 +1551,7 @@ async def get_optional_user(
     if not session_token:
         return None
     return await _validate_session_token(session_token)
+
 
 async def get_current_user(
     session_token: Optional[str] = Cookie(None),
@@ -1384,11 +1614,33 @@ async def splat_js():
 async def output_file(fn: str):
     path = os.path.join(OUTPUT_DIR, fn)
     if not os.path.exists(path):
+        # Check subdirectories (tree_codes)
+        for d in os.listdir(OUTPUT_DIR):
+            sub_path = os.path.join(OUTPUT_DIR, d, fn)
+            if os.path.exists(sub_path):
+                return FileResponse(sub_path)
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path)
 
+@app.get("/frames/{tree_code}/{fn}", include_in_schema=False)
+async def frame_file_namespaced(tree_code: str, fn: str):
+    path = os.path.join(get_job_frames_dir(tree_code), fn)
+    if not os.path.exists(path):
+        path = os.path.join(FRAMES_DIR, fn)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Frame not found")
+    return FileResponse(path)
+
 @app.get("/frames/{fn}", include_in_schema=False)
-async def frame_file(fn: str):
+async def frame_file(fn: str, tree_code: Optional[str] = Query(default=None)):
+    if tree_code:
+        path = os.path.join(get_job_frames_dir(tree_code), fn)
+        if os.path.exists(path):
+            return FileResponse(path)
+    elif latest_job_code:
+        path = os.path.join(get_job_frames_dir(latest_job_code), fn)
+        if os.path.exists(path):
+            return FileResponse(path)
     path = os.path.join(FRAMES_DIR, fn)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Frame not found")
@@ -1397,31 +1649,40 @@ async def frame_file(fn: str):
 # ── API routes ────────────────────────────────────────────────────────────────
 
 @app.get("/status", response_model=StatusResponse, summary="Poll pipeline state")
-async def status():
-    """Returns the current pipeline stage and all associated metadata."""
+@app.get("/status/{tree_code}", response_model=StatusResponse, summary="Poll pipeline state for a specific tree code")
+async def status(tree_code: Optional[str] = None):
+    """Returns the current pipeline stage and all associated metadata for the given tree_code or latest job."""
+    target_code = tree_code or latest_job_code
+    job_st = get_job_state(target_code)
+
+    job_frames_dir = get_job_frames_dir(target_code)
     frames = (
-        sorted(f for f in os.listdir(FRAMES_DIR) if f.lower().endswith(".jpg"))
-        if os.path.exists(FRAMES_DIR)
+        sorted(f for f in os.listdir(job_frames_dir) if f.lower().endswith(".jpg"))
+        if os.path.exists(job_frames_dir)
         else []
     )
-    
-    current_msg = state.get("message")
-    if state.get("stage") == "reconstructing":
-        tc = state.get("tree_code")
-        if tc:
-            try:
-                import modal
-                progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
-                if tc in progress_dict:
-                    current_msg = progress_dict[tc]
-            except Exception as e:
-                print(f"[STATUS] Failed to read Modal progress: {e}")
-                
+    if not frames and os.path.exists(FRAMES_DIR):
+        frames = sorted(f for f in os.listdir(FRAMES_DIR) if f.lower().endswith(".jpg"))
+
+    current_msg = job_st.get("message")
+    if job_st.get("stage") == "reconstructing" and target_code:
+        try:
+            import modal
+            progress_dict = modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
+            if target_code in progress_dict:
+                current_msg = progress_dict[target_code]
+        except Exception as e:
+            print(f"[STATUS] Failed to read Modal progress: {e}")
+
+    job_output_dir = get_job_output_dir(target_code)
+    has_res = os.path.exists(os.path.join(job_output_dir, "result.ply")) or os.path.exists(os.path.join(OUTPUT_DIR, "result.ply"))
+
     return {
-        **state,
-        "message":    current_msg,
-        "frames":     frames,
-        "has_result": os.path.exists(os.path.join(OUTPUT_DIR, "result.ply")),
+        **job_st,
+        "tree_code": target_code or job_st.get("tree_code"),
+        "message": current_msg,
+        "frames": frames,
+        "has_result": has_res,
     }
 
 @app.get("/video_upload_url", summary="Get a presigned R2 PUT URL for direct browser-to-R2 video upload")
@@ -1431,9 +1692,8 @@ async def video_upload_url(
     content_type: str = Query(default="video/mp4", description="MIME type of the video"),
 ):
     """
-    Returns a short-lived presigned PUT URL so the browser can upload the video
+    Returns a 15-minute presigned PUT URL so the browser can upload the video
     directly to Cloudflare R2 without routing bytes through the Render backend.
-    Also returns the R2 key the browser should pass to POST /upload_video after upload.
     """
     account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
     access_key = os.environ.get("R2_ACCESS_KEY_ID")
@@ -1461,9 +1721,9 @@ async def video_upload_url(
     presigned_url = s3.generate_presigned_url(
         "put_object",
         Params={"Bucket": bucket_name, "Key": r2_key, "ContentType": content_type},
-        ExpiresIn=300,  # 5 minutes
+        ExpiresIn=900,  # 15 minutes (Matrix 1.1)
     )
-    print(f"[UPLOAD-URL] Generated presigned PUT URL for key: {r2_key}")
+    print(f"[UPLOAD-URL] Generated presigned PUT URL (15m expiry) for key: {r2_key}")
     return {"url": presigned_url, "key": r2_key}
 
 
@@ -1471,6 +1731,8 @@ class UploadVideoRequest(BaseModel):
     r2_key: str
     frames: int = 25
     blur_thresh: int = 80
+    camera_poses: Optional[List[Any]] = None
+    tree_code: Optional[str] = None
 
 
 @app.post("/upload_video", summary="Trigger frame extraction from an already-uploaded R2 video")
@@ -1482,8 +1744,6 @@ async def upload_video(
     """
     Accepts a JSON body with the R2 key of a video that the browser already PUT
     directly to R2 via a presigned URL. Queues frame extraction on Modal.
-    No video bytes are transferred through this endpoint.
-    Poll `/status` for progress.
     """
     # The pipeline is single-flight (one global `state`, not scoped per user
     # or session) — reject a new upload outright if a job is actively running
@@ -1497,8 +1757,12 @@ async def upload_video(
     r2_key = body.r2_key
     frames = body.frames
     blur_thresh = body.blur_thresh
+    camera_poses = body.camera_poses
 
-    # Record when this request arrived for timing purposes
+    import random
+    final_code = body.tree_code or f"POHON-{random.randint(1000, 9999)}"
+    final_code = final_code.strip().upper()
+
     t_arrival = time.time()
     upload_start = request.headers.get("X-Upload-Start-Time")
     client_to_server_s = None
@@ -1509,19 +1773,16 @@ async def upload_video(
         except Exception as e:
             print(f"[TIMING] Failed to parse client start time: {e}")
 
-    print(f"[UPLOAD-VIDEO] Received r2_key={r2_key}, frames={frames}, blur_thresh={blur_thresh}")
-    state["error"] = None
-    state["cancel_requested"] = False
-    upd("extracting", "Video received on R2, starting smart extraction...")
-    # BackgroundTasks dispatches sync callables to thread pool automatically
-    background_tasks.add_task(_extract_thread, r2_key, frames, blur_thresh, client_to_server_s)
-    return {"queued": True}
+    print(f"[UPLOAD-VIDEO] Queuing {final_code} with r2_key={r2_key}, frames={frames}, blur_thresh={blur_thresh}")
+    init_job_state(final_code, camera_poses=camera_poses)
+    upd(final_code, "extracting", f"Video received on R2 for {final_code}, starting smart extraction...")
+    background_tasks.add_task(_extract_thread, final_code, r2_key, frames, blur_thresh, client_to_server_s)
+    return {"queued": True, "tree_code": final_code}
 
 
 @app.post("/reconstruct", summary="Start GPU reconstruction on extracted frames")
 async def reconstruct(
     background_tasks: BackgroundTasks,
-    # Accept tree_code, remove_background, and GPS coordinates from JSON body OR query string for maximum flexibility
     body: Optional[ReconstructRequest] = Body(default=None),
     tree_code_query: Optional[str] = Query(default=None, alias="tree_code"),
     remove_bg_query: Optional[bool] = Query(default=None, alias="remove_background"),
@@ -1533,7 +1794,6 @@ async def reconstruct(
     """
     Dispatches the GPU reconstruction job (via Modal) as a background task.
     Returns immediately with `tree_code` so the client can track this scan.
-    If no `tree_code` is provided, one is auto-generated in format `POHON-XXXX`.
     """
     # Single-flight guard: "reconstructing" unambiguously means another job
     # already holds the one available GPU slot (tree_code isn't assigned
@@ -1544,50 +1804,44 @@ async def reconstruct(
             status_code=409,
             detail="Another scan is currently being reconstructed on this server. Please wait for it to finish before starting a new one.",
         )
-    if state["stage"] not in ("extracted", "done", "error"):
-        raise HTTPException(status_code=400, detail="Not ready — extract frames first")
 
-    # Resolve remove_background
+    import random
+    final_code = tree_code_query or (body.tree_code if body else None) or latest_job_code or f"POHON-{random.randint(1000, 9999)}"
+    final_code = final_code.strip().upper()
+
+    job_st = get_job_state(final_code)
+    if job_st.get("stage") not in ("extracted", "done", "error", "idle"):
+        raise HTTPException(status_code=400, detail=f"Job {final_code} is not ready (stage: {job_st.get('stage')})")
+
     remove_bg = False
     if remove_bg_query is not None:
         remove_bg = remove_bg_query
     elif body and body.remove_background is not None:
         remove_bg = body.remove_background
 
-    # Reset cancellation request
-    state["cancel_requested"] = False
-
-    # Generate or resolve tree code
-    import random
-    final_code = tree_code_query or (body.tree_code if body else None) or f"POHON-{random.randint(1000, 9999)}"
-    final_code = final_code.strip().upper()
-
-    # Resolve GPS params
     gps_lat = gps_lat_query if gps_lat_query is not None else (body.gps_lat if body else None)
     gps_lon = gps_lon_query if gps_lon_query is not None else (body.gps_lon if body else None)
 
-    # Resolve manual clicks
     p1 = body.p1 if body else None
     p2 = body.p2 if body else None
     width = body.width if body else None
     height = body.height if body else None
+    frame_idx = body.frame_idx if body else None
 
-    # Resolve iterations
     iterations = 2000
     if iterations_query is not None:
         iterations = iterations_query
     elif body and body.iterations is not None:
         iterations = body.iterations
 
-    # Resolve active plot session for auto-association has been deprecated and removed.
     plot_id = None
     claimed_by_user_id = optional_user["id"] if optional_user else None
 
-    state["error"] = None
-    state["tree_code"] = final_code
-    import time
-    state["started_at"] = time.time()
-    upd("reconstructing", "Queuing reconstruction…")
+    job_st["cancel_requested"] = False
+    job_st["error"] = None
+    job_st["tree_code"] = final_code
+    job_st["started_at"] = time.time()
+    upd(final_code, "reconstructing", "Queuing reconstruction…")
     background_tasks.add_task(
         _reconstruct_thread,
         final_code,
@@ -1600,19 +1854,26 @@ async def reconstruct(
         height,
         plot_id,
         claimed_by_user_id,
-        iterations
+        iterations,
+        frame_idx
     )
     return {"started": True, "tree_code": final_code}
 
 
+class CancelRequest(BaseModel):
+    tree_code: Optional[str] = None
+
 @app.post("/cancel", summary="Cancel active pipeline job")
-async def cancel_job():
+async def cancel_job(body: Optional[CancelRequest] = Body(default=None), tree_code: Optional[str] = Query(default=None)):
     """Signals cancellation to background threads and resets state to idle."""
-    state["cancel_requested"] = True
-    upd("idle", "Ready (Previous job cancelled).")
-    state["overlap_warning"] = None
-    state["error"] = None
-    return {"success": True, "message": "Cancellation request registered."}
+    target_code = (body.tree_code if body else None) or tree_code or latest_job_code
+    if target_code and target_code in active_jobs:
+        active_jobs[target_code]["cancel_requested"] = True
+        upd(target_code, "idle", f"Ready (Job {target_code} cancelled).")
+    else:
+        state["cancel_requested"] = True
+        upd("idle", "Ready (Previous job cancelled).")
+    return {"success": True, "message": f"Cancellation request registered for {target_code or 'active job'}."}
 
 @app.get(
     "/history/{tree_code}",
@@ -1843,159 +2104,100 @@ async def recalculate_scan(
         local_ply_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d.ply")
         local_ply_highres_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d_highres.ply")
 
-        # 4. Download dense pointmap (NPY) from R2 if not already cached locally
-        if os.path.exists(local_npy_path) and os.path.getsize(local_npy_path) > 100000:
-            print(f"[RECALCULATE] Found locally cached dense pointmap: {local_npy_path} — skipping download.")
-        else:
-            print(f"[RECALCULATE] Downloading dense pointmap from {pointmap_url}")
-            try:
-                res_npy = requests.get(pointmap_url, timeout=30)
-                if res_npy.status_code != 200:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Historical scan does not have dense pointmap data. Please perform a new reconstruction."
+        # 4. Helper to fetch file via R2 S3 or HTTP
+        def _fetch_file_r2_or_http(target_url, r2_key, local_dst):
+            account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+            access_key = os.environ.get("R2_ACCESS_KEY_ID")
+            secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
+            bucket_name = os.environ.get("R2_BUCKET_NAME")
+            if all([account_id, access_key, secret_key, bucket_name]):
+                try:
+                    import boto3
+                    from botocore.config import Config
+                    s3 = boto3.client(
+                        "s3",
+                        endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
+                        aws_access_key_id=access_key,
+                        aws_secret_access_key=secret_key,
+                        config=Config(signature_version="s3v4"),
+                        region_name="auto"
                     )
-                with open(local_npy_path, "wb") as f:
-                    f.write(res_npy.content)
-            except HTTPException as he:
-                raise he
-            except Exception as npy_err:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Failed to download dense pointmap: {npy_err}"
-                )
-
-        # 5. Download the existing points3d_highres.ply from R2 if not already cached locally
-        if os.path.exists(local_ply_highres_path) and os.path.getsize(local_ply_highres_path) > 1000:
-            print(f"[RECALCULATE] Found locally cached points3d_highres.ply: {local_ply_highres_path} — skipping download.")
-        else:
-            points3d_highres_url = points3d_url.replace("points3d.ply", "points3d_highres.ply")
-            print(f"[RECALCULATE] Downloading existing points3d_highres.ply from {points3d_highres_url}")
+                    s3.download_file(bucket_name, r2_key, local_dst)
+                    if os.path.exists(local_dst) and os.path.getsize(local_dst) > 100:
+                        return True
+                except Exception as s3_err:
+                    print(f"[RECALCULATE] S3 direct download failed for {r2_key}: {s3_err}")
             try:
-                res_ply = requests.get(points3d_highres_url, timeout=30)
-                if res_ply.status_code == 200:
-                    with open(local_ply_highres_path, "wb") as f:
-                        f.write(res_ply.content)
-                    print(f"[RECALCULATE] Successfully downloaded existing points3d_highres.ply from R2")
-                else:
-                    # Fallback to standard points3d.ply
-                    print(f"[RECALCULATE] points3d_highres.ply not found. Falling back to downloading standard points3d.ply from {points3d_url}")
-                    res_ply_std = requests.get(points3d_url, timeout=30)
-                    if res_ply_std.status_code != 200:
+                res = requests.get(target_url, timeout=30)
+                if res.status_code == 200:
+                    with open(local_dst, "wb") as f:
+                        f.write(res.content)
+                    return True
+            except Exception as http_err:
+                print(f"[RECALCULATE] HTTP download failed for {target_url}: {http_err}")
+            return False
+
+        # Download dense pointmap (NPY) from R2 if not already cached locally
+        pointmap_key = f"tree_scans/{tree_code}/{timestamp}_points3D_all.npy"
+        has_npy = False
+        if os.path.exists(local_npy_path) and os.path.getsize(local_npy_path) > 1000:
+            has_npy = True
+        else:
+            has_npy = _fetch_file_r2_or_http(pointmap_url, pointmap_key, local_npy_path)
+
+        # 5. Ensure point cloud is available locally (cached or downloaded via S3/HTTP)
+        point_cloud_path = local_ply_highres_path
+        if not (os.path.exists(point_cloud_path) and os.path.getsize(point_cloud_path) > 1000):
+            if os.path.exists(local_ply_path) and os.path.getsize(local_ply_path) > 1000:
+                point_cloud_path = local_ply_path
+            else:
+                ply_highres_key = f"tree_scans/{tree_code}/{timestamp}_points3d_highres.ply"
+                ply_std_key = f"tree_scans/{tree_code}/{timestamp}_points3d.ply"
+                points3d_highres_url = points3d_url.replace("points3d.ply", "points3d_highres.ply")
+                
+                print(f"[RECALCULATE] Fetching point cloud from R2 (direct S3)...")
+                if not _fetch_file_r2_or_http(points3d_highres_url, ply_highres_key, point_cloud_path):
+                    if not _fetch_file_r2_or_http(points3d_url, ply_std_key, point_cloud_path):
                         raise HTTPException(
                             status_code=400,
-                            detail=f"Failed to download points3d.ply: HTTP {res_ply_std.status_code}"
+                            detail="Failed to download point cloud for recalculation."
                         )
-                    with open(local_ply_highres_path, "wb") as f:
-                        f.write(res_ply_std.content)
-                    print(f"[RECALCULATE] Successfully downloaded standard points3d.ply from R2 as fallback")
-            except Exception as ply_err:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Failed to download points3d: {ply_err}"
-                )
 
-        # 6. Load pointmap and perform coordinate mapping
-        pts3d = np.load(local_npy_path)
-        N, H_crop, W_crop, _ = pts3d.shape
-        # Pick the representative frame by valid-pixel coverage (same logic as _reconstruct_thread)
-        valid_counts = np.array([
-            np.sum(~np.all(pts3d[i] == 0, axis=-1) & ~np.any(np.isnan(pts3d[i]), axis=-1))
-            for i in range(N)
-        ])
-        repr_idx = int(np.argmax(valid_counts))
-        print(f"[RECALCULATE] Representative frame: idx={repr_idx}/{N} ({valid_counts[repr_idx]:,} valid pixels)")
-        pointmap = pts3d[repr_idx]
-
-        u1_crop, v1_crop = map_pixel_to_cropped(body.p1[0], body.p1[1], body.width, body.height, W_crop, H_crop)
-        u2_crop, v2_crop = map_pixel_to_cropped(body.p2[0], body.p2[1], body.width, body.height, W_crop, H_crop)
-
-        P1_cam = get_robust_3d_point(pointmap, u1_crop, v1_crop)
-        P2_cam = get_robust_3d_point(pointmap, u2_crop, v2_crop)
-        
-        # Hybrid depth constraint: clamp depth only if deviation is > 1.5m (background hit)
-        z_diff = P2_cam[2] - P1_cam[2]
-        if abs(z_diff) > 1.5:
-            print(f"[RECALCULATE] Z-depth deviation ({abs(z_diff):.3f}m) > 1.5m. Background hit detected. Clamping Z2 to Z1.")
-            P2_cam[2] = P1_cam[2]
-
-        # Align camera space to world space using ICP (raw-to-raw) on Modal
-        try:
-            print(f"[RECALCULATE] Reading point cloud files for offloaded Modal alignment/filtering...")
-            with open(local_ply_highres_path, "rb") as f:
-                ply_bytes = f.read()
-            with open(local_npy_path, "rb") as f:
-                points3d_all_bytes = f.read()
-
-            print(f"[RECALCULATE] Offloading alignment and filtering to Modal...")
-            import modal
-            fn_align = modal.Function.from_name("instantsplat-app", "align_and_filter_ply_modal")
-            res = fn_align.remote(ply_bytes, points3d_all_bytes, body.p1, body.p2, body.width, body.height)
-            
-            P1 = res.get("P1")
-            P2 = res.get("P2")
-            filtered_ply = res.get("filtered_ply")
-            
-            if filtered_ply:
-                with open(local_ply_highres_path, "wb") as f:
-                    f.write(filtered_ply)
-                print(f"[RECALCULATE] Saved high-res filtered point cloud from Modal ({len(filtered_ply)/1024:.1f} KB)")
-                # Generate decimated point cloud for display
-                decimate_ply_file(local_ply_highres_path, local_ply_path, target_count=300000)
-                
-                # Upload both the decimated points3d.ply and high-res version to R2 to update them
-                try:
-                    import shutil
-                    temp_upload_dir = os.path.join(local_dir, f"temp_upload_{timestamp}_{tree_code}")
-                    os.makedirs(temp_upload_dir, exist_ok=True)
-                    
-                    target_ply = os.path.join(temp_upload_dir, "points3d.ply")
-                    target_ply_highres = os.path.join(temp_upload_dir, "points3d_highres.ply")
-                    
-                    shutil.copy2(local_ply_path, target_ply)
-                    shutil.copy2(local_ply_highres_path, target_ply_highres)
-                    
-                    from storage.r2_client import upload_splat
-                    upload_splat(target_ply, tree_code, custom_timestamp=int(timestamp))
-                    upload_splat(target_ply_highres, tree_code, custom_timestamp=int(timestamp))
-                    print(f"[RECALCULATE] Uploaded updated points3d.ply and points3d_highres.ply to R2")
-                    
-                    # Clean up temp upload files
-                    shutil.rmtree(temp_upload_dir, ignore_errors=True)
-                except Exception as upload_err:
-                    print(f"[RECALCULATE] Failed to upload recalculated PLYs to R2: {upload_err}")
-                
-            if P1 and P2:
-                print(f"[RECALCULATE] ICP Alignment successful. P1_world={P1}, P2_world={P2}")
-            else:
-                raise ValueError("Modal did not return aligned coordinates")
-        except Exception as align_err:
-            print(f"[RECALCULATE ERROR] Offloaded ICP Alignment failed: {align_err}. Using local camera-space fallback.")
-            P1 = P1_cam.tolist()
-            P2 = P2_cam.tolist()
-            try:
-                import shutil
-                shutil.copy(local_ply_highres_path, local_ply_path)
-                filter_points3d_ply(local_ply_path)
-                shutil.copy(local_ply_path, local_ply_highres_path)
-                decimate_ply_file(local_ply_highres_path, local_ply_path, target_count=300000)
-            except Exception as fb_err:
-                print(f"[RECALCULATE ERROR] Local fallback crop failed: {fb_err}")
-
-        # 7. Perform DBH extraction with 2D clicks
+        # 6. Extract accurate 3D trunk cylinder using 2D user clicks or ground-separated RANSAC engine
         scale_factor, _is_cal2, _src2 = _load_scale_factor_for_scan(tree_code)
-        res_override = extract_dbh_with_2d_clicks(
-            ply_path=local_ply_highres_path,
-            P1=np.array(P1),
-            P2=np.array(P2),
-            scale=scale_factor
+        from carbon.dbh_extractor import (
+            extract_dbh_from_mast3r, extract_dbh_with_2d_clicks,
+            unproject_2d_clicks_to_3d, parse_ply_points
         )
+        
+        res_override = None
+        if body.p1 and body.p2 and len(body.p1) >= 2 and len(body.p2) >= 2:
+            try:
+                pts_cloud = parse_ply_points(point_cloud_path)
+                P1_3d, P2_3d = unproject_2d_clicks_to_3d(
+                    pts_cloud, body.p1, body.p2,
+                    img_w=body.width or 640.0,
+                    img_h=body.height or 480.0
+                )
+                if P1_3d is not None and P2_3d is not None:
+                    print(f"[RECALCULATE] Aligned 2D clicks to 3D point cloud: P1={P1_3d.round(4)}, P2={P2_3d.round(4)}")
+                    res_override = extract_dbh_with_2d_clicks(
+                        ply_path=point_cloud_path,
+                        P1=P1_3d,
+                        P2=P2_3d,
+                        scale=scale_factor
+                    )
+            except Exception as click_err:
+                print(f"[RECALCULATE] 2D clicks unprojection warning: {click_err}")
+                res_override = None
+
+        if res_override is None or "error" in res_override:
+            res_override = extract_dbh_from_mast3r(ply_path=point_cloud_path, scale_factor=scale_factor)
 
         if "error" in res_override:
             raise HTTPException(status_code=400, detail=res_override["error"])
 
-        # 8. Recalculate biomass & carbon
-        # Check species_predictions
+        # 7. Recalculate biomass & carbon
         species_preds = None
         raw_sp = target_scan.get("species_predictions")
         if raw_sp:
@@ -2009,6 +2211,8 @@ async def recalculate_scan(
 
         # Pl@ntNet opportunistic retry if species_predictions is missing/empty
         thumbnail_url = target_scan.get("thumbnail_url")
+        species_detection_status = target_scan.get("species_detection_status")
+        species_detection_frame_used = target_scan.get("species_detection_frame_used")
         if not species_preds and thumbnail_url:
             print(f"[RECALCULATE] species_predictions is empty. Retrying Pl@ntNet with thumbnail {thumbnail_url}...")
             try:
@@ -2017,40 +2221,50 @@ async def recalculate_scan(
                 if res_thumb.status_code == 200:
                     with open(temp_thumb_path, "wb") as f:
                         f.write(res_thumb.content)
-                    from carbon.species_detection import detect_species
-                    species_preds = detect_species([temp_thumb_path])
-                    print(f"[RECALCULATE] Pl@ntNet retry result: {species_preds}")
+                    from carbon.species_detection import detect_species_with_status
+                    species_preds, species_detection_status = detect_species_with_status([temp_thumb_path])
+                    if species_preds:
+                        thumb_conf = species_preds[0].get("confidence", 0.0)
+                        species_detection_status = "success" if thumb_conf >= 30.0 else "low_confidence"
+                        species_detection_frame_used = "thumbnail_0000"
+                    print(f"[RECALCULATE] Pl@ntNet retry result: {species_preds} (status: {species_detection_status})")
                     try:
                         os.remove(temp_thumb_path)
                     except Exception:
                         pass
                 else:
+                    species_detection_status = "thumbnail_download_failed"
                     print(f"[RECALCULATE] Thumbnail download failed (HTTP {res_thumb.status_code})")
             except Exception as plant_err:
+                species_detection_status = f"exception_{type(plant_err).__name__}"
                 print(f"[RECALCULATE] Pl@ntNet retry failed: {plant_err}")
 
-        # Resolve wood density from species (same threshold as the automatic pipeline)
+        # Resolve wood density from species (tiered GWDD database)
         wood_density = 0.6
-        wood_density_source = "generic-default"
+        wood_density_source = "default_fallback"
         SPECIES_CONFIDENCE_THRESHOLD = 30.0
         if species_preds and len(species_preds) > 0:
             top_pred = species_preds[0]
-            if top_pred.get("confidence", 0.0) >= SPECIES_CONFIDENCE_THRESHOLD:
-                sci_name = top_pred.get("scientific_name")
-                try:
-                    from carbon.wood_density_lookup import get_wood_density
-                    specific_wd = get_wood_density(sci_name)
-                    if specific_wd is not None:
-                        wood_density = specific_wd
-                        wood_density_source = "species-matched"
-                        print(f"[RECALCULATE] Wood density matched for {sci_name}: {wood_density}")
-                except Exception as wd_err:
-                    print(f"[RECALCULATE ERROR] Wood density lookup: {wd_err}")
+            top_conf = top_pred.get("confidence", 0.0)
+            sci_name = top_pred.get("scientific_name")
+            try:
+                from carbon.wood_density_lookup import get_wood_density_with_metadata
+                specific_wd, wd_tier, wd_meta = get_wood_density_with_metadata(sci_name)
+                if top_conf >= SPECIES_CONFIDENCE_THRESHOLD:
+                    wood_density = specific_wd
+                    wood_density_source = wd_tier
+                    print(f"[RECALCULATE] Tiered wood density for '{sci_name}': {wood_density} g/cm³ (Tier: {wd_tier})")
+                else:
+                    wood_density = 0.6
+                    wood_density_source = "default_fallback"
+                    print(f"[RECALCULATE] Low confidence ({top_conf:.1f}%), using default fallback 0.6 g/cm³")
+            except Exception as wd_err:
+                print(f"[RECALCULATE ERROR] Wood density lookup: {wd_err}")
 
         # Fallback to existing if not matched to specific species
-        if wood_density_source == "generic-default" and target_scan.get("wood_density_used"):
+        if wood_density_source == "default_fallback" and target_scan.get("wood_density_used"):
             wood_density = target_scan.get("wood_density_used")
-            wood_density_source = target_scan.get("wood_density_source") or "generic-default"
+            wood_density_source = target_scan.get("wood_density_source") or "default_fallback"
 
         forest_type = "moist"
         climate_zone = target_scan.get("climate_zone_detected") or "Unknown"
@@ -2132,6 +2346,9 @@ async def recalculate_scan(
             co2e_uncertainty_pct=carbon_result["co2e_uncertainty_pct"],
             co2e_low_kg=carbon_result["co2e_low_kg"],
             co2e_high_kg=carbon_result["co2e_high_kg"],
+            species_detection_status=species_detection_status,
+            species_detection_frame_used=species_detection_frame_used,
+            dbh_equivalent_cm=res_override.get("dbh_equivalent_cm"),
         )
         print(f"[RECALCULATE] Successfully updated D1 record id {scan_id} for {tree_code} via 2D clicks override.")
 
@@ -2148,6 +2365,7 @@ async def recalculate_scan(
             "success": True,
             "tree_code": tree_code,
             "dbh_cm": res_override["dbh_cm"],
+            "dbh_equivalent_cm": res_override.get("dbh_equivalent_cm"),
             "height_m": res_override["height_m"],
             "biomassa_kg": carbon_result["total_biomass_kg"],
             "karbon_kg": carbon_result["carbon_kg"],
@@ -2596,6 +2814,52 @@ async def login_user(body: LoginRequest, response: Response):
     }
 
 
+@app.post("/auth/token", summary="Retrieve opaque session token for mobile clients")
+async def login_token(body: LoginRequest, response: Response):
+    username = body.username.strip().lower()
+    from storage.d1_client import execute_d1_query
+    users = execute_d1_query("SELECT * FROM users WHERE username = ?", [username])
+    if not users:
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+    
+    user = users[0]
+    from storage.auth_utils import verify_password
+    if not verify_password(body.password, user["password_hash"], user["password_salt"]):
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+    
+    # Create session
+    token = secrets.token_urlsafe(32)
+    created_at = datetime.now(timezone.utc).isoformat()
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    
+    execute_d1_query(
+        "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        [token, user["id"], created_at, expires_at]
+    )
+    
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=7 * 24 * 60 * 60, # 7 days
+        path="/"
+    )
+    
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_in": 7 * 24 * 60 * 60,
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "display_name": user["display_name"],
+            "is_demo_account": bool(user["is_demo_account"])
+        }
+    }
+
+
 @app.post("/auth/logout", summary="Logout and invalidate session token")
 async def logout_user(
     response: Response,
@@ -2950,25 +3214,34 @@ async def claim_scan(plot_id: int, body: ClaimScanRequest, current_user: dict = 
     if plot["owner_user_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Access denied")
         
-    scans = execute_d1_query("SELECT * FROM tree_scans WHERE tree_code = ?", [body.tree_code])
-    if not scans:
-        raise HTTPException(status_code=404, detail="Scan not found")
-        
-    scan = scans[0]
-    if scan.get("claimed_by_user_id") is not None:
-        raise HTTPException(status_code=409, detail="Scan has already been claimed by another user")
-        
-    execute_d1_query(
-        "UPDATE tree_scans SET plot_id = ?, claimed_by_user_id = ? WHERE tree_code = ?",
-        [plot_id, current_user["id"], body.tree_code]
+    # Atomic conditional update: succeeds ONLY if scan is unclaimed (or already owned by this user)
+    update_sql = """
+    UPDATE tree_scans 
+    SET plot_id = ?, claimed_by_user_id = ? 
+    WHERE tree_code = ? AND (claimed_by_user_id IS NULL OR claimed_by_user_id = ?)
+    """
+    _, meta = execute_d1_query(
+        update_sql,
+        [plot_id, current_user["id"], body.tree_code, current_user["id"]],
+        return_meta=True
     )
     
+    changes = meta.get("changes", 0)
+    if changes == 0:
+        # Check reason for failure: scan missing vs already claimed by another user
+        existing_scans = execute_d1_query("SELECT claimed_by_user_id FROM tree_scans WHERE tree_code = ?", [body.tree_code])
+        if not existing_scans:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        raise HTTPException(status_code=409, detail="Scan has already been claimed by another user")
+        
     # Auto update centroid if not set
-    if plot["gps_centroid_lat"] is None and scan.get("gps_lat") is not None:
-        execute_d1_query(
-            "UPDATE plots SET gps_centroid_lat = ?, gps_centroid_lon = ? WHERE id = ?",
-            [scan["gps_lat"], scan["gps_lon"], plot_id]
-        )
+    if plot["gps_centroid_lat"] is None:
+        scan_loc = execute_d1_query("SELECT gps_lat, gps_lon FROM tree_scans WHERE tree_code = ?", [body.tree_code])
+        if scan_loc and scan_loc[0].get("gps_lat") is not None:
+            execute_d1_query(
+                "UPDATE plots SET gps_centroid_lat = ?, gps_centroid_lon = ? WHERE id = ? AND gps_centroid_lat IS NULL",
+                [scan_loc[0]["gps_lat"], scan_loc[0]["gps_lon"], plot_id]
+            )
         
     return {"success": True, "message": f"Successfully claimed scan {body.tree_code}"}
 
@@ -2984,15 +3257,23 @@ async def remove_scan(plot_id: int, body: RemoveScanRequest, current_user: dict 
     if plot["owner_user_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Access denied")
         
-    scans = execute_d1_query("SELECT * FROM tree_scans WHERE tree_code = ? AND plot_id = ?", [body.tree_code, plot_id])
-    if not scans:
+    # Atomic conditional removal:
+    remove_sql = """
+    UPDATE tree_scans 
+    SET plot_id = NULL, grid_position_x = NULL, grid_position_y = NULL 
+    WHERE tree_code = ? AND plot_id = ? AND claimed_by_user_id = ?
+    """
+    _, meta = execute_d1_query(
+        remove_sql,
+        [body.tree_code, plot_id, current_user["id"]],
+        return_meta=True
+    )
+    if meta.get("changes", 0) == 0:
+        scans = execute_d1_query("SELECT plot_id FROM tree_scans WHERE tree_code = ?", [body.tree_code])
+        if not scans:
+            raise HTTPException(status_code=404, detail="Scan not found")
         raise HTTPException(status_code=404, detail="Scan not found in this plot")
         
-    execute_d1_query(
-        "UPDATE tree_scans SET plot_id = NULL, grid_position_x = NULL, grid_position_y = NULL WHERE tree_code = ?",
-        [body.tree_code]
-    )
-    
     return {"success": True, "message": f"Successfully removed scan {body.tree_code} from plot"}
 
 
@@ -3034,6 +3315,519 @@ async def save_plot_layout(plot_id: int, body: SaveLayoutRequest, current_user: 
             )
         
     return {"success": True, "message": "Layout saved successfully"}
+
+
+@app.get("/plots/{plot_code}/export", summary="Export carbon data for all trees in a plot to CSV or Excel")
+async def export_plot_carbon_data(plot_code: str, format: str = "csv", optional_user: Optional[dict] = Depends(get_optional_user)):
+    from storage.d1_client import execute_d1_query
+    import io
+    import csv
+    import json
+    
+    # 1. Fetch plot
+    plots = execute_d1_query("SELECT * FROM plots WHERE plot_code = ?", [plot_code])
+    if not plots:
+        raise HTTPException(status_code=404, detail="Plot not found")
+    plot = plots[0]
+    
+    # Check privacy
+    is_owner = optional_user and optional_user["id"] == plot["owner_user_id"]
+    if plot["privacy"] == "private" and not is_owner:
+        raise HTTPException(status_code=403, detail="Access denied")
+        
+    # 2. Fetch all scans in this plot
+    scans = execute_d1_query("SELECT * FROM tree_scans WHERE plot_id = ?", [plot["id"]])
+    
+    # Prepare columns headers
+    headers = [
+        "Tree Tag/ID", "Latitude", "Longitude", 
+        "Scientific Name", "Local Name (from Pl@ntNet)", 
+        "DBH (cm)", "Height (m)", "Wood Density (g/cm³)", 
+        "Biomass (kg)", "Carbon Content (kg C)", "CO2 Equivalent (kg CO2e)", 
+        "Confidence Score", "Data Quality Flag", "Scan Date"
+    ]
+    
+    # Parse species predictions and prepare rows
+    rows = []
+    for s in scans:
+        # Parse species
+        species_preds = []
+        if s.get("species_predictions"):
+            try:
+                species_preds = json.loads(s["species_predictions"])
+            except Exception:
+                pass
+                
+        sci_name = "Unknown"
+        local_name = "N/A"
+        conf_score = "0.0%"
+        
+        if species_preds and len(species_preds) > 0:
+            top = species_preds[0]
+            sci_name = top.get("scientific_name") or "Unknown"
+            local_name = top.get("common_name") or "N/A"
+            conf = top.get("confidence", 0.0)
+            conf_score = f"{conf:.1f}%"
+
+        # Determine data quality flag
+        scale_status = s.get("scale_status") or "uncalibrated"
+        height_used = s.get("height_used") or "dbh_only_fallback"
+        h_val = s.get("tinggi_m") or 0.0
+        
+        flags = []
+        if scale_status == "uncalibrated":
+            flags.append("UNCALIBRATED_SCALE")
+        if height_used != "full_height" or h_val < 1.3:
+            flags.append("TRUNCATED_HEIGHT")
+            
+        quality_flag = "VALIDATED" if not flags else f"PRELIMINARY ({' & '.join(flags)})"
+            
+        rows.append([
+            s.get("tree_code") or "",
+            s.get("gps_lat"),
+            s.get("gps_lon"),
+            sci_name,
+            local_name,
+            s.get("dbh_cm"),
+            s.get("tinggi_m"),
+            s.get("wood_density_used"),
+            s.get("biomassa_kg"),
+            s.get("karbon_kg"),
+            s.get("co2e_kg"),
+            conf_score,
+            quality_flag,
+            s.get("scan_date") or ""
+        ])
+        
+    if format == "xlsx":
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            raise HTTPException(status_code=500, detail="Excel library (openpyxl) not installed")
+            
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Carbon Data"
+        
+        ws.append(headers)
+        for r in rows:
+            ws.append(r)
+            
+        file_stream = io.BytesIO()
+        wb.save(file_stream)
+        file_stream.seek(0)
+        
+        return StreamingResponse(
+            file_stream, 
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=CarbonData_{plot_code}.xlsx"}
+        )
+    else:
+        # CSV format
+        file_stream = io.StringIO()
+        writer = csv.writer(file_stream, lineterminator='\n')
+        writer.writerow(headers)
+        writer.writerows(rows)
+        file_stream.seek(0)
+        
+        return StreamingResponse(
+            io.BytesIO(file_stream.getvalue().encode('utf-8')),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=CarbonData_{plot_code}.csv"}
+        )
+
+
+@app.get("/scans/{tree_code}/certificate", summary="Download Verified Carbon Certificate for a tree scan (PDF)")
+async def download_carbon_certificate(tree_code: str, request: Request):
+    from storage.d1_client import execute_d1_query
+    import hashlib
+    import requests
+    import io
+    import urllib.parse
+    import json
+    
+    # 1. Fetch scan record
+    scans = execute_d1_query("SELECT * FROM tree_scans WHERE tree_code = ?", [tree_code])
+    if not scans:
+        raise HTTPException(status_code=404, detail="Scan record not found")
+        
+    scan = scans[0]
+    
+    # Check if splat file URL exists
+    splat_file_url = scan.get("splat_file_url")
+    if not splat_file_url:
+        raise HTTPException(status_code=400, detail="Splat file URL not found for this scan")
+
+    # Assess Preliminary Warning Status
+    scale_status = scan.get("scale_status") or "uncalibrated"
+    height_used = scan.get("height_used") or "dbh_only_fallback"
+    h_val = scan.get("tinggi_m") or 0.0
+    is_uncalibrated = (scale_status == "uncalibrated")
+    is_height_insufficient = (height_used != "full_height" or h_val < 1.3)
+    is_preliminary = is_uncalibrated or is_height_insufficient
+        
+    # 2. Compute or Read Precomputed PLY SHA-256 Hash
+    sha256_hash = "N/A"
+    geom_data = scan.get("geometry_3d")
+    if geom_data:
+        if isinstance(geom_data, str):
+            try:
+                geom_data = json.loads(geom_data)
+            except Exception:
+                geom_data = {}
+        if isinstance(geom_data, dict) and geom_data.get("ply_sha256"):
+            sha256_hash = geom_data["ply_sha256"]
+
+    if sha256_hash == "N/A":
+        # Try high-res first, fallback to standard points3d.ply
+        base_url, filename = splat_file_url.rsplit("/", 1)
+        name_parts = filename.split("_", 1)
+        if len(name_parts) == 2:
+            timestamp = name_parts[0]
+        else:
+            timestamp = filename.split(".")[0]
+            
+        points3d_url = f"{base_url}/{timestamp}_points3d.ply"
+        points3d_highres_url = points3d_url.replace("points3d.ply", "points3d_highres.ply")
+        
+        # Check if the file is cached locally
+        local_dir = os.path.join(UPLOAD_DIR, "recalculates")
+        local_ply_highres_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d_highres.ply")
+        local_ply_path = os.path.join(local_dir, f"{tree_code}_{timestamp}_points3d.ply")
+        
+        ply_bytes = None
+        if os.path.exists(local_ply_highres_path) and os.path.getsize(local_ply_highres_path) > 1000:
+            try:
+                with open(local_ply_highres_path, "rb") as f:
+                    ply_bytes = f.read()
+            except Exception:
+                pass
+        elif os.path.exists(local_ply_path) and os.path.getsize(local_ply_path) > 1000:
+            try:
+                with open(local_ply_path, "rb") as f:
+                    ply_bytes = f.read()
+            except Exception:
+                pass
+                
+        if not ply_bytes:
+            # Download from R2 with 10s timeout
+            try:
+                res_ply = requests.get(points3d_highres_url, timeout=10)
+                if res_ply.status_code == 200:
+                    ply_bytes = res_ply.content
+                else:
+                    res_ply_std = requests.get(points3d_url, timeout=10)
+                    if res_ply_std.status_code == 200:
+                        ply_bytes = res_ply_std.content
+            except Exception as e:
+                print(f"[CERTIFICATE] Failed to download PLY from R2: {e}")
+                
+        if ply_bytes:
+            sha256_hash = hashlib.sha256(ply_bytes).hexdigest()
+        else:
+            sha256_hash = hashlib.sha256(f"fallback-{tree_code}".encode()).hexdigest()
+        
+    # 3. Generate QR code
+    try:
+        import qrcode
+    except ImportError:
+        raise HTTPException(status_code=500, detail="QR Code library (qrcode) not installed")
+        
+    # Build public interactive 3D viewer link
+    viewer_url = f"{request.base_url}viewer.html?code={tree_code}&url={urllib.parse.quote(splat_file_url)}&proxy=false"
+    qr = qrcode.QRCode(version=1, box_size=10, border=1)
+    qr.add_data(viewer_url)
+    qr.make(fit=True)
+    qr_img = qr.make_image(fill_color="black", back_color="white")
+    
+    qr_bytes = io.BytesIO()
+    qr_img.save(qr_bytes, format="PNG")
+    qr_bytes.seek(0)
+    
+    # 4. Fetch/Download Thumbnail
+    thumbnail_bytes = None
+    thumbnail_url = scan.get("thumbnail_url")
+    if thumbnail_url:
+        try:
+            res_thumb = requests.get(thumbnail_url, timeout=10)
+            if res_thumb.status_code == 200:
+                from PIL import Image as PILImage
+                img_pil = PILImage.open(io.BytesIO(res_thumb.content))
+                if img_pil.width > 300:
+                    ratio = 300.0 / img_pil.width
+                    img_pil = img_pil.resize((300, int(img_pil.height * ratio)), PILImage.Resampling.LANCZOS)
+                
+                compressed_io = io.BytesIO()
+                img_pil.convert("RGB").save(compressed_io, format="JPEG", quality=75)
+                compressed_io.seek(0)
+                thumbnail_bytes = compressed_io
+        except Exception as e:
+            print(f"[CERTIFICATE] Failed to download or compress thumbnail: {e}")
+            
+    # 5. Compile PDF with ReportLab
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    except ImportError:
+        raise HTTPException(status_code=500, detail="PDF generation library (reportlab) not installed")
+        
+    pdf_buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        pdf_buffer, 
+        pagesize=letter,
+        rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40
+    )
+    
+    # Styles
+    styles = getSampleStyleSheet()
+    
+    # Custom colors
+    primary_color = colors.HexColor("#064e3b") # Forest Green
+    secondary_color = colors.HexColor("#0f172a") # Slate Dark
+    text_color = colors.HexColor("#1e293b") # Charcoal Text
+    border_color = colors.HexColor("#cbd5e1") # Soft grey border
+    
+    title_style = ParagraphStyle(
+        'CertTitle',
+        parent=styles['Heading1'],
+        fontName='Helvetica-Bold',
+        fontSize=18,
+        textColor=colors.white,
+        alignment=1, # Center
+        spaceAfter=4
+    )
+    
+    subtitle_style = ParagraphStyle(
+        'CertSubtitle',
+        parent=styles['Normal'],
+        fontName='Helvetica-Bold',
+        fontSize=9,
+        textColor=colors.HexColor("#a7f3d0"), # Pale light emerald
+        alignment=1, # Center
+        spaceAfter=4
+    )
+    
+    section_title_style = ParagraphStyle(
+        'SectionTitle',
+        parent=styles['Heading2'],
+        fontName='Helvetica-Bold',
+        fontSize=12,
+        textColor=primary_color,
+        spaceBefore=10,
+        spaceAfter=5
+    )
+    
+    body_style = ParagraphStyle(
+        'Body',
+        parent=styles['Normal'],
+        fontName='Helvetica',
+        fontSize=9,
+        textColor=text_color,
+        leading=13
+    )
+    
+    body_bold_style = ParagraphStyle(
+        'BodyBold',
+        parent=body_style,
+        fontName='Helvetica-Bold'
+    )
+    
+    code_style = ParagraphStyle(
+        'CodeStyle',
+        parent=styles['Normal'],
+        fontName='Courier',
+        fontSize=8,
+        textColor=colors.HexColor("#0f172a"),
+        leading=10
+    )
+    
+    story = []
+    
+    # Header Banner Table
+    cert_title_text = "VORA CARBON CERTIFICATE" if not is_preliminary else "VORA CARBON CERTIFICATE (PRELIMINARY DRAFT)"
+    banner_data = [
+        [Paragraph(cert_title_text, title_style)],
+        [Paragraph(f"TREE SCAN RECORD: {tree_code} (Certificate ID: VORA-{scan.get('id') or 0:04d})", subtitle_style)]
+    ]
+    banner_bg = primary_color if not is_preliminary else colors.HexColor("#78350f") # Warm amber for preliminary
+    banner_table = Table(banner_data, colWidths=[530])
+    banner_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), banner_bg),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('TOPPADDING', (0,0), (-1,-1), 10),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 10),
+        ('LEFTPADDING', (0,0), (-1,-1), 20),
+        ('RIGHTPADDING', (0,0), (-1,-1), 20),
+    ]))
+    story.append(banner_table)
+
+    # If preliminary, render prominent disclaimer banner
+    if is_preliminary:
+        story.append(Spacer(1, 6))
+        warning_title_style = ParagraphStyle(
+            'WarnTitle',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=9,
+            textColor=colors.HexColor("#991b1b"),
+            spaceAfter=2
+        )
+        warning_body_style = ParagraphStyle(
+            'WarnBody',
+            parent=styles['Normal'],
+            fontName='Helvetica',
+            fontSize=7.5,
+            textColor=colors.HexColor("#7f1d1d"),
+            leading=10
+        )
+        warn_data = [
+            [Paragraph("<b>PRELIMINARY DRAFT — SCALE / HEIGHT NOT PHYSICALLY VALIDATED</b>", warning_title_style)],
+            [Paragraph("<b>NOTICE:</b> This scan was reconstructed from uncalibrated video frames and/or only captures a lower trunk segment (&lt;1.3m). DBH and carbon values are estimated volumetric approximations and contain potential measurement bias. This certificate is a preliminary draft and MUST NOT be used for certified carbon offset claims without field physical validation.", warning_body_style)]
+        ]
+        warn_table = Table(warn_data, colWidths=[530])
+        warn_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), colors.HexColor("#fef2f2")),
+            ('BOX', (0,0), (-1,-1), 1.2, colors.HexColor("#f87171")),
+            ('TOPPADDING', (0,0), (-1,-1), 6),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+            ('LEFTPADDING', (0,0), (-1,-1), 10),
+            ('RIGHTPADDING', (0,0), (-1,-1), 10),
+        ]))
+        story.append(warn_table)
+
+    story.append(Spacer(1, 10))
+    
+    # Tree Metadata Block
+    species_preds = []
+    if scan.get("species_predictions"):
+        try:
+            species_preds = json.loads(scan["species_predictions"])
+        except Exception:
+            pass
+            
+    sci_name = "Unknown"
+    local_name = "N/A"
+    species_conf = "0.0%"
+    if species_preds and len(species_preds) > 0:
+        top = species_preds[0]
+        sci_name = top.get("scientific_name") or "Unknown"
+        local_name = top.get("common_name") or "N/A"
+        species_conf = f"{top.get('confidence', 0.0):.1f}%"
+        
+    gps_lat = scan.get("gps_lat")
+    gps_lon = scan.get("gps_lon")
+    gps_str = f"{gps_lat:.5f}, {gps_lon:.5f}" if gps_lat is not None and gps_lon is not None else "Not Available"
+    
+    meta_table_data = [
+        [Paragraph("<b>Scientific Name:</b>", body_style), Paragraph(f"<i>{sci_name}</i>", body_style),
+         Paragraph("<b>GPS Coordinates:</b>", body_style), Paragraph(gps_str, body_style)],
+        [Paragraph("<b>Local Name:</b>", body_style), Paragraph(local_name, body_style),
+         Paragraph("<b>Scan Date:</b>", body_style), Paragraph(scan.get("scan_date") or "N/A", body_style)],
+        [Paragraph("<b>Species Confidence:</b>", body_style), Paragraph(species_conf, body_style),
+         Paragraph("<b>Climate Zone:</b>", body_style), Paragraph(scan.get("climate_zone_detected") or "Tropical Rainforest", body_style)]
+    ]
+    meta_table = Table(meta_table_data, colWidths=[110, 150, 110, 160])
+    meta_table.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('LINEBELOW', (0,0), (-1,-1), 0.5, colors.HexColor("#f1f5f9")),
+    ]))
+    story.append(meta_table)
+    story.append(Spacer(1, 12))
+    
+    # Metrics Table Header
+    story.append(Paragraph("Carbon & Biomass Measurements", section_title_style))
+    
+    co2e = scan.get("co2e_kg") or 0.0
+    unc_pct = scan.get("co2e_uncertainty_pct") or 15.0
+    co2e_low = scan.get("co2e_low_kg") or (co2e * (1 - unc_pct/100.0))
+    co2e_high = scan.get("co2e_high_kg") or (co2e * (1 + unc_pct/100.0))
+    
+    metrics_data = [
+        [Paragraph("<b>Parameter</b>", body_bold_style), Paragraph("<b>Value</b>", body_bold_style), Paragraph("<b>Methodology / Details</b>", body_bold_style)],
+        [Paragraph("Diameter at Breast Height (DBH)", body_style), Paragraph(f"{scan.get('dbh_cm') or 0.0:.1f} cm", body_bold_style), Paragraph("Calculated using 3D cylinder slice fitting", body_style)],
+        [Paragraph("Tree Height", body_style), Paragraph(f"{scan.get('tinggi_m') or 0.0:.1f} m", body_bold_style), Paragraph(f"Height usage: {scan.get('height_used') or 'N/A'}", body_style)],
+        [Paragraph("Wood Density (ρ)", body_style), Paragraph(f"{scan.get('wood_density_used') or 0.60:.2f} g/cm³", body_bold_style), Paragraph(f"Source: {scan.get('wood_density_source') or 'Default'}", body_style)],
+        [Paragraph("Dry Biomass Stock", body_style), Paragraph(f"{scan.get('biomassa_kg') or 0.0:.1f} kg", body_bold_style), Paragraph("Allometric equations (Chave / AGB+BGB)", body_style)],
+        [Paragraph("Stored Organic Carbon", body_style), Paragraph(f"{scan.get('karbon_kg') or 0.0:.1f} kg C", body_bold_style), Paragraph("Biomass × 0.47 Carbon conversion factor", body_style)],
+        [Paragraph("CO<sub>2</sub> Equivalent (CO<sub>2</sub>e)", body_style), Paragraph(f"{co2e:.1f} kg CO<sub>2</sub>e", body_bold_style), Paragraph(f"Carbon Stock × 3.67 (Uncertainty ±{unc_pct:.0f}%)", body_style)],
+        [Paragraph("Uncertainty Range (CO<sub>2</sub>e)", body_style), Paragraph(f"{co2e_low:.1f} – {co2e_high:.1f} kg", body_bold_style), Paragraph("Confidence interval based on measurement variance", body_style)]
+    ]
+    
+    metrics_table = Table(metrics_data, colWidths=[180, 110, 240])
+    metrics_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#e2e8f0")),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('GRID', (0,0), (-1,-1), 0.5, border_color),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ('LEFTPADDING', (0,0), (-1,-1), 8),
+        ('RIGHTPADDING', (0,0), (-1,-1), 8),
+        ('BACKGROUND', (0,6), (1,6), colors.HexColor("#d1fae5")),
+    ]))
+    story.append(metrics_table)
+    story.append(Spacer(1, 12))
+    
+    # 3D Visual Proof & QR Verification Section
+    story.append(Paragraph("Visual Verification & Data Integrity", section_title_style))
+    
+    img_flowable = None
+    if thumbnail_bytes:
+        try:
+            img_flowable = Image(thumbnail_bytes, width=150, height=112)
+        except Exception as img_err:
+            print(f"[CERTIFICATE] ReportLab failed to parse thumbnail image: {img_err}")
+            
+    if not img_flowable:
+        img_flowable = Paragraph("<font color='grey'>Thumbnail preview not available</font>", body_style)
+        
+    qr_flowable = Image(qr_bytes, width=90, height=90)
+    
+    visual_table_data = [
+        [img_flowable, qr_flowable],
+        [Paragraph("<b>Representative Scan Frame</b>", body_bold_style), Paragraph("<b>Scan QR for Interactive 3D Viewer</b>", body_bold_style)]
+    ]
+    visual_table = Table(visual_table_data, colWidths=[270, 260])
+    visual_table.setStyle(TableStyle([
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+    ]))
+    story.append(visual_table)
+    story.append(Spacer(1, 8))
+    
+    # Integrity Check / SHA-256 Box
+    hash_data = [
+        [Paragraph("<b>Cryptographic Data Integrity Verification</b>", body_bold_style)],
+        [Paragraph("To verify that the underlying 3D point cloud has not been modified since measurement, cross-reference this SHA-256 hash of the raw PLY file.", body_style)],
+        [Paragraph(f"<b>RAW PLY FILE HASH (SHA-256):</b>", body_style)],
+        [Paragraph(sha256_hash, code_style)]
+    ]
+    hash_table = Table(hash_data, colWidths=[530])
+    hash_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor("#f8fafc")),
+        ('GRID', (0,0), (-1,-1), 0.5, border_color),
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ('LEFTPADDING', (0,0), (-1,-1), 10),
+        ('RIGHTPADDING', (0,0), (-1,-1), 10),
+    ]))
+    story.append(hash_table)
+    
+    # Build Document
+    doc.build(story)
+    pdf_buffer.seek(0)
+    
+    return StreamingResponse(
+        pdf_buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=Certificate_{tree_code}.pdf"}
+    )
 
 
 # ── Dev entry point ───────────────────────────────────────────────────────────

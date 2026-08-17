@@ -29,3 +29,7 @@ calibration.json
 # Windows tool crashes/dumps
 *.stackdump
 
+# Temporary developer scratch scripts
+scratch/
+
+
