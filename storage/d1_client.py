@@ -1,8 +1,32 @@
 import os
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from datetime import datetime, timezone
 import secrets
 import string
+import time
+import json
+import logging
+
+_logger = logging.getLogger("D1Client")
+
+# Persistent connection pool for Cloudflare D1
+_d1_session = None
+
+def get_d1_session() -> requests.Session:
+    global _d1_session
+    if _d1_session is None:
+        s = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=25,
+            pool_maxsize=25,
+            max_retries=Retry(total=2, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
+        )
+        s.mount("https://", adapter)
+        s.mount("http://", adapter)
+        _d1_session = s
+    return _d1_session
 
 def get_d1_headers():
     token = os.environ.get("CLOUDFLARE_API_TOKEN")
@@ -13,15 +37,9 @@ def get_d1_headers():
         "Content-Type": "application/json"
     }
 
-import time
-import json
-import logging
-
-_logger = logging.getLogger("D1Client")
-
 def execute_d1_query(sql: str, params: list = None, max_retries: int = 3, retry_delay: float = 0.5, return_meta: bool = False):
     """
-    Sends an HTTP POST query request to the Cloudflare D1 HTTP API with exponential backoff retry.
+    Sends an HTTP POST query request to the Cloudflare D1 HTTP API with persistent session pooling and exponential backoff retry.
     If return_meta=True, returns (results, meta_dict) tuple. Otherwise returns results list.
     """
     account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
@@ -37,11 +55,13 @@ def execute_d1_query(sql: str, params: list = None, max_retries: int = 3, retry_
     }
     
     headers = get_d1_headers()
+    session = get_d1_session()
     last_exc = None
 
     for attempt in range(max_retries):
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=15)
+            # 10s connect timeout, 35s read timeout with connection reuse
+            response = session.post(url, json=payload, headers=headers, timeout=(10, 35))
             
             if response.status_code != 200:
                 raise RuntimeError(f"Cloudflare D1 API request failed with status {response.status_code}: {response.text}")
