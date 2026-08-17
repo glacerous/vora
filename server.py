@@ -2727,6 +2727,9 @@ async def login_user(body: LoginRequest, response: Response):
     
     return {
         "success": True,
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_in": 7 * 24 * 60 * 60,
         "user": {
             "id": user["id"],
             "username": user["username"],
