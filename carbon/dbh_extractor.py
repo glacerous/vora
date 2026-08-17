@@ -49,26 +49,6 @@ def fit_plane_ransac(points: np.ndarray, max_iterations: int = 150, threshold: f
     return best_plane, best_inliers
 
 
-def orient_ground_normal(points: np.ndarray, normal: np.ndarray, d: float) -> tuple[np.ndarray, float]:
-    """
-    Robustly orients the ground plane normal so it points UPWARDS (away from the solid ground into the air/canopy).
-    Uses camera orientation (-Y is up in camera coords) and scene height asymmetry.
-    """
-    h = np.dot(points, normal) + d
-    med = np.median(h)
-    span_pos = np.percentile(h, 95) - med
-    span_neg = med - np.percentile(h, 5)
-
-    if span_neg > span_pos * 1.5 or normal[1] > 0.3:
-        normal = -normal
-        d = -d
-    elif normal[1] > 0 and span_neg > span_pos:
-        normal = -normal
-        d = -d
-
-    return normal, d
-
-
 def unproject_2d_clicks_to_3d(points_3d: np.ndarray, p1_2d: list, p2_2d: list,
                               img_w: float = 640.0, img_h: float = 480.0, fov_deg: float = 60.0) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -86,8 +66,11 @@ def unproject_2d_clicks_to_3d(points_3d: np.ndarray, p1_2d: list, p2_2d: list,
     plane, _ = fit_plane_ransac(sample_pts, max_iterations=120, threshold=0.05)
     if plane is not None:
         normal, d = plane
-        normal, d = orient_ground_normal(sample_pts, normal, d)
         h_ground = np.dot(points_3d, normal) + d
+        if np.median(h_ground) < 0:
+            normal = -normal
+            d = -d
+            h_ground = -h_ground
         fg_mask = h_ground > 0.03
         fg_pts = points_3d[fg_mask]
     else:
@@ -618,14 +601,16 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     plane, ground_mask = fit_plane_ransac(sample_pts, max_iterations=150, threshold=0.05 / scale)
     if plane is not None and np.sum(ground_mask) > len(sample_pts) * 0.05:
         normal, d = plane
-        normal, d = orient_ground_normal(sample_pts, normal, d)
         h_ground = np.dot(sample_pts, normal) + d
-        fg_mask = (h_ground > 0.04 / scale) & (h_ground < 3.0 / scale)
+        if np.median(h_ground) < 0:
+            normal = -normal
+            d = -d
+            h_ground = -h_ground
+        fg_mask = h_ground > (0.04 / scale)
         fg_pts = sample_pts[fg_mask]
         logger.info(f"[MAST3R DBH] Ground plane detected: normal={normal}, foreground points={len(fg_pts)}")
     else:
         normal = np.array([0.0, -1.0, 0.0])
-        d = 0.0
         fg_pts = sample_pts
 
     if len(fg_pts) < 30:
@@ -637,29 +622,25 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     u1 = u1 / (np.linalg.norm(u1) + 1e-9)
     u2 = np.cross(normal, u1)
 
-    # 4. Filter full cloud to foreground (ground stripped) and crop around trunk base
-    h_ground_all = np.dot(points, normal) + d
-    fg_mask_all = (h_ground_all > 0.04 / scale) & (h_ground_all < 3.0 / scale)
-    fg_points_all = points[fg_mask_all]
-    if len(fg_points_all) < 30:
-        fg_points_all = points
+    p_u1 = np.dot(fg_pts, u1)
+    p_u2 = np.dot(fg_pts, u2)
 
-    # Locate trunk root emergence using lower trunk layer (0.05m to 0.50m) to avoid canopy/branch bias
-    h_fg = h_ground_all[fg_mask_all]
-    base_mask = (h_fg >= 0.05 / scale) & (h_fg <= 0.50 / scale)
-    base_pts = fg_points_all[base_mask] if np.sum(base_mask) >= 30 else fg_points_all
-
-    p_u1_base = np.dot(base_pts, u1)
-    p_u2_base = np.dot(base_pts, u2)
-    hist, xedges, yedges = np.histogram2d(p_u1_base, p_u2_base, bins=35)
+    hist, xedges, yedges = np.histogram2d(p_u1, p_u2, bins=40)
     max_idx = np.unravel_index(np.argmax(hist), hist.shape)
     peak_u1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
     peak_u2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
 
+    # 4. Filter full cloud to foreground (ground stripped) and crop around trunk cluster
+    h_ground_all = np.dot(points, normal) + d
+    fg_mask_all = (h_ground_all > 0.04 / scale) & (h_ground_all < 2.5 / scale)
+    fg_points_all = points[fg_mask_all]
+    if len(fg_points_all) < 30:
+        fg_points_all = points
+
     p_u1_all = np.dot(fg_points_all, u1)
     p_u2_all = np.dot(fg_points_all, u2)
     dist_sq = (p_u1_all - peak_u1)**2 + (p_u2_all - peak_u2)**2
-    CROP_RADIUS = float(np.clip(0.30 / scale, 0.12, 0.45))
+    CROP_RADIUS = float(np.clip(0.25 / scale, 0.08, 0.40))
     trunk_mask = dist_sq <= CROP_RADIUS**2
     trunk_pts = fg_points_all[trunk_mask]
     if len(trunk_pts) < 20:
@@ -810,8 +791,11 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     plane, _ = fit_plane_ransac(points[:min(len(points), 20000)], max_iterations=120, threshold=0.05 / scale)
     if plane is not None:
         ground_normal, d = plane
-        ground_normal, d = orient_ground_normal(points, ground_normal, d)
         h_ground = np.dot(points, ground_normal) + d
+        if np.median(h_ground) < 0:
+            ground_normal = -ground_normal
+            d = -d
+            h_ground = -h_ground
         fg_mask = h_ground > (0.03 / scale)
         pts_for_fitting = points[fg_mask] if np.sum(fg_mask) >= 30 else points
     else:
