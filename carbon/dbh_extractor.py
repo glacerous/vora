@@ -7,14 +7,76 @@ import numpy as np
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("DBH_Extractor")
 
+def fit_plane_ransac(points: np.ndarray, max_iterations: int = 150, threshold: float = 0.05):
+    """RANSAC to identify the dominant terrain/ground plane in the point cloud."""
+    n = len(points)
+    if n < 10:
+        return None, np.zeros(n, dtype=bool)
+    
+    rng = np.random.default_rng(42)
+    sample_indices = rng.choice(n, size=(max_iterations, 3), replace=True)
+    best_inliers = np.zeros(n, dtype=bool)
+    best_plane = None
+    
+    for idxs in sample_indices:
+        p1, p2, p3 = points[idxs[0]], points[idxs[1]], points[idxs[2]]
+        v1 = p2 - p1
+        v2 = p3 - p1
+        normal = np.cross(v1, v2)
+        norm_len = np.linalg.norm(normal)
+        if norm_len < 1e-6:
+            continue
+        normal = normal / norm_len
+        d = -np.dot(normal, p1)
+        
+        dists = np.abs(np.dot(points, normal) + d)
+        inliers = dists < threshold
+        if np.sum(inliers) > np.sum(best_inliers):
+            best_inliers = inliers
+            best_plane = (normal, d)
+            
+    if best_plane is not None and np.sum(best_inliers) >= 10:
+        inlier_pts = points[best_inliers]
+        centroid = inlier_pts.mean(axis=0)
+        cov = np.cov((inlier_pts - centroid).T)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        normal = eigvecs[:, 0]
+        d = -np.dot(normal, centroid)
+        dists = np.abs(np.dot(points, normal) + d)
+        best_inliers = dists < threshold
+        best_plane = (normal, d)
+        
+    return best_plane, best_inliers
+
+
 def unproject_2d_clicks_to_3d(points_3d: np.ndarray, p1_2d: list, p2_2d: list,
                               img_w: float = 640.0, img_h: float = 480.0, fov_deg: float = 60.0) -> tuple[np.ndarray, np.ndarray]:
     """
     Casts rays from camera frame (Frame 0 in MASt3R coordinate space) through 2D pixel coordinates
     to find the corresponding 3D trunk points P1 and P2 in the point cloud.
+    Separates ground plane and clusters points along each ray to lock onto the actual trunk surface.
     """
     if points_3d is None or len(points_3d) < 10 or not p1_2d or not p2_2d:
         return None, None
+
+    sample_pts = points_3d
+    if len(points_3d) > 20000:
+        rng = np.random.default_rng(42)
+        sample_pts = points_3d[rng.choice(len(points_3d), 20000, replace=False)]
+    plane, _ = fit_plane_ransac(sample_pts, max_iterations=120, threshold=0.05)
+    if plane is not None:
+        normal, d = plane
+        h_ground = np.dot(points_3d, normal) + d
+        if np.median(h_ground) < 0:
+            normal = -normal
+            d = -d
+            h_ground = -h_ground
+        fg_mask = h_ground > 0.03
+        fg_pts = points_3d[fg_mask]
+    else:
+        fg_pts = points_3d
+
+    pts_to_search = fg_pts if len(fg_pts) >= 50 else points_3d
 
     f = (img_w / 2.0) / np.tan(np.radians(fov_deg / 2.0))
     cx = img_w / 2.0
@@ -26,30 +88,39 @@ def unproject_2d_clicks_to_3d(points_3d: np.ndarray, p1_2d: list, p2_2d: list,
     ray2 = np.array([(p2_2d[0] - cx) / f, (p2_2d[1] - cy) / f, 1.0])
     ray2 = ray2 / np.linalg.norm(ray2)
 
-    def find_nearest_3d_point(ray, points, max_perp_dist=0.20):
-        proj = np.dot(points, ray)
+    def find_nearest_3d_point(ray, pts, max_perp_dist=0.15):
+        proj = np.dot(pts, ray)
         valid = proj > 0.05
         if not np.any(valid):
             return None
-        valid_pts = points[valid]
+        valid_pts = pts[valid]
         valid_proj = proj[valid]
 
         perp_vec = valid_pts - np.outer(valid_proj, ray)
         perp_dist = np.linalg.norm(perp_vec, axis=1)
 
         close_mask = perp_dist < max_perp_dist
+        if np.sum(close_mask) < 5:
+            close_mask = perp_dist < (max_perp_dist * 1.8)
         if not np.any(close_mask):
             idx = np.argsort(perp_dist)[:50]
             close_pts = valid_pts[idx]
         else:
             close_pts = valid_pts[close_mask]
 
-        dists_to_cam = np.linalg.norm(close_pts, axis=1)
-        p_idx = np.argsort(dists_to_cam)[int(len(dists_to_cam) * 0.25)]
+        dists_to_cam = np.dot(close_pts, ray)
+        counts, bin_edges = np.histogram(dists_to_cam, bins=15)
+        peak_bin = np.argmax(counts)
+        bin_min, bin_max = bin_edges[peak_bin], bin_edges[peak_bin + 1]
+        cluster_mask = (dists_to_cam >= bin_min) & (dists_to_cam <= bin_max)
+        cluster_pts = close_pts[cluster_mask]
+        if len(cluster_pts) > 0:
+            return cluster_pts.mean(axis=0)
+        p_idx = np.argsort(dists_to_cam)[int(len(dists_to_cam) * 0.50)]
         return close_pts[p_idx]
 
-    P1 = find_nearest_3d_point(ray1, points_3d)
-    P2 = find_nearest_3d_point(ray2, points_3d)
+    P1 = find_nearest_3d_point(ray1, pts_to_search)
+    P2 = find_nearest_3d_point(ray2, pts_to_search)
     return P1, P2
 
 
@@ -502,46 +573,7 @@ def extract_dbh(ply_path, scale_factor=1.0, vertical_axis='z', breast_height=1.3
     }
 
 
-def fit_plane_ransac(points: np.ndarray, max_iterations: int = 150, threshold: float = 0.05):
-    """RANSAC to identify the dominant terrain/ground plane in the point cloud."""
-    n = len(points)
-    if n < 10:
-        return None, np.zeros(n, dtype=bool)
-    
-    rng = np.random.default_rng(42)
-    sample_indices = rng.choice(n, size=(max_iterations, 3), replace=True)
-    best_inliers = np.zeros(n, dtype=bool)
-    best_plane = None
-    
-    for idxs in sample_indices:
-        p1, p2, p3 = points[idxs[0]], points[idxs[1]], points[idxs[2]]
-        v1 = p2 - p1
-        v2 = p3 - p1
-        normal = np.cross(v1, v2)
-        norm_len = np.linalg.norm(normal)
-        if norm_len < 1e-6:
-            continue
-        normal = normal / norm_len
-        d = -np.dot(normal, p1)
-        
-        dists = np.abs(np.dot(points, normal) + d)
-        inliers = dists < threshold
-        if np.sum(inliers) > np.sum(best_inliers):
-            best_inliers = inliers
-            best_plane = (normal, d)
-            
-    if best_plane is not None and np.sum(best_inliers) >= 10:
-        inlier_pts = points[best_inliers]
-        centroid = inlier_pts.mean(axis=0)
-        cov = np.cov((inlier_pts - centroid).T)
-        eigvals, eigvecs = np.linalg.eigh(cov)
-        normal = eigvecs[:, 0]
-        d = -np.dot(normal, centroid)
-        dists = np.abs(np.dot(points, normal) + d)
-        best_inliers = dists < threshold
-        best_plane = (normal, d)
-        
-    return best_plane, best_inliers
+
 
 
 def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
@@ -754,110 +786,86 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     if len(points) < 10:
         return {"error": "Point cloud too sparse"}
 
-    # 1. Determine seed direction vector v_seed from user clicks (Base -> Top)
+    # 1. Detect ground plane to prevent terrain points from contaminating trunk cylinder
+    ground_normal = None
+    plane, _ = fit_plane_ransac(points[:min(len(points), 20000)], max_iterations=120, threshold=0.05 / scale)
+    if plane is not None:
+        ground_normal, d = plane
+        h_ground = np.dot(points, ground_normal) + d
+        if np.median(h_ground) < 0:
+            ground_normal = -ground_normal
+            d = -d
+            h_ground = -h_ground
+        fg_mask = h_ground > (0.03 / scale)
+        pts_for_fitting = points[fg_mask] if np.sum(fg_mask) >= 30 else points
+    else:
+        pts_for_fitting = points
+
+    # 2. Determine seed direction vector v_seed from user clicks (Base -> Top)
     v_seed = P2 - P1
     v_seed_norm = np.linalg.norm(v_seed)
     if v_seed_norm < 1e-6:
         return {"error": "P1 and P2 are identical or too close"}
     v_seed = v_seed / v_seed_norm
 
-    # 2. Iterative Adaptive PCA Refinement (up to 4 passes or until delta < 1.0°)
-    r_base_m = max(crop_radius_m, 0.25)
-    radii_progression = [r_base_m * 1.6, r_base_m * 1.1, r_base_m * 0.85, r_base_m * 0.70]
-    current_v = v_seed
-    current_mean = P1
-    history_dirs = [v_seed]
-    deltas = []
-    pts_current = points
+    # 3. Crop tightly around user seed axis (preventing wide disc PCA drift)
+    r_crop = float(np.clip(max(crop_radius_m, 0.15) / scale, 0.08, 0.22))
+    w = pts_for_fitting - P1
+    h_proj = np.dot(w, v_seed)
+    perp = w - h_proj[:, np.newaxis] * v_seed[np.newaxis, :]
+    d_proj = np.linalg.norm(perp, axis=1)
 
-    max_passes = 4
-    conv_thresh_deg = 1.0
+    h_P1 = float(np.dot(P1 - P1, v_seed))
+    h_P2 = float(np.dot(P2 - P1, v_seed))
+    margin = float(max(0.10 / scale, v_seed_norm * 0.10))
+    h_min_b = min(h_P1, h_P2) - margin
+    h_max_b = max(h_P1, h_P2) + margin
 
-    for p_idx in range(max_passes):
-        r_target_m = radii_progression[min(p_idx, len(radii_progression) - 1)]
-        r_crop = float(np.clip(r_target_m / scale, 0.08, 0.60))
-        margin = float(max(0.20 / scale, v_seed_norm * 0.10))
+    mask = (d_proj <= r_crop) & (h_proj >= h_min_b) & (h_proj <= h_max_b)
+    pts_crop = pts_for_fitting[mask]
+    if len(pts_crop) < 15:
+        mask = d_proj <= r_crop
+        pts_crop = pts_for_fitting[mask]
+    if len(pts_crop) < 10:
+        pts_crop = pts_for_fitting
 
-        w = points - current_mean
-        h_proj = np.dot(w, current_v)
-        perp = w - h_proj[:, np.newaxis] * current_v[np.newaxis, :]
-        d_proj = np.linalg.norm(perp, axis=1)
+    # 4. Refine axis via PCA with strict drift constraint (< 15° from user seed)
+    pca_convergence_delta_deg = 0.0
+    if len(pts_crop) >= 10:
+        pca_pts = pts_crop
+        if len(pca_pts) > 10000:
+            rng = np.random.default_rng(42)
+            pca_pts = pca_pts[rng.choice(len(pca_pts), size=10000, replace=False)]
 
-        h_P1 = float(np.dot(P1 - current_mean, current_v))
-        h_P2 = float(np.dot(P2 - current_mean, current_v))
-        h_min_b = min(h_P1, h_P2) - margin
-        h_max_b = max(h_P1, h_P2) + margin
+        mean_k = pca_pts.mean(axis=0)
+        centered = pca_pts - mean_k
+        cov = (centered.T @ centered) / max(len(centered) - 1, 1)
+        eigvals, eigvecs = np.linalg.eigh(cov)
 
-        mask = (d_proj <= r_crop) & (h_proj >= h_min_b) & (h_proj <= h_max_b)
-        pts_crop = points[mask]
+        alignments = [abs(np.dot(eigvecs[:, i], v_seed)) for i in range(3)]
+        best_eig_idx = int(np.argmax(alignments))
+        v_next = eigvecs[:, best_eig_idx]
+        if np.dot(v_next, v_seed) < 0:
+            v_next = -v_next
 
-        if len(pts_crop) < 15:
-            mask = d_proj <= r_crop
-            pts_crop = points[mask]
-        if len(pts_crop) < 10:
-            pts_crop = points
+        cos_d = np.clip(np.dot(v_seed, v_next), -1.0, 1.0)
+        drift_deg = float(round(float(np.degrees(np.arccos(cos_d))), 3))
+        pca_convergence_delta_deg = drift_deg
 
-        # Sample mid-trunk section if enough points
-        if len(pts_crop) >= 6:
-            proj_pts = np.dot(pts_crop, current_v)
-            p_min = np.percentile(proj_pts, 5)
-            p_max = np.percentile(proj_pts, 95)
-            span = p_max - p_min
-            if span > 0:
-                mid_mask = (proj_pts >= p_min + span * 0.05) & (proj_pts <= p_min + span * 0.95)
-                pca_pts = pts_crop[mid_mask]
-                if len(pca_pts) < 6:
-                    pca_pts = pts_crop
-            else:
-                pca_pts = pts_crop
-
-            if len(pca_pts) > 10000:
-                rng = np.random.default_rng(42)
-                idx = rng.choice(len(pca_pts), size=10000, replace=False)
-                pca_pts = pca_pts[idx]
-
-            mean_k = pca_pts.mean(axis=0)
-            centered = pca_pts - mean_k
-            cov = (centered.T @ centered) / max(len(centered) - 1, 1)
-            eigvals, eigvecs = np.linalg.eigh(cov)
-
-            # Pick eigenvector with highest directional alignment with current axis
-            alignments = [abs(np.dot(eigvecs[:, i], current_v)) for i in range(3)]
-            best_eig_idx = int(np.argmax(alignments))
-            v_next = eigvecs[:, best_eig_idx]
-
-            if np.dot(v_next, current_v) < 0:
-                v_next = -v_next
+        if drift_deg <= 15.0:
+            v = v_next
+            logger.info(f"[MANUAL DBH] PCA refined axis: Dir={v.tolist()}, Drift={drift_deg:.2f}°")
         else:
-            mean_k = current_mean
-            v_next = current_v
+            v = v_seed
+            logger.info(f"[MANUAL DBH] PCA drift exceeded 15° ({drift_deg:.2f}°), preserving user seed axis.")
+    else:
+        v = v_seed
 
-        cos_d = np.clip(np.dot(current_v, v_next), -1.0, 1.0)
-        delta_deg = float(round(float(np.degrees(np.arccos(cos_d))), 3))
-        deltas.append(delta_deg)
-        history_dirs.append(v_next)
-
-        logger.info(f"[MANUAL DBH] PCA Pass {p_idx + 1}: CropRadius={r_crop:.3f}m, Pts={len(pts_crop)}, Dir={v_next.tolist()}, Delta={delta_deg:.2f}°")
-
-        current_v = v_next
-        current_mean = mean_k
-        pts_current = pts_crop
-
-        if delta_deg < conv_thresh_deg and p_idx >= 1:
-            logger.info(f"[MANUAL DBH] PCA converged at Pass {p_idx + 1} (delta {delta_deg:.2f}° < {conv_thresh_deg}°)")
-            break
-
-    # Final axis direction and points (aligned with v_seed from user clicks)
-    v = current_v
-    if np.dot(v, v_seed) < 0:
-        v = -v
-    trunk_points = pts_current
-    pca_convergence_delta_deg = deltas[-1] if deltas else 0.0
-
+    trunk_points = pts_crop
     if len(trunk_points) < 10:
         return {"error": f"Too few points within the crop cylinder ({len(trunk_points)} points)."}
 
-    # 4. Height is defined by user clicks projected along the PCA-refined axis
+    # 5. Height is defined by user clicks projected along the trunk axis
     h_min = float(np.dot(P1, v))
     h_max = float(np.dot(P2, v))
     if h_max < h_min:
@@ -865,7 +873,7 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     total_h = h_max - h_min
     estimated_height_m = float(total_h * scale)
 
-    # 5. Set target breast height relative to P1 (ground level)
+    # 6. Set target breast height relative to P1 (ground level)
     h_target = float(h_min + breast_height_m / scale)
 
     # Sanity guard: if the clicked trunk is too short to reach standard breast height (1.3m),
@@ -873,7 +881,7 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     if (h_target - h_min) >= total_h * 0.90:
         h_target = h_min + total_h * 0.50
 
-    # 6. Fit circle at slices around h_target
+    # 7. Fit circle at slices around h_target
     if abs(v[0]) < 0.9:
         ref = np.array([1.0, 0.0, 0.0])
     else:
@@ -970,6 +978,11 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
 
     # Sanity checks for orientation/flatness of trunk points
     invalid_orientation = False
+    if ground_normal is not None:
+        tilt_dot = abs(np.dot(v, ground_normal))
+        if tilt_dot < 0.35: # angle > 70° from vertical ground normal -> lying on ground
+            invalid_orientation = True
+
     if len(trunk_points) >= 5:
         proj_pts = np.dot(trunk_points, v)
         std_axis = np.std(proj_pts)

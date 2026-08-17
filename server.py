@@ -525,9 +525,9 @@ def run_carbon_analysis(
                     P2=np.array(P2),
                     scale=scale_factor
                 )
-                if "error" in dbh_result:
-                    print(f"[CARBON] Manual extraction failed: {dbh_result['error']}")
-                    err_msg = dbh_result['error']
+                if "error" in dbh_result or dbh_result.get("invalid_orientation"):
+                    print(f"[CARBON] Manual extraction failed/invalid orientation: {dbh_result.get('error') or 'invalid orientation'}")
+                    err_msg = dbh_result.get('error') or "invalid orientation"
                     dbh_result = None
                 else:
                     print(f"[CARBON] Manual extraction succeeded: DBH={dbh_result['dbh_cm']} cm")
@@ -535,8 +535,9 @@ def run_carbon_analysis(
                 print(f"[CARBON] Manual extraction exception: {manual_err}")
                 err_msg = str(manual_err)
                 dbh_result = None
-        elif points3d_path and os.path.exists(points3d_path):
-            print(f"[CARBON] Trying MASt3R point cloud for measurement: {points3d_path}")
+
+        if dbh_result is None and points3d_path and os.path.exists(points3d_path):
+            print(f"[CARBON] Running robust MASt3R ground-separated 3D RANSAC: {points3d_path}")
             try:
                 dbh_result = extract_dbh_from_mast3r(
                     ply_path=points3d_path, scale_factor=scale_factor
@@ -2170,7 +2171,15 @@ async def recalculate_scan(scan_id: int, body: Recalculate2DRequest):
                 print(f"[RECALCULATE] 2D clicks unprojection warning: {click_err}")
                 res_override = None
 
-        if res_override is None or "error" in res_override:
+        if (
+            res_override is None
+            or "error" in res_override
+            or res_override.get("invalid_orientation")
+            or res_override.get("height_m", 0) < 0.12
+            or res_override.get("inlier_ratio", 1.0) < 0.18
+        ):
+            if res_override and res_override.get("invalid_orientation"):
+                print("[RECALCULATE] 2D clicks yielded invalid orientation or degenerate cylinder. Falling back to ground-separated 3D RANSAC.")
             res_override = extract_dbh_from_mast3r(ply_path=point_cloud_path, scale_factor=scale_factor)
 
         if "error" in res_override:
