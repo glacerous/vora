@@ -144,6 +144,7 @@ class ReconstructRequest(BaseModel):
     height: Optional[int] = None
     iterations: Optional[int] = 2000
     frame_idx: Optional[int] = None
+    plot_id: Optional[int] = None
 
 class StatusResponse(BaseModel):
     stage: str
@@ -1774,6 +1775,7 @@ async def reconstruct(
     gps_lat_query: Optional[float] = Query(default=None, alias="gps_lat"),
     gps_lon_query: Optional[float] = Query(default=None, alias="gps_lon"),
     iterations_query: Optional[int] = Query(default=None, alias="iterations"),
+    plot_id_query: Optional[int] = Query(default=None, alias="plot_id"),
     optional_user: Optional[dict] = Depends(get_optional_user),
 ):
     """
@@ -1809,8 +1811,22 @@ async def reconstruct(
     elif body and body.iterations is not None:
         iterations = body.iterations
 
-    plot_id = None
+    plot_id = plot_id_query if plot_id_query is not None else (body.plot_id if body else None)
     claimed_by_user_id = optional_user["id"] if optional_user else None
+
+    # Validate plot ownership if plot_id is provided
+    if plot_id is not None and optional_user:
+        try:
+            from storage.d1_client import execute_d1_query
+            p_check = execute_d1_query("SELECT id FROM plots WHERE id = ? AND owner_user_id = ?", [plot_id, optional_user["id"]])
+            if not p_check:
+                print(f"[RECONSTRUCT] Plot {plot_id} not owned by user {optional_user['id']}, ignoring plot_id.")
+                plot_id = None
+        except Exception as e:
+            print(f"[RECONSTRUCT] Failed validating plot ownership: {e}")
+            plot_id = None
+    elif not optional_user:
+        plot_id = None
 
     job_st["cancel_requested"] = False
     job_st["error"] = None
