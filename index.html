@@ -381,14 +381,14 @@
 
     <!-- ── Tips ── -->
     <div class="tips" style="margin-top:24px">
-      <h3>📖 Tips for best results</h3>
+      <h3>📖 Panduan Perekaman Lapangan & Kondisi Non-Ideal</h3>
       <ul class="tip-list">
-        <li><span>🎥</span> Record a slow, steady pan around the object (~20-30 sec). Faster = more blur = worse result.</li>
-        <li><span>💡</span> Diffuse indoor light (near a window) beats direct sunlight — avoids harsh shadows.</li>
-        <li><span>📐</span> Walk a complete circle. Add a second pass tilted slightly downward for top coverage.</li>
-        <li><span>🔒</span> Tap-hold in your camera app to lock exposure (AE/AF Lock) before recording.</li>
-        <li><span>🖥️</span> Reflective screens, glass, and metal will show floater artifacts — this is a known limitation of 3DGS.</li>
-        <li><span>💰</span> Each reconstruction costs ~$0.05–0.15 on your Modal A10G free credits ($30 budget).</li>
+        <li><span>📐</span> <strong>Perekaman Orbit 360°:</strong> Kelilingi pohon pada jarak 2–4 meter secara perlahan (25–40 detik). Jaga batang tetap berada di tengah frame.</li>
+        <li><span>⛰️</span> <strong>Lahan Miring / Berlereng:</strong> Mulai langkah dari sisi atas lereng (uphill side) demi keselamatan pijakan. Algoritma 3D RANSAC Vora otomatis mengoreksi kemiringan tanah (slope normal compensation).</li>
+        <li><span>🌿</span> <strong>Semak & Ranting Lebat:</strong> Pastikan pangkal batang bawah (0 hingga 1.3m) tetap terlihat di kamera. Singkirkan dedaunan yang menempel langsung pada titik pengukuran dada (1.3m).</li>
+        <li><span>🏷️</span> <strong>Kalibrasi Skala Presisi (ArUco):</strong> Tempelkan kertas marker ArUco standar (10×10 cm) pada batang bawah untuk verifikasi skala fisik otomatis tanpa asumsi.</li>
+        <li><span>☁️</span> <strong>Pencahayaan Lapangan:</strong> Kondisi cahaya baur (diffuse overcast / pagi / sore) menghasilkan rekonstruksi 3DGS terbaik tanpa bayangan kontras berlebih.</li>
+        <li><span>💰</span> <strong>Estimasi Biaya Transparan:</strong> Komputasi GPU cloud murni adalah ~Rp 385/pohon ($0.024); total biaya operasional lengkap (penyimpanan 1 tahun + tenaga pencatat lokal) berkisar ~Rp 3,700/pohon.</li>
       </ul>
     </div>
   </div>

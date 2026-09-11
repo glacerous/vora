@@ -599,6 +599,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
 
     # 2. Identify dominant terrain/ground plane via RANSAC
     plane, ground_mask = fit_plane_ransac(sample_pts, max_iterations=150, threshold=0.05 / scale)
+    terrain_slope_deg = 0.0
     if plane is not None and np.sum(ground_mask) > len(sample_pts) * 0.05:
         normal, d = plane
         h_ground = np.dot(sample_pts, normal) + d
@@ -608,7 +609,12 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
             h_ground = -h_ground
         fg_mask = h_ground > (0.04 / scale)
         fg_pts = sample_pts[fg_mask]
-        logger.info(f"[MAST3R DBH] Ground plane detected: normal={normal}, foreground points={len(fg_pts)}")
+        
+        # Calculate terrain slope angle relative to vertical
+        up_vector = np.array([0.0, -1.0, 0.0])
+        cos_slope = abs(float(np.dot(normal, up_vector)))
+        terrain_slope_deg = float(math.degrees(math.acos(min(max(cos_slope, 0.0), 1.0))))
+        logger.info(f"[MAST3R DBH] Ground plane detected: normal={normal}, slope={terrain_slope_deg:.1f} deg, foreground points={len(fg_pts)}")
     else:
         normal = np.array([0.0, -1.0, 0.0])
         fg_pts = sample_pts
@@ -758,6 +764,9 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
         "slice_points_count": slice_count,
         "mean_fit_error_cm":  mean_err_cm,
         "inlier_ratio":       inlier_ratio,
+        "terrain_slope_deg":  float(round(terrain_slope_deg, 1)),
+        "slope_compensation_applied": terrain_slope_deg >= 10.0,
+        "height_derivation_method": "stem_pca_projection",
         "invalid_orientation": False,
         "geometry_3d": {
             "center_x":       float(round(center_3d[0], 4)),

@@ -482,8 +482,8 @@ def run_carbon_analysis(
         # Returns (scale_factor, is_calibrated, calibration_source).
         scale_factor, is_calibrated, calibration_source = _load_scale_factor_for_scan(scan_id)
 
-        # ── Implicit scale calibration from Modal (geometric prior or ARCore VIO) ──
-        # Priority: manual_calibration > arcore_vio > estimated_geometric_prior > uncalibrated
+        # ── Implicit scale calibration from Modal/Frames (optical tag, ARCore VIO, or geometric prior) ──
+        # Priority: manual_calibration > optical_aruco_marker > arcore_vio > estimated_geometric_prior > uncalibrated
         # Manual calibration (calibration.json) always wins; handled by _load_scale_factor_for_scan.
         scale_note = None
         if not is_calibrated and scale_calibration:
@@ -492,7 +492,9 @@ def run_carbon_analysis(
                 scale_factor = float(scale_calibration["scale_factor"])
                 is_calibrated = True
                 calibration_source = src
-                if src == "arcore_vio":
+                if src == "optical_aruco_marker":
+                    scale_note = f"skala metrik fisik terverifikasi via optical reference tag (ArUco): {scale_calibration.get('reason', '')}"
+                elif src == "arcore_vio":
                     scale_note = f"skala terukur via ARCore/ARKit VIO (~1-3% error): {scale_calibration.get('reason', '')}"
                 elif src == "estimated_geometric_prior":
                     scale_note = (
@@ -506,6 +508,8 @@ def run_carbon_analysis(
         # Map calibration source to scale_status tier
         if not is_calibrated:
             scale_status = "uncalibrated"
+        elif calibration_source == "optical_aruco_marker":
+            scale_status = "aruco_calibrated"
         elif calibration_source == "arcore_vio":
             scale_status = "vio_calibrated"
         elif calibration_source == "estimated_geometric_prior":
@@ -633,6 +637,10 @@ def run_carbon_analysis(
                 " | UNKALIBRASI: skala PLY default (1.0) dipakai — hasil TIDAK dapat "
                 "diandalkan tanpa kalibrasi skala (ARCore VIO atau calibrate_scale.py)"
             )
+        elif scale_status == "aruco_calibrated":
+            confidence_note += (
+                " | TERKALIBRASI OPTIK: skala metrik diverifikasi via physical optical marker (ArUco)"
+            )
         elif scale_status == "estimated_prior":
             confidence_note += (
                 " | ESTIMASI SKALA: geometri MASt3R (~5-9% error) — "
@@ -678,8 +686,18 @@ def run_carbon_analysis(
             "climate_zone_detected":   climate_zone,
             "formula_used":            carbon_result["formula_used"],
             "disclaimer":              carbon_result["disclaimer"],
+            "terrain_slope_deg":       dbh_result.get("terrain_slope_deg", 0.0),
+            "slope_compensation_applied": dbh_result.get("slope_compensation_applied", False),
+            "height_derivation_method": dbh_result.get("height_derivation_method", "stem_pca_projection"),
             "geometry_3d":             dbh_result.get("geometry_3d"),
+            "cost_breakdown":          None,
         }
+        try:
+            from carbon.cost_model import calculate_tree_scan_cost
+            res_dict["cost_breakdown"] = calculate_tree_scan_cost(execution_time_sec=60.0, storage_mb=15.0)
+        except Exception:
+            pass
+        return res_dict
     except Exception as exc:
         return {"error": f"Failed to compute carbon metrics: {exc}"}
 
@@ -1276,6 +1294,17 @@ def _reconstruct_thread(
         t_species_end = time.time()
         print(f"[TIMING] Pl@ntNet species detection & wood density lookup: {t_species_end - t_species_start:.4f}s (status: {species_detection_status})")
 
+        # 4b. Optical reference marker calibration scan across extracted frames
+        if img_files and (not scale_calibration or not scale_calibration.get("is_calibrated") or scale_calibration.get("source") == "estimated_geometric_prior"):
+            try:
+                from carbon.scale_calibrator import calibrate_scale_from_image_files
+                optical_cal = calibrate_scale_from_image_files(img_files, sample_stride=2)
+                if optical_cal and optical_cal.get("is_calibrated"):
+                    scale_calibration = optical_cal
+                    print(f"[RECONSTRUCT-SCALE] Optical ArUco marker detected and calibrated: {optical_cal}")
+            except Exception as opt_err:
+                print(f"[RECONSTRUCT-SCALE] Optical marker scan exception: {opt_err}")
+
         t_carbon_start = time.time()
         # 5. Run Carbon Analysis using custom parameters
         progress_dict[tree_code] = "Computing DBH & carbon"
@@ -1721,6 +1750,21 @@ async def video_upload_url(
     )
     print(f"[UPLOAD-URL] Generated presigned PUT URL (15m expiry) for key: {r2_key}")
     return {"url": presigned_url, "key": r2_key}
+
+
+@app.get("/analytics/unit-cost", summary="Get comprehensive unit economics and line-item cost breakdown per tree")
+async def get_unit_cost(
+    execution_time_sec: float = 60.0,
+    storage_mb: float = 15.0,
+    recording_time_min: float = 3.0
+):
+    from carbon.cost_model import calculate_tree_scan_cost
+    return calculate_tree_scan_cost(
+        execution_time_sec=execution_time_sec,
+        storage_mb=storage_mb,
+        recording_time_min=recording_time_min
+    )
+
 
 
 class UploadVideoRequest(BaseModel):
