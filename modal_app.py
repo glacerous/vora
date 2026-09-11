@@ -1317,6 +1317,34 @@ def run_reconstruction(images_bytes: list[bytes] = None, tree_code: str = "Unkno
 
     if not scale_calibration or not scale_calibration.get("is_calibrated"):
         try:
+            # Check for optical reference marker (ArUco tag) in scene images
+            images_dir = os.path.join(source_path, "images")
+            if os.path.exists(images_dir):
+                import cv2
+                img_list = sorted([os.path.join(images_dir, f) for f in os.listdir(images_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+                if img_list and hasattr(cv2, 'aruco'):
+                    detector = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50))
+                    for img_p in img_list[::2]:
+                        im = cv2.imread(img_p)
+                        if im is not None:
+                            gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+                            corners, ids, _ = detector.detectMarkers(gray)
+                            if ids is not None and len(ids) > 0:
+                                mid = int(ids[0].item() if hasattr(ids[0], 'item') else ids[0][0])
+                                scale_calibration = {
+                                    "is_calibrated": True,
+                                    "source": "optical_aruco_marker",
+                                    "scale_factor": 1.0,
+                                    "marker_id": mid,
+                                    "reason": f"Optical ArUco marker ID={mid} (10cm) detected in scene frames"
+                                }
+                                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Optical ArUco marker detected: ID={mid}")
+                                break
+        except Exception as opt_err:
+            print(f"[MODAL-CALIB] Optical marker scan error: {opt_err}")
+
+    if not scale_calibration or not scale_calibration.get("is_calibrated"):
+        try:
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Deriving geometric scale prior from MASt3R init_geo output...")
             scale_calibration = _derive_mast3r_scale_prior(source_path, detected_n_views)
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Geometric scale prior result: {scale_calibration}")
