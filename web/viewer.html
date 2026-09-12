@@ -943,9 +943,9 @@
         <div class="control-group" id="point-size-group" style="display: none;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
                 <span class="control-label">Point Thickness</span>
-                <span id="point-size-val" style="font-size: 11px; font-weight: 700; color: #0284c7;">0.04m</span>
+                <span id="point-size-val" style="font-size: 11px; font-weight: 700; color: #0284c7;">0.10m</span>
             </div>
-            <input type="range" id="point-size-slider" min="0.002" max="0.120" step="0.002" value="0.040"
+            <input type="range" id="point-size-slider" min="0.002" max="0.250" step="0.005" value="0.100"
                 style="width: 100%; accent-color: #0284c7; cursor: pointer; height: 4px; margin-top: 4px;" />
         </div>
     </div>
@@ -1894,7 +1894,7 @@
                     const hasColors = geometry.attributes.color !== undefined;
 
                     const sliderEl = document.getElementById('point-size-slider');
-                    const initialSize = sliderEl ? parseFloat(sliderEl.value) : 0.04;
+                    const initialSize = sliderEl ? parseFloat(sliderEl.value) : 0.10;
 
                     // Plain PointsMaterial — renders solid colored SQUARES that tile like a game texture.
                     // This is the desired "voxel/game texture" look. No circular shader needed.
