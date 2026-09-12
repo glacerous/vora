@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+import math
 import numpy as np
 
 # Configure logging
@@ -708,16 +709,17 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     if not radii_pass2:
         logger.warning("[MAST3R DBH] Multi-slice circle fit failed, using robust fallback.")
         pts_2d = np.column_stack((np.dot(trunk_pts, u1_pass2), np.dot(trunk_pts, u2_pass2)))
-        xc, yc, R, inlier_mask, err = fit_circle_robust(pts_2d)
+        xc, yc, R, mean_err, inlier_mask = fit_circle_robust(pts_2d)
         if R is None or R <= 0 or R > CROP_RADIUS * 2.0:
             R = 0.15 / scale
             xc = float(np.dot(trunk_pts.mean(axis=0), u1_pass2))
             yc = float(np.dot(trunk_pts.mean(axis=0), u2_pass2))
         radii_pass2 = [R]
         centers_2d_pass2 = [(xc, yc)]
-        slice_points_list_pass2 = [trunk_pts[inlier_mask] if len(inlier_mask) > 0 else trunk_pts[:10]]
+        has_inliers = inlier_mask is not None and np.sum(inlier_mask) > 0
+        slice_points_list_pass2 = [trunk_pts[inlier_mask] if has_inliers else trunk_pts[:10]]
         total_slice_points = len(trunk_pts)
-        inlier_count = np.sum(inlier_mask) if len(inlier_mask) > 0 else len(trunk_pts)
+        inlier_count = int(np.sum(inlier_mask)) if has_inliers else len(trunk_pts)
 
     R_final = float(np.median(radii_pass2))
     xc_final = float(np.median([c[0] for c in centers_2d_pass2]))
