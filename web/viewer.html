@@ -1904,11 +1904,36 @@
                     const hasColors = geometry.attributes.color !== undefined;
 
                     const sliderEl = document.getElementById('point-size-slider');
-                    const initialSize = sliderEl ? parseFloat(sliderEl.value) : 0.12;
 
-                    // Opaque solid squares — commercial look matching the dense POHON-7185 style.
-                    // depthWrite:true + transparent:false = proper depth occlusion, no see-through gaps,
-                    // no dark background bleeding through sparse areas.
+                    // Adaptive point size: estimate from point density so dense old scans
+                    // (POHON-7185: 450K pts → small squares) and sparse new scans
+                    // (POHON-7876: 50K pts → larger squares) both look optimal automatically.
+                    let initialSize = 0.05; // safe fallback
+                    try {
+                        const ptCount = geometry.attributes.position.count;
+                        geometry.computeBoundingBox();
+                        const bbox = geometry.boundingBox;
+                        const bsize = new THREE.Vector3();
+                        bbox.getSize(bsize);
+                        // Approximate surface area (treat as 2-sided box surface)
+                        const surfArea = 2 * (bsize.x * bsize.y + bsize.y * bsize.z + bsize.x * bsize.z);
+                        // Avg spacing between points if uniformly distributed on surface
+                        const avgSpacing = Math.sqrt(surfArea / ptCount);
+                        // Target 1.6x spacing so squares just overlap their neighbours
+                        initialSize = Math.min(Math.max(avgSpacing * 1.6, 0.005), 0.20);
+                        console.log(`Point cloud: ${ptCount} pts, surfArea=${surfArea.toFixed(2)}m², avgSpacing=${avgSpacing.toFixed(4)}m → size=${initialSize.toFixed(4)}m`);
+                    } catch(densityErr) {
+                        console.warn('Could not compute adaptive point size:', densityErr);
+                    }
+
+                    // Sync slider UI to show computed size
+                    if (sliderEl) {
+                        sliderEl.value = String(initialSize);
+                        const valLabel = document.getElementById('point-size-val');
+                        if (valLabel) valLabel.textContent = initialSize.toFixed(3) + 'm';
+                    }
+
+                    // Opaque solid squares — proper depth occlusion, no see-through gaps
                     const material = new THREE.PointsMaterial({
                         size: initialSize,
                         vertexColors: hasColors,
