@@ -16,8 +16,10 @@ import unittest
 import numpy as np
 import cv2
 
-# Add workspace to sys.path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add workspace and app to sys.path
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, os.path.join(REPO_ROOT, "app"))
 
 import server
 from server import (
@@ -186,7 +188,7 @@ class TestPipelineConcurrencyAndGates(unittest.TestCase):
         except Exception:
             pass  # Expected to fail D1 API
 
-        buffer_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads", "failed_scans_buffer")
+        buffer_dir = os.path.join(REPO_ROOT, "uploads", "failed_scans_buffer")
         found_backup = False
         if os.path.exists(buffer_dir):
             for fname in os.listdir(buffer_dir):
