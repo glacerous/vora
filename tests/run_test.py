@@ -3,10 +3,13 @@ import sys
 import time
 import modal
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
+
 def main():
-    # Define local directories
-    image_dir = "./test_images"
-    output_dir = "./output"
+    # Define directories relative to repository root
+    image_dir = os.path.join(REPO_ROOT, "test_images")
+    output_dir = os.path.join(REPO_ROOT, "output")
     
     # 1. Verify input directory contains images
     if not os.path.exists(image_dir):
