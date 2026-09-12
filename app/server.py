@@ -1791,7 +1791,7 @@ async def video_upload_url(
 
 @app.get("/analytics/unit-cost", summary="Get comprehensive unit economics and line-item cost breakdown per tree")
 async def get_unit_cost(
-    execution_time_sec: float = 60.0,
+    execution_time_sec: float = 30.0,
     storage_mb: float = 15.0,
     recording_time_min: float = 3.0
 ):
