@@ -27,6 +27,14 @@ load_dotenv()
 
 # ── Directory setup ──────────────────────────────────────────────────────────
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+# Locate web/ assets directory (handles both root and app/ placements)
+if os.path.isdir(os.path.join(BASE_DIR, "web")):
+    WEB_DIR = os.path.join(BASE_DIR, "web")
+elif os.path.isdir(os.path.join(BASE_DIR, "..", "web")):
+    WEB_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "web"))
+else:
+    WEB_DIR = BASE_DIR
+
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 FRAMES_DIR = os.path.join(BASE_DIR, "test_images")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
@@ -1647,7 +1655,7 @@ async def ping_server():
 
 @app.get("/", include_in_schema=False)
 async def index():
-    return FileResponse(os.path.join(BASE_DIR, "index.html"))
+    return FileResponse(os.path.join(WEB_DIR, "index.html"))
 
 @app.get("/viewer", include_in_schema=False)
 @app.get("/viewer.html", include_in_schema=False)
