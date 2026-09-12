@@ -437,6 +437,80 @@ if commercial_app is not None:
                 voxel_size=0.012,
             )
 
+            # Apply proven trunk isolation strategy (_clean_ply_on_modal / clean_and_filter_ply):
+            # 1. RANSAC ground plane isolation
+            # 2. 2D density peak in ground plane tangent space
+            # 3. Crop to cylinder around primary trunk (0.85m radius)
+            # 4. Statistical Outlier Removal (SOR) to strip air floaters & distant noise
+            from scipy.spatial import KDTree
+            
+            if len(all_xyz) >= 20:
+                sample_size = min(len(all_xyz), 10000)
+                rng = np.random.default_rng(42)
+                sample_idx = rng.choice(len(all_xyz), sample_size, replace=False)
+                sample_pts = all_xyz[sample_idx]
+                
+                max_iter = 100
+                thresh = 0.06
+                samples = rng.choice(sample_size, size=(max_iter, 3), replace=True)
+                best_in = np.zeros(sample_size, dtype=bool)
+                best_pl = None
+                for s in samples:
+                    p1, p2, p3 = sample_pts[s[0]], sample_pts[s[1]], sample_pts[s[2]]
+                    n = np.cross(p2 - p1, p3 - p1)
+                    nl = np.linalg.norm(n)
+                    if nl < 1e-6:
+                        continue
+                    n = n / nl
+                    d = -np.dot(n, p1)
+                    inliers = np.abs(np.dot(sample_pts, n) + d) < thresh
+                    if np.sum(inliers) > np.sum(best_in):
+                        best_in = inliers
+                        best_pl = (n, d)
+                
+                if best_pl is not None:
+                    n_g, d_g = best_pl
+                    h_g = np.dot(sample_pts, n_g) + d_g
+                    if np.median(h_g) < 0:
+                        n_g, d_g = -n_g, -d_g
+                    fg_pts = sample_pts[(np.dot(sample_pts, n_g) + d_g) > 0.04]
+                else:
+                    n_g = np.array([0.0, -1.0, 0.0])
+                    fg_pts = sample_pts
+                
+                if len(fg_pts) >= 20:
+                    ref = np.array([1.0, 0.0, 0.0]) if abs(n_g[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+                    u1 = np.cross(n_g, ref)
+                    u1 = u1 / (np.linalg.norm(u1) + 1e-9)
+                    u2 = np.cross(n_g, u1)
+                    
+                    p_u1 = np.dot(fg_pts, u1)
+                    p_u2 = np.dot(fg_pts, u2)
+                    hist, xedges, yedges = np.histogram2d(p_u1, p_u2, bins=35)
+                    max_idx = np.unravel_index(np.argmax(hist), hist.shape)
+                    peak_u1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
+                    peak_u2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
+                    
+                    p_u1_all = np.dot(all_xyz, u1)
+                    p_u2_all = np.dot(all_xyz, u2)
+                    dist_sq = (p_u1_all - peak_u1) ** 2 + (p_u2_all - peak_u2) ** 2
+                    CROP_RADIUS = 0.85
+                    crop_mask = dist_sq <= (CROP_RADIUS ** 2)
+                    
+                    if np.sum(crop_mask) >= 20:
+                        all_xyz = all_xyz[crop_mask]
+                        all_rgb = all_rgb[crop_mask]
+                        
+                        # Statistical Outlier Removal
+                        tree = KDTree(all_xyz)
+                        dists, _ = tree.query(all_xyz, k=min(21, len(all_xyz)), workers=-1)
+                        mean_dists = dists[:, 1:].mean(axis=1)
+                        g_mean = mean_dists.mean()
+                        g_std = mean_dists.std()
+                        inlier_mask = mean_dists <= (g_mean + 2.0 * g_std)
+                        all_xyz = all_xyz[inlier_mask]
+                        all_rgb = all_rgb[inlier_mask]
+
             total_dense_pts = len(all_xyz)
 
             pts_buf = io.BytesIO()
