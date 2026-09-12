@@ -479,12 +479,19 @@ if commercial_app is not None:
             peak_p1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
             peak_p2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
 
-            # Pass 1: Ground carpet & environment crop (3.5m radius preserves full ground carpet + surroundings + trunk)
-            TRUNK_CROP_RADIUS = 3.5
+            # Pass 1: Ground carpet & trunk crop matching camera orbit radius (1.10m)
+            TRUNK_CROP_RADIUS = 1.10
             dist_sq_trunk = (p1_all - peak_p1)**2 + (p2_all - peak_p2)**2
             splat_mask = dist_sq_trunk <= (TRUNK_CROP_RADIUS**2)
             if np.sum(splat_mask) < 200:
                 splat_mask = np.ones(num_splats, dtype=bool)
+
+            # Pass 1.2: Height filter along trunk axis (ground carpet to canopy)
+            h_along_trunk = np.dot(xyz_np, trunk_axis_est)
+            h_trunk_crop = h_along_trunk[splat_mask]
+            h_ground = np.percentile(h_trunk_crop, 3) if len(h_trunk_crop) > 10 else np.percentile(h_along_trunk, 3)
+            h_mask = (h_along_trunk >= (h_ground - 0.30)) & (h_along_trunk <= (h_ground + 1.65))
+            splat_mask = splat_mask & h_mask
 
             # Pass 1.5: Spatial Statistical Outlier Removal (KDTree SOR)
             from scipy.spatial import KDTree
@@ -495,32 +502,32 @@ if commercial_app is not None:
                 mean_dists = distances[:, 1:].mean(axis=1)
                 global_mean = mean_dists.mean()
                 global_std = mean_dists.std()
-                spatial_inliers = mean_dists <= (global_mean + 1.6 * global_std)
+                spatial_inliers = mean_dists <= (global_mean + 1.35 * global_std)
                 splat_mask_sub = np.zeros(num_splats, dtype=bool)
                 splat_mask_sub[splat_mask] = spatial_inliers
                 splat_mask &= splat_mask_sub
 
-            # Pass 2: Low-opacity logit pruning (sigmoid < 10%)
-            splat_mask &= (logit_opacities_np >= -2.2)
+            # Pass 2: Low-opacity logit pruning (sigmoid < 15%)
+            splat_mask &= (logit_opacities_np >= -1.75)
 
-            # Pass 3: Oversized Gaussian pruning
+            # Pass 3: Oversized Gaussian pruning (cap at e^-2.0 = 13.5cm)
             max_log_scales = log_scales_np.max(axis=1)
-            splat_mask &= (max_log_scales <= -1.5)
+            splat_mask &= (max_log_scales <= -2.0)
 
             # Pass 3.5: Smoke pattern removal
-            smoke_mask = (logit_opacities_np < -1.5) & (max_log_scales > -2.5)
+            smoke_mask = (logit_opacities_np < -1.0) & (max_log_scales > -2.8)
             splat_mask &= ~smoke_mask
 
-            # Pass 3.6: Spiky needles removal (aspect ratio > 90x)
+            # Pass 3.6: Spiky needles removal (aspect ratio > 30x)
             scale_diff = log_scales_np.max(axis=1) - log_scales_np.min(axis=1)
-            splat_mask &= (scale_diff <= 4.5)
+            splat_mask &= (scale_diff <= 3.4)
 
             if np.sum(splat_mask) < 500:
                 splat_mask = (logit_opacities_np >= -3.0) & (max_log_scales <= -1.0)
 
-            # Pass 4: Scale inflation (+0.35 log units, cap at -0.5) to blend into solid surface
-            INFLATE_AMOUNT = 0.35
-            INFLATE_CAP = -0.5
+            # Pass 4: Subtle scale inflation (+0.10 log units, cap at -2.0) to seal gaps cleanly without bloating
+            INFLATE_AMOUNT = 0.10
+            INFLATE_CAP = -2.0
             inflated_log_scales = np.minimum(log_scales_np[splat_mask] + INFLATE_AMOUNT, INFLATE_CAP)
 
             filt_means = torch.from_numpy(xyz_np[splat_mask]).to(device=device, dtype=torch.float32)
@@ -563,28 +570,33 @@ if commercial_app is not None:
                 sparse_dir=sparse_dir,
                 device="cuda",
                 target_points=420000,
-                stride=4,
+                stride=3,
                 scale_factor=sf,
                 max_keyframes=6,
             )
 
-            # Preserve full ground carpet, fallen leaves, surrounding vegetation, and trunk
-            # Only remove extreme distant background points (> 3.8m from orbit center or extreme heights)
-            pts_dist_orbit = np.linalg.norm(all_xyz - orbit_center, axis=1)
-            h_pts = np.dot(all_xyz, trunk_axis_est)
-            center_mask = pts_dist_orbit <= 1.5
-            h_ground_ref = np.percentile(h_pts[center_mask], 3) if np.sum(center_mask) > 50 else np.percentile(h_pts, 3)
-            valid_scene_mask = (pts_dist_orbit <= 3.8) & (h_pts >= (h_ground_ref - 0.5)) & (h_pts <= (h_ground_ref + 2.8))
+            # Clean circular ground carpet around tree trunk matching POHON-7185 reference
+            pts_p1 = np.dot(all_xyz, u1_axis)
+            pts_p2 = np.dot(all_xyz, u2_axis)
+            r_from_trunk = np.sqrt((pts_p1 - peak_p1)**2 + (pts_p2 - peak_p2)**2)
+            h_along_trunk_pts = np.dot(all_xyz, trunk_axis_est)
+
+            # Ground level at base of trunk
+            trunk_core_mask = r_from_trunk <= 0.35
+            h_ground_ref = np.percentile(h_along_trunk_pts[trunk_core_mask], 5) if np.sum(trunk_core_mask) >= 20 else np.percentile(h_along_trunk_pts, 5)
+
+            # Clean circular ground carpet of leaves & roots (1.05m radius matching camera orbit) and trunk height
+            valid_scene_mask = (r_from_trunk <= 1.05) & (h_along_trunk_pts >= (h_ground_ref - 0.30)) & (h_along_trunk_pts <= (h_ground_ref + 1.65))
             if np.sum(valid_scene_mask) >= 1000:
                 all_xyz = all_xyz[valid_scene_mask]
                 all_rgb = all_rgb[valid_scene_mask]
 
-            # SOR filtering on point cloud to strip remaining camera ray floaters
+            # Strict Statistical Outlier Removal (SOR) to strip all air floaters & fringe noise
             if len(all_xyz) >= 50:
                 tree_pts = KDTree(all_xyz)
-                dists_pts, _ = tree_pts.query(all_xyz, k=min(15, len(all_xyz)), workers=-1)
+                dists_pts, _ = tree_pts.query(all_xyz, k=min(21, len(all_xyz)), workers=-1)
                 mean_d = dists_pts[:, 1:].mean(axis=1)
-                pts_inlier = mean_d <= (mean_d.mean() + 2.2 * mean_d.std())
+                pts_inlier = mean_d <= (mean_d.mean() + 1.35 * mean_d.std())
                 all_xyz = all_xyz[pts_inlier]
                 all_rgb = all_rgb[pts_inlier]
 

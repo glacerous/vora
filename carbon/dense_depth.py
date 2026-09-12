@@ -206,9 +206,9 @@ class DenseDepthUnprojector:
             Z_metric = 2.0 + norm_d * 4.0
             med_z = 3.5
 
-        # 3. Filter valid depth range: foreground tree & surrounding ground carpet
+        # 3. Filter valid depth range: foreground tree & immediate circular ground carpet
         min_depth = max(0.20, med_z * 0.20)
-        max_depth = min(3.8, max(2.8, med_z * 3.2))
+        max_depth = min(2.2, max(1.6, med_z * 1.85))
         depth_mask = (Z_metric >= min_depth) & (Z_metric <= max_depth) & (~np.isnan(Z_metric))
 
         # 4. Pixel grid sampling with stride
@@ -272,7 +272,7 @@ def reconstruct_dense_cloud_from_colmap(
     sparse_dir: str,
     device: str = "cuda",
     target_points: int = 420000,
-    stride: int = 4,
+    stride: int = 3,
     voxel_size: float = 0.0035,
     scale_factor: float = 1.0,
     max_keyframes: int = 6,
