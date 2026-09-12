@@ -1664,7 +1664,7 @@ async def viewer():
 
 @app.get("/gaussian-splats-3d.umd.js", include_in_schema=False)
 async def splat_js():
-    return FileResponse(os.path.join(BASE_DIR, "gaussian-splats-3d.umd.js"))
+    return FileResponse(os.path.join(WEB_DIR, "gaussian-splats-3d.umd.js"))
 
 @app.get("/output/{fn:path}", include_in_schema=False)
 async def output_file(fn: str):
