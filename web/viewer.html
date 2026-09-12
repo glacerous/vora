@@ -1678,54 +1678,6 @@
                         // g3d.dir_x/y/z from Python's PCA over the full trunk segment is correct.
                         console.log('[CAD] Using Python-computed trunk axis from geometry_3d:', center_cyl, dir_3d);
 
-                        // Default Camera Orientation (PCA / trunk direction & center)
-                        if (!cameraOriented) {
-                            try {
-                                let sideDir = new THREE.Vector3(0, 0, 1);
-                                const dot = sideDir.dot(dir_3d);
-                                sideDir.addScaledVector(dir_3d, -dot);
-                                if (sideDir.lengthSq() < 1e-6) {
-                                    sideDir.set(1, 0, 0);
-                                    const dot2 = sideDir.dot(dir_3d);
-                                    sideDir.addScaledVector(dir_3d, -dot2);
-                                }
-                                sideDir.normalize();
-
-                                const fov = window.viewer.camera ? window.viewer.camera.fov : 50;
-                                const fovRad = (fov * Math.PI) / 180;
-                                const trunkRadius = (typeof radius !== 'undefined' && radius > 0 ? radius : null) || (g3d && g3d.radius_units) || metrics.radius || 0.15;
-                                // Guarantee camera is in front hemisphere facing the tree (+Z facing)
-                                if (sideDir.z < 0) {
-                                    sideDir.negate();
-                                }
-                                // Frame the trunk zone close-up (matching POHON-7185) so the trunk and ground fill the viewport
-                                const targetFramingSpan = Math.min(1.0, Math.max(0.45, trunkRadius * 4.5));
-                                const distance = Math.min(1.4, Math.max(0.85, (targetFramingSpan / 2) / Math.tan(fovRad / 2) * 1.2));
-
-                                // Slightly elevate camera along trunk axis (+15% of distance) so we look down slightly at the base & ground like POHON-7185
-                                const camPos = center_cyl.clone()
-                                    .addScaledVector(sideDir, distance)
-                                    .addScaledVector(dir_3d, distance * 0.15);
-                                window.viewer.camera.position.copy(camPos);
-                                if (window.viewer.controls) {
-                                    window.viewer.controls.target.copy(center_cyl);
-                                    window.viewer.controls.update();
-                                } else {
-                                    window.viewer.camera.lookAt(center_cyl);
-                                }
-                                console.log('Auto-fit camera perpendicular to trunk (POHON-7185 style):', camPos, '→ look at', center_cyl, 'dist:', distance);
-
-                                currentSpeed = Math.max(0.005, distance / 100);
-                                const speedIndicator = document.getElementById('speed-indicator');
-                                if (speedIndicator) {
-                                    speedIndicator.textContent = currentSpeed.toFixed(3);
-                                }
-                                cameraOriented = true;
-                            } catch (camErr) {
-                                console.warn('Failed to orient camera to geometry_3d:', camErr);
-                            }
-                        }
-
                         // NOTE: Do NOT re-derive h_min/h_max from slice_points_3d.
                         // slice_points_3d only span the thin breast-height slice; projecting them
                         // onto dir_3d gives a range of ~2*tol (nearly zero), collapsing the cylinder
@@ -1738,6 +1690,53 @@
                         const base_3d = center_3d.clone().addScaledVector(dir_3d, actualHMin - actualHTarget);
                         const top_3d = center_3d.clone().addScaledVector(dir_3d, actualHMax - actualHTarget);
                         const center_geom = base_3d.clone().add(top_3d).multiplyScalar(0.5);
+
+                        // Default Camera Orientation (centered on trunk midpoint center_geom, perpendicular to trunk)
+                        if (!cameraOriented) {
+                            try {
+                                let sideDir = new THREE.Vector3(0, 0, 1);
+                                const dot = sideDir.dot(dir_3d);
+                                sideDir.addScaledVector(dir_3d, -dot);
+                                if (sideDir.lengthSq() < 1e-6) {
+                                    sideDir.set(1, 0, 0);
+                                    const dot2 = sideDir.dot(dir_3d);
+                                    sideDir.addScaledVector(dir_3d, -dot2);
+                                }
+                                sideDir.normalize();
+
+                                // Guarantee camera is in front hemisphere facing the tree (+Z facing)
+                                if (sideDir.z < 0) {
+                                    sideDir.negate();
+                                }
+
+                                const fov = window.viewer.camera ? window.viewer.camera.fov : 50;
+                                const fovRad = (fov * Math.PI) / 180;
+                                const trunkSpan = Math.max(1.3, actualHeight);
+                                const distance = Math.min(2.5, Math.max(1.4, (trunkSpan / 2) / Math.tan(fovRad / 2) * 1.05));
+
+                                // Slightly elevate camera along trunk axis (+12% of distance) so we look down slightly at the base & ground like POHON-7185
+                                const camPos = center_geom.clone()
+                                    .addScaledVector(sideDir, distance)
+                                    .addScaledVector(dir_3d, distance * 0.12);
+                                window.viewer.camera.position.copy(camPos);
+                                if (window.viewer.controls) {
+                                    window.viewer.controls.target.copy(center_geom);
+                                    window.viewer.controls.update();
+                                } else {
+                                    window.viewer.camera.lookAt(center_geom);
+                                }
+                                console.log('Auto-fit camera perpendicular to trunk (POHON-7185 style):', camPos, '→ look at', center_geom, 'dist:', distance);
+
+                                currentSpeed = Math.max(0.005, distance / 100);
+                                const speedIndicator = document.getElementById('speed-indicator');
+                                if (speedIndicator) {
+                                    speedIndicator.textContent = currentSpeed.toFixed(3);
+                                }
+                                cameraOriented = true;
+                            } catch (camErr) {
+                                console.warn('Failed to orient camera to geometry_3d:', camErr);
+                            }
+                        }
 
                         // Calculate quaternion rotation to align local Y with dir_3d
                         const up = new THREE.Vector3(0, 1, 0);
@@ -1865,15 +1864,37 @@
                     // Material with vertex colors (falls back to cyan if no color)
                     const hasColors = geometry.attributes.color !== undefined;
 
+                    // Generate smooth circular disc texture for natural splat/laser scan rendering
+                    let pointTexture = null;
+                    try {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = 64;
+                        canvas.height = 64;
+                        const ctx = canvas.getContext('2d');
+                        const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+                        grad.addColorStop(0, 'rgba(255,255,255,1.0)');
+                        grad.addColorStop(0.85, 'rgba(255,255,255,0.95)');
+                        grad.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+                        ctx.fillStyle = grad;
+                        ctx.beginPath();
+                        ctx.arc(32, 32, 32, 0, Math.PI * 2);
+                        ctx.fill();
+                        pointTexture = new THREE.CanvasTexture(canvas);
+                    } catch (texErr) {
+                        console.warn('Could not generate point disc texture:', texErr);
+                    }
+
                     const sliderEl = document.getElementById('point-size-slider');
-                    const initialSize = sliderEl ? parseFloat(sliderEl.value) : 0.018;
+                    const initialSize = sliderEl ? parseFloat(sliderEl.value) : 0.015;
 
                     const material = new THREE.PointsMaterial({
                         size: initialSize,
+                        map: pointTexture || null,
+                        alphaTest: 0.1,
                         vertexColors: hasColors,
-                        color: hasColors ? undefined : 0x38bdf8,
-                        transparent: false,
-                        opacity: 1.0,
+                        color: hasColors ? 0xffffff : 0x38bdf8,
+                        transparent: true,
+                        opacity: 0.95,
                         sizeAttenuation: true
                     });
 
