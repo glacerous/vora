@@ -958,6 +958,7 @@ def _reconstruct_thread(
         r2_frames_prefix = job_st.get("r2_frames_prefix")
         job_frames_dir = get_job_frames_dir(tree_code)
         imgs = []
+        files = []
         if not r2_frames_prefix:
             t_disk_start = time.time()
             files = sorted(glob.glob(os.path.join(job_frames_dir, "*.jpg")))
@@ -1459,9 +1460,10 @@ def _reconstruct_thread(
                     except Exception as upload_err:
                         print(f"Failed to upload points3D_all.npy to R2: {upload_err}")
 
-                # Select representative frame matching MASt3R pointmap as thumbnail
+                # Select representative frame matching pointmap as thumbnail
                 thumbnail_url = None
-                if files:
+                thumb_candidates = files or sorted(glob.glob(os.path.join(job_frames_dir, "*.jpg"))) or sorted(glob.glob(os.path.join(FRAMES_DIR, "*.jpg")))
+                if thumb_candidates:
                     target_thumb_idx = 0
                     if points3d_all_path and os.path.exists(points3d_all_path):
                         try:
@@ -1475,7 +1477,7 @@ def _reconstruct_thread(
                         except Exception:
                             target_thumb_idx = 0
                     
-                    representative_frame = files[min(target_thumb_idx, len(files) - 1)]
+                    representative_frame = thumb_candidates[min(target_thumb_idx, len(thumb_candidates) - 1)]
                     try:
                         upd(tree_code, "reconstructing", f"Uploading representative frame {target_thumb_idx} as thumbnail to R2...")
                         thumbnail_url = upload_thumbnail(representative_frame, tree_code)
