@@ -1693,10 +1693,14 @@
 
                                 const fov = window.viewer.camera ? window.viewer.camera.fov : 50;
                                 const fovRad = (fov * Math.PI) / 180;
-                                const trunkRadius = actualRadius || metrics.radius || 0.15;
+                                const trunkRadius = (typeof radius !== 'undefined' && radius > 0 ? radius : null) || (g3d && g3d.radius_units) || metrics.radius || 0.15;
+                                // Guarantee camera is in front hemisphere facing the tree (+Z facing)
+                                if (sideDir.z < 0) {
+                                    sideDir.negate();
+                                }
                                 // Frame the trunk zone close-up (matching POHON-7185) so the trunk and ground fill the viewport
-                                const targetFramingSpan = Math.min(0.75, Math.max(0.35, trunkRadius * 4.5));
-                                const distance = Math.min(1.1, Math.max(0.65, (targetFramingSpan / 2) / Math.tan(fovRad / 2) * 1.2));
+                                const targetFramingSpan = Math.min(1.0, Math.max(0.45, trunkRadius * 4.5));
+                                const distance = Math.min(1.4, Math.max(0.85, (targetFramingSpan / 2) / Math.tan(fovRad / 2) * 1.2));
 
                                 // Slightly elevate camera along trunk axis (+15% of distance) so we look down slightly at the base & ground like POHON-7185
                                 const camPos = center_cyl.clone()
