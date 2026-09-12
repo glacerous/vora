@@ -52,8 +52,9 @@ if commercial_app is not None:
         env = os.environ.copy()
         env["LD_LIBRARY_PATH"] = f"/opt/colmap/lib:{env.get('LD_LIBRARY_PATH', '')}"
         env["PATH"] = f"/opt/colmap/bin:{env.get('PATH', '')}"
-        res = subprocess.run(["/opt/colmap/bin/colmap", "--version"], capture_output=True, text=True, env=env)
-        return (res.stdout or res.stderr or "").strip()
+        res = subprocess.run(["/opt/colmap/bin/colmap", "help"], capture_output=True, text=True, env=env)
+        lines = (res.stdout or res.stderr or "").strip().splitlines()
+        return lines[0] if lines else "COLMAP installed"
 
     @commercial_app.function(image=commercial_image, gpu="a10g", timeout=1200)
     def reconstruct_commercial_cloud(
@@ -93,6 +94,10 @@ if commercial_app is not None:
         env = os.environ.copy()
         env["LD_LIBRARY_PATH"] = f"/opt/colmap/lib:{env.get('LD_LIBRARY_PATH', '')}"
         env["PATH"] = f"/opt/colmap/bin:{env.get('PATH', '')}"
+        env["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+        env["OMP_NUM_THREADS"] = "4"
+        env["MKL_NUM_THREADS"] = "4"
+        env["OPENBLAS_NUM_THREADS"] = "4"
 
         # ── 1. Download frames from R2 directly into container ──
         import boto3
@@ -132,7 +137,7 @@ if commercial_app is not None:
         t_dl = time.time()
         print(f"[CLOUD-COLMAP] Downloaded {len(frame_keys)} frames in {t_dl - t0:.1f}s")
 
-        # ── 2. Run COLMAP automatic_reconstructor (global mapper, sparse, GPU) ──
+        # ── 2. Run COLMAP automatic_reconstructor (sparse, CPU SIFT + CPU Ceres) ──
         cmd = [
             colmap_bin, "automatic_reconstructor",
             "--workspace_path", workspace_dir,
@@ -142,26 +147,34 @@ if commercial_app is not None:
             "--single_camera", "1",
             "--sparse", "1",
             "--dense", "0",
-            "--use_gpu", "1",
+            "--use_gpu", "0",
+            "--num_threads", "8",
         ]
         print(f"[CLOUD-COLMAP] Running: {' '.join(cmd)}")
         proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
         t_sfm = time.time()
         print(f"[CLOUD-COLMAP] COLMAP exit={proc.returncode} in {t_sfm - t_dl:.1f}s")
-        if proc.returncode != 0:
-            # Dump last 1000 chars of stderr for diagnosis
-            raise RuntimeError(
-                f"[CLOUD-COLMAP] COLMAP failed (code {proc.returncode}): {proc.stderr[-1000:]}"
-            )
+        if proc.stdout:
+            print(f"[CLOUD-COLMAP] STDOUT (last 50 lines):\n" + "\n".join(proc.stdout.splitlines()[-50:]))
+        if proc.stderr:
+            print(f"[CLOUD-COLMAP] STDERR (last 50 lines):\n" + "\n".join(proc.stderr.splitlines()[-50:]))
 
         # Locate sparse/0 output dir (COLMAP may output to sparse/ or sparse/0/)
         sparse_dir = os.path.join(workspace_dir, "sparse", "0")
         if not os.path.isdir(sparse_dir):
             sparse_dir = os.path.join(workspace_dir, "sparse")
         required = ["cameras.bin", "images.bin", "points3D.bin"]
-        for rf in required:
-            if not os.path.exists(os.path.join(sparse_dir, rf)):
-                raise RuntimeError(f"[CLOUD-COLMAP] Missing sparse artifact: {rf} in {sparse_dir}")
+        has_required = all(os.path.exists(os.path.join(sparse_dir, rf)) for rf in required)
+
+        if proc.returncode != 0 and not has_required:
+            # Dump last 3000 chars of stderr for diagnosis
+            raise RuntimeError(
+                f"[CLOUD-COLMAP] COLMAP failed (code {proc.returncode}):\n{proc.stderr[-3000:]}"
+            )
+        if not has_required:
+            for rf in required:
+                if not os.path.exists(os.path.join(sparse_dir, rf)):
+                    raise RuntimeError(f"[CLOUD-COLMAP] Missing sparse artifact: {rf} in {sparse_dir}")
         print(f"[CLOUD-COLMAP] Sparse reconstruction at {sparse_dir}")
 
         # ── 2b. Compute scale calibration from COLMAP trajectory vs VIO ──
