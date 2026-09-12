@@ -531,9 +531,9 @@ if commercial_app is not None:
                 images_dir=images_dir,
                 sparse_dir=sparse_dir,
                 device="cuda",
-                target_points=400000,
+                target_points=450000,
                 stride=2,
-                voxel_size=0.009,
+                voxel_size=0.0035,
             )
 
             # Apply same trunk centering & ground preservation to the dense point cloud
@@ -562,6 +562,11 @@ if commercial_app is not None:
                 pts_inlier = mean_d <= (mean_d.mean() + 1.8 * mean_d.std())
                 all_xyz = all_xyz[pts_inlier]
                 all_rgb = all_rgb[pts_inlier]
+
+            if len(all_xyz) > 450000:
+                sub_sel = np.random.choice(len(all_xyz), 450000, replace=False)
+                all_xyz = all_xyz[sub_sel]
+                all_rgb = all_rgb[sub_sel]
 
             # 4. Accurate Trunk Cylinder Extraction directly on point cloud
             h_clean = np.dot(all_xyz, trunk_axis_est)

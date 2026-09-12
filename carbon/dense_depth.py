@@ -238,8 +238,8 @@ class DenseDepthUnprojector:
 def voxel_grid_downsample(
     xyz: np.ndarray,
     rgb: np.ndarray,
-    voxel_size: float = 0.012,
-    max_total_points: int = 400000
+    voxel_size: float = 0.0035,
+    max_total_points: int = 450000
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Subsamples dense points using a uniform 3D spatial voxel grid.
@@ -271,9 +271,9 @@ def reconstruct_dense_cloud_from_colmap(
     images_dir: str,
     sparse_dir: str,
     device: str = "cuda",
-    target_points: int = 350000,
-    stride: int = 3,
-    voxel_size: float = 0.015,
+    target_points: int = 450000,
+    stride: int = 2,
+    voxel_size: float = 0.0035,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Complete commercial dense pipeline:
