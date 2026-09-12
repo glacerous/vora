@@ -10,6 +10,7 @@ Production start command (after Flask removal):
 import asyncio
 import glob
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from typing import Any, List, Optional
@@ -23,23 +24,26 @@ from pydantic import BaseModel
 import boto3
 from botocore.config import Config
 
-load_dotenv()
-
 # ── Directory setup ──────────────────────────────────────────────────────────
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-# Locate web/ assets directory (handles both root and app/ placements)
-if os.path.isdir(os.path.join(BASE_DIR, "web")):
-    WEB_DIR = os.path.join(BASE_DIR, "web")
-elif os.path.isdir(os.path.join(BASE_DIR, "..", "web")):
-    WEB_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "web"))
+# Root directory of the repository (parent dir when running inside app/)
+if os.path.basename(os.path.dirname(os.path.abspath(__file__))) == "app":
+    REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 else:
-    WEB_DIR = BASE_DIR
+    REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-FRAMES_DIR = os.path.join(BASE_DIR, "test_images")
-OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
-for _d in (UPLOAD_DIR, FRAMES_DIR, OUTPUT_DIR):
+load_dotenv(os.path.join(REPO_ROOT, ".env"))
+
+BASE_DIR   = REPO_ROOT
+WEB_DIR    = os.path.join(REPO_ROOT, "web")
+UPLOAD_DIR = os.path.join(REPO_ROOT, "uploads")
+FRAMES_DIR = os.path.join(REPO_ROOT, "test_images")
+OUTPUT_DIR = os.path.join(REPO_ROOT, "output")
+SCRATCH_DIR = os.path.join(REPO_ROOT, "scratch")
+
+for _d in (UPLOAD_DIR, FRAMES_DIR, OUTPUT_DIR, SCRATCH_DIR):
     os.makedirs(_d, exist_ok=True)
 
 def get_job_frames_dir(tree_code: str = None) -> str:
@@ -982,7 +986,7 @@ def _reconstruct_thread(
             print(f"[RECONSTRUCT] Commercial Permissive Mode active: routing to CommercialPermissiveEngine (COLMAP+gsplat)...")
             from carbon.reconstruction_engine import CommercialPermissiveEngine
             c_engine = CommercialPermissiveEngine()
-            c_out_dir = os.path.join("scratch", f"job_{tree_code}")
+            c_out_dir = os.path.join(SCRATCH_DIR, f"job_{tree_code}")
             camera_poses = job_st.get("camera_poses")
             c_res = c_engine.reconstruct(
                 frames_dir=job_frames_dir,
@@ -2543,7 +2547,7 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
                     print(f"[ADJUST GEOMETRY] Recalculated {len(slice_points_3d)} slice points around new cylinder.")
             except Exception as slice_err:
                 import traceback
-                with open("scratch/adjust_error.log", "w") as f_err:
+                with open(os.path.join(SCRATCH_DIR, "adjust_error.log"), "w") as f_err:
                     traceback.print_exc(file=f_err)
                 print(f"[ADJUST GEOMETRY ERROR] Failed to recalculate slice points: {slice_err}")
 
