@@ -1711,13 +1711,14 @@
 
                                 const fov = window.viewer.camera ? window.viewer.camera.fov : 50;
                                 const fovRad = (fov * Math.PI) / 180;
-                                const trunkSpan = Math.max(1.3, actualHeight);
-                                const distance = Math.min(2.5, Math.max(1.4, (trunkSpan / 2) / Math.tan(fovRad / 2) * 1.05));
+                                // Frame the full tree and surrounding ground disk matching POHON-7185
+                                const trunkSpan = Math.max(2.2, (actualHeight || 1.8) * 1.35);
+                                const distance = Math.min(3.6, Math.max(2.6, (trunkSpan / 2) / Math.tan(fovRad / 2) * 1.1));
 
-                                // Slightly elevate camera along trunk axis (+12% of distance) so we look down slightly at the base & ground like POHON-7185
+                                // Slightly elevate camera along trunk axis (+15% of distance) so we look down slightly at the base & ground like POHON-7185
                                 const camPos = center_geom.clone()
                                     .addScaledVector(sideDir, distance)
-                                    .addScaledVector(dir_3d, distance * 0.12);
+                                    .addScaledVector(dir_3d, distance * 0.15);
                                 window.viewer.camera.position.copy(camPos);
                                 if (window.viewer.controls) {
                                     window.viewer.controls.target.copy(center_geom);
