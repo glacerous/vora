@@ -36,7 +36,7 @@ try:
             "curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj -C /tmp bin/micromamba",
             "CONDA_OVERRIDE_CUDA='12.1' /tmp/bin/micromamba create -y -p /opt/colmap -c conda-forge colmap",
             "ln -s /opt/colmap/bin/colmap /usr/local/bin/colmap",
-            "pip install https://github.com/nerfstudio-project/gsplat/releases/download/v1.5.3/gsplat-1.5.3%2Bpt21cu121-cp310-cp310-linux_x86_64.whl"
+            "pip install boto3 https://github.com/nerfstudio-project/gsplat/releases/download/v1.5.3/gsplat-1.5.3%2Bpt21cu121-cp310-cp310-linux_x86_64.whl"
         )
     )
 except ImportError:
