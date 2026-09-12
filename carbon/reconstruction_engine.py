@@ -191,7 +191,7 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
             logger.info(f"[ENGINE] Dispatching {len(bundle_bytes)/(1024*1024):.2f} MB bundle to gsplat GPU trainer...")
             import modal
             try:
-                fn = modal.Function.from_name("vora-commercial-gsplat", "train_gsplat_cloud")
+                fn = modal.Function.from_name("vora-commercial-engine", "train_gsplat_cloud")
                 res = fn.remote(bundle_bytes, num_iterations=iterations)
             except Exception:
                 from carbon.commercial_pipeline import commercial_app
