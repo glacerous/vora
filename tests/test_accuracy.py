@@ -12,7 +12,9 @@ import sys
 import math
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, os.path.join(REPO_ROOT, "app"))
 
 import numpy as np
 
@@ -330,7 +332,9 @@ def test_2d_clicks_short_trunk_clamp():
 
 def test_no_unguarded_estimate_carbon_calls():
     print("\n=== PRIORITY 2 (lanjutan): audit caller estimate_carbon/carbon ===")
-    server_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.py")
+    server_src = os.path.join(REPO_ROOT, "server.py")
+    if not os.path.exists(server_src):
+        server_src = os.path.join(REPO_ROOT, "app", "server.py")
     with open(server_src, "r", encoding="utf-8") as fh:
         text = fh.read()
 
