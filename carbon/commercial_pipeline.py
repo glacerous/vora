@@ -245,12 +245,35 @@ if commercial_app is not None:
                     scale_calibration = {
                         "is_calibrated": True,
                         "source": "arcore_vio",
-                        "scale_factor": sf,
-                        "vio_path_length_m": vio_path_len,
-                        "recon_path_length": recon_path_len,
+                        "scale_factor": float(sf),
+                        "vio_path_length_m": float(vio_path_len),
+                        "recon_path_length": float(recon_path_len),
                         "reason": f"VIO {vio_path_len:.2f}m / COLMAP {recon_path_len:.2f} units",
                     }
                     print(f"[CLOUD-COLMAP] Scale calibrated: {sf:.6f} (VIO {vio_path_len:.2f}m / recon {recon_path_len:.2f})")
+
+        # Orbit standoff prior when VIO is absent (mobile phone circular tree scan)
+        if not scale_calibration.get("is_calibrated") and len(recon_pts_arr) >= 3:
+            cam_center = np.mean(recon_pts_arr, axis=0)
+            cam_radii = np.linalg.norm(recon_pts_arr - cam_center, axis=1)
+            mean_radius = float(np.mean(cam_radii))
+            if mean_radius > 0.1:
+                # In tree scanning, surveyor orbits the trunk at ~1.05m radius (arm's length)
+                sf_prior = 1.05 / mean_radius
+                scale_calibration = {
+                    "is_calibrated": True,
+                    "source": "standoff_orbit_prior",
+                    "scale_factor": float(sf_prior),
+                    "mean_camera_radius_units": mean_radius,
+                    "target_standoff_m": 1.05,
+                    "reason": f"Geometric orbit prior: camera radius {mean_radius:.2f} units calibrated to 1.05m",
+                }
+                print(f"[CLOUD-COLMAP] Geometric standoff scale calibrated: {sf_prior:.6f} (radius {mean_radius:.2f}u -> 1.05m)")
+
+        sf = float(scale_calibration.get("scale_factor", 1.0))
+        if abs(sf - 1.0) > 1e-4:
+            colmap_poses_out = [{"x": float(p["x"] * sf), "y": float(p["y"] * sf), "z": float(p["z"] * sf), "name": p["name"]}
+                                for p in colmap_poses_out]
 
         # ── 3. Parse COLMAP cameras.bin ──
         cameras = {}
@@ -298,7 +321,15 @@ if commercial_app is not None:
         if N < 10:
             raise RuntimeError(f"[CLOUD-COLMAP] Too few sparse points ({N}) for gsplat training — COLMAP may have failed to triangulate")
 
-        # ── 5. Train gsplat (same logic as train_gsplat_cloud) ──
+        # ── 5. Apply metric scale factor to COLMAP points and cameras ──
+        if abs(sf - 1.0) > 1e-4:
+            pts_xyz = pts_xyz * sf
+            poses_map = {k: v * sf for k, v in poses_map.items()}
+            for info in images_info:
+                info["viewmat"][:3, 3] = info["viewmat"][:3, 3] * sf
+            print(f"[CLOUD-COLMAP] Scaled 3D points and camera translation vectors by sf={sf:.6f}")
+
+        # ── Train gsplat in metric coordinate system ──
         device = torch.device("cuda:0")
         scale_down = 2.0
         cam0 = list(cameras.values())[0]
@@ -448,8 +479,8 @@ if commercial_app is not None:
             peak_p1 = 0.5 * (xedges[max_idx[0]] + xedges[max_idx[0] + 1])
             peak_p2 = 0.5 * (yedges[max_idx[1]] + yedges[max_idx[1] + 1])
 
-            # Pass 1: Trunk cylinder crop (1.35m radius preserves full ground carpet + trunk)
-            TRUNK_CROP_RADIUS = 1.35
+            # Pass 1: Ground carpet & environment crop (3.5m radius preserves full ground carpet + surroundings + trunk)
+            TRUNK_CROP_RADIUS = 3.5
             dist_sq_trunk = (p1_all - peak_p1)**2 + (p2_all - peak_p2)**2
             splat_mask = dist_sq_trunk <= (TRUNK_CROP_RADIUS**2)
             if np.sum(splat_mask) < 200:
@@ -531,49 +562,38 @@ if commercial_app is not None:
                 images_dir=images_dir,
                 sparse_dir=sparse_dir,
                 device="cuda",
-                target_points=450000,
-                stride=2,
-                voxel_size=0.0035,
+                target_points=420000,
+                stride=4,
+                scale_factor=sf,
+                max_keyframes=6,
             )
 
-            # Apply same trunk centering & ground preservation to the dense point cloud
-            pts_p1 = np.dot(all_xyz, u1_axis)
-            pts_p2 = np.dot(all_xyz, u2_axis)
-            pts_dist_sq = (pts_p1 - peak_p1)**2 + (pts_p2 - peak_p2)**2
-            pts_crop_mask = pts_dist_sq <= (TRUNK_CROP_RADIUS**2)
-
-            # Ground height reference along trunk axis
-            h_along_trunk = np.dot(all_xyz, trunk_axis_est)
-            if np.sum(pts_crop_mask) >= 100:
-                h_crop = h_along_trunk[pts_crop_mask]
-                h_ground_ref = np.percentile(h_crop, 5)
-                # Keep ground (-0.4m below reference) up to 2.2m above ground
-                pts_h_mask = (h_along_trunk >= (h_ground_ref - 0.4)) & (h_along_trunk <= (h_ground_ref + 2.2))
-                pts_final_mask = pts_crop_mask & pts_h_mask
-                if np.sum(pts_final_mask) >= 1000:
-                    all_xyz = all_xyz[pts_final_mask]
-                    all_rgb = all_rgb[pts_final_mask]
+            # Preserve full ground carpet, fallen leaves, surrounding vegetation, and trunk
+            # Only remove extreme distant background points (> 3.8m from orbit center or extreme heights)
+            pts_dist_orbit = np.linalg.norm(all_xyz - orbit_center, axis=1)
+            h_pts = np.dot(all_xyz, trunk_axis_est)
+            center_mask = pts_dist_orbit <= 1.5
+            h_ground_ref = np.percentile(h_pts[center_mask], 3) if np.sum(center_mask) > 50 else np.percentile(h_pts, 3)
+            valid_scene_mask = (pts_dist_orbit <= 3.8) & (h_pts >= (h_ground_ref - 0.5)) & (h_pts <= (h_ground_ref + 2.8))
+            if np.sum(valid_scene_mask) >= 1000:
+                all_xyz = all_xyz[valid_scene_mask]
+                all_rgb = all_rgb[valid_scene_mask]
 
             # SOR filtering on point cloud to strip remaining camera ray floaters
-            if len(all_xyz) >= 30:
+            if len(all_xyz) >= 50:
                 tree_pts = KDTree(all_xyz)
-                dists_pts, _ = tree_pts.query(all_xyz, k=min(21, len(all_xyz)), workers=-1)
+                dists_pts, _ = tree_pts.query(all_xyz, k=min(15, len(all_xyz)), workers=-1)
                 mean_d = dists_pts[:, 1:].mean(axis=1)
-                pts_inlier = mean_d <= (mean_d.mean() + 1.8 * mean_d.std())
+                pts_inlier = mean_d <= (mean_d.mean() + 2.2 * mean_d.std())
                 all_xyz = all_xyz[pts_inlier]
                 all_rgb = all_rgb[pts_inlier]
-
-            if len(all_xyz) > 450000:
-                sub_sel = np.random.choice(len(all_xyz), 450000, replace=False)
-                all_xyz = all_xyz[sub_sel]
-                all_rgb = all_rgb[sub_sel]
 
             # 4. Accurate Trunk Cylinder Extraction directly on point cloud
             h_clean = np.dot(all_xyz, trunk_axis_est)
             h_g_clean = np.percentile(h_clean, 5)
             h_top_clean = np.percentile(h_clean, 95)
             trunk_height_est = float(h_top_clean - h_g_clean)
-            h_breast_target = float(h_g_clean + min(1.3, trunk_height_est * 0.5))
+            h_breast_target = float(h_g_clean + min(1.3, max(0.3, trunk_height_est * 0.5)))
 
             # Slice cross section at breast height
             slice_mask = np.abs(h_clean - h_breast_target) <= 0.05
@@ -585,18 +605,18 @@ if commercial_app is not None:
                 slice_p2 = np.dot(slice_pts, u2_axis)
                 slice_2d = np.column_stack([slice_p1, slice_p2])
                 c1, c2, r_fit, _, _ = fit_circle_robust(slice_2d)
-                if r_fit is not None and 0.02 <= r_fit <= 1.0:
+                if r_fit is not None and 0.02 <= r_fit <= 0.8:
                     cyl_center = c1 * u1_axis + c2 * u2_axis + h_breast_target * trunk_axis_est
                     dbh_est_cm = float(round(r_fit * 2.0 * 100.0, 2))
                     radius_fit = float(r_fit)
                 else:
                     cyl_center = peak_p1 * u1_axis + peak_p2 * u2_axis + h_breast_target * trunk_axis_est
-                    dbh_est_cm = 20.0
-                    radius_fit = 0.10
+                    dbh_est_cm = 12.0
+                    radius_fit = 0.06
             else:
                 cyl_center = peak_p1 * u1_axis + peak_p2 * u2_axis + h_breast_target * trunk_axis_est
-                dbh_est_cm = 20.0
-                radius_fit = 0.10
+                dbh_est_cm = 12.0
+                radius_fit = 0.06
 
             geometry_3d_out = {
                 "center_x": float(cyl_center[0]),

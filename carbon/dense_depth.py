@@ -206,9 +206,9 @@ class DenseDepthUnprojector:
             Z_metric = 2.0 + norm_d * 4.0
             med_z = 3.5
 
-        # 3. Filter valid depth range: foreground tree & immediate ground
-        min_depth = max(0.2, med_z * 0.3)
-        max_depth = med_z * max_depth_factor
+        # 3. Filter valid depth range: foreground tree & surrounding ground carpet
+        min_depth = max(0.20, med_z * 0.20)
+        max_depth = min(3.8, max(2.8, med_z * 3.2))
         depth_mask = (Z_metric >= min_depth) & (Z_metric <= max_depth) & (~np.isnan(Z_metric))
 
         # 4. Pixel grid sampling with stride
@@ -271,22 +271,24 @@ def reconstruct_dense_cloud_from_colmap(
     images_dir: str,
     sparse_dir: str,
     device: str = "cuda",
-    target_points: int = 450000,
-    stride: int = 2,
+    target_points: int = 420000,
+    stride: int = 4,
     voxel_size: float = 0.0035,
+    scale_factor: float = 1.0,
+    max_keyframes: int = 6,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Complete commercial dense pipeline:
       1. Reads COLMAP sparse/0/ (cameras.bin, images.bin, points3D.bin).
-      2. Initializes Depth Anything V2.
-      3. Unprojects registered frames into dense metric 3D points with 100% genuine photographic textures.
-      4. Fuses and downsamples via 3D voxel grid.
+      2. Scales sparse points and camera translations by scale_factor into true metric metres.
+      3. Selects evenly spaced camera keyframes around the scan.
+      4. Unprojects each keyframe along its native (u, v) camera pixel scanlines with genuine photo colors.
+      5. Preserves camera-aligned structured quads so squares tile seamlessly like a game texture.
     Returns:
       dense_xyz: (N, 3) float32
       dense_rgb: (N, 3) uint8
     """
     t0 = time.time()
-    logger.info(f"[DENSE-DEPTH] Starting neural unprojection from {sparse_dir}...")
 
     # Parse cameras.bin
     cameras_bin = os.path.join(sparse_dir, "cameras.bin")
@@ -310,7 +312,7 @@ def reconstruct_dense_cloud_from_colmap(
                 fx = fy = params[0]; cx, cy = params[1], params[2]
             cameras[cam_id] = {"w": w, "h": h, "fx": fx, "fy": fy, "cx": cx, "cy": cy}
 
-    # Parse points3D.bin
+    # Parse points3D.bin (scaled to metric metres)
     points3d_bin = os.path.join(sparse_dir, "points3D.bin")
     pts_3d_map = {}
     with open(points3d_bin, "rb") as f:
@@ -322,9 +324,9 @@ def reconstruct_dense_cloud_from_colmap(
             f.read(8)  # error
             track_len = struct.unpack("<Q", f.read(8))[0]
             f.read(track_len * 8)
-            pts_3d_map[pid] = np.array(xyz, dtype=np.float64)
+            pts_3d_map[pid] = np.array(xyz, dtype=np.float64) * scale_factor
 
-    # Parse images.bin
+    # Parse images.bin (scaled camera translations)
     images_bin = os.path.join(sparse_dir, "images.bin")
     registered_frames = []
     with open(images_bin, "rb") as f:
@@ -346,7 +348,7 @@ def reconstruct_dense_cloud_from_colmap(
             pts2d_uv = []
             pts2d_depth = []
             R = qvec2rotmat(np.array([qw, qx, qy, qz]))
-            tvec = np.array([tx, ty, tz], dtype=np.float64)
+            tvec = np.array([tx, ty, tz], dtype=np.float64) * scale_factor
 
             for _ in range(num_pts2d):
                 u, v = struct.unpack("<2d", f.read(16))
@@ -365,18 +367,26 @@ def reconstruct_dense_cloud_from_colmap(
                 "pts2d_depth": np.array(pts2d_depth, dtype=np.float32) if pts2d_depth else np.empty(0),
             })
 
-    logger.info(f"[DENSE-DEPTH] Found {len(registered_frames)} registered frames in SfM.")
+    total_registered = len(registered_frames)
+    logger.info(f"[DENSE-DEPTH] Found {total_registered} registered frames in SfM.")
+
+    if total_registered <= max_keyframes:
+        selected_frames = registered_frames
+    else:
+        indices = [int(round(i * (total_registered - 1) / (max_keyframes - 1))) for i in range(max_keyframes)]
+        selected_frames = [registered_frames[i] for i in indices]
+
+    logger.info(f"[DENSE-DEPTH] Unprojecting {len(selected_frames)} structured scanline keyframes from {total_registered} frames.")
 
     unprojector = DenseDepthUnprojector(device=device)
 
     all_xyz_list = []
     all_rgb_list = []
 
-    # Process each registered frame
-    for idx, frame in enumerate(registered_frames):
+    # Process selected keyframes in scanline order
+    for idx, frame in enumerate(selected_frames):
         img_path = os.path.join(images_dir, frame["name"])
         if not os.path.exists(img_path):
-            # Try finding matching stem
             stem = os.path.splitext(frame["name"])[0]
             matches = [f for f in os.listdir(images_dir) if os.path.splitext(f)[0] == stem]
             if matches:
@@ -409,12 +419,15 @@ def reconstruct_dense_cloud_from_colmap(
 
     combined_xyz = np.vstack(all_xyz_list)
     combined_rgb = np.vstack(all_rgb_list)
-    logger.info(f"[DENSE-DEPTH] Unprojected {len(combined_xyz)} raw points. Downsampling via voxel grid...")
+    logger.info(f"[DENSE-DEPTH] Unprojected {len(combined_xyz)} structured scanline surface points.")
 
-    dense_xyz, dense_rgb = voxel_grid_downsample(
-        combined_xyz, combined_rgb, voxel_size=voxel_size, max_total_points=target_points
-    )
+    # Cap if needed without breaking local scanline continuity
+    if len(combined_xyz) > target_points:
+        step = int(np.ceil(len(combined_xyz) / target_points))
+        if step > 1:
+            combined_xyz = combined_xyz[::step]
+            combined_rgb = combined_rgb[::step]
 
     t1 = time.time()
-    logger.info(f"[DENSE-DEPTH] Completed dense reconstruction in {t1 - t0:.1f}s: {len(dense_xyz)} surface points with authentic footage textures.")
-    return dense_xyz, dense_rgb
+    logger.info(f"[DENSE-DEPTH] Completed dense reconstruction in {t1 - t0:.1f}s: {len(combined_xyz)} surface points with authentic footage textures.")
+    return combined_xyz.astype(np.float32), combined_rgb.astype(np.uint8)
