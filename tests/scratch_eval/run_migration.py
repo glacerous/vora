@@ -1,12 +1,18 @@
+import os
+import sys
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, REPO_ROOT)
+
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(os.path.join(REPO_ROOT, ".env"))
 
 from storage.d1_client import execute_d1_query
 
 def main():
     try:
-        print("Reading migration_012.sql...")
-        with open("db/migration_012.sql", "r") as f:
+        migration_file = os.path.join(REPO_ROOT, "db", "migration_012.sql")
+        print(f"Reading {migration_file}...")
+        with open(migration_file, "r") as f:
             sql = f.read()
             
         print("Executing migration query on D1...")
