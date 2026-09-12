@@ -1039,6 +1039,10 @@ def _reconstruct_thread(
             )
             if not c_res.success:
                 raise RuntimeError(f"Commercial reconstruction failed: {c_res.error_message}")
+            c_pts_bytes = b""
+            if c_res.points3d_ply_path and os.path.exists(c_res.points3d_ply_path):
+                with open(c_res.points3d_ply_path, "rb") as f_pts:
+                    c_pts_bytes = f_pts.read()
             with open(c_res.splat_ply_path or c_res.points3d_ply_path, "rb") as f_ply:
                 c_ply_bytes = f_ply.read()
             c_splat_bytes = b""
@@ -1047,7 +1051,7 @@ def _reconstruct_thread(
                     c_splat_bytes = f_splat.read()
             result = {
                 "uploaded": False,
-                "points3d": c_ply_bytes,
+                "points3d": c_pts_bytes or c_ply_bytes,
                 "splat": c_ply_bytes,  # 3D Gaussian Splat in PLY format for result.ply viewer
                 "splat_binary": c_splat_bytes,
                 "scale_calibration": c_res.scale_calibration,

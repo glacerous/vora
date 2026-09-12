@@ -45,16 +45,17 @@ except ImportError:
 
 
 if commercial_app is not None:
-    @commercial_app.function(image=commercial_image)
+    @commercial_app.function(image=commercial_image, gpu="a10g")
     def get_cloud_colmap_version() -> str:
-        """Sanity-check: return COLMAP version string from inside the container."""
-        import os, subprocess
+        """Sanity-check: return COLMAP version and CUDA status string from inside the container."""
+        import os, subprocess, torch
         env = os.environ.copy()
         env["LD_LIBRARY_PATH"] = f"/opt/colmap/lib:{env.get('LD_LIBRARY_PATH', '')}"
         env["PATH"] = f"/opt/colmap/bin:{env.get('PATH', '')}"
-        res = subprocess.run(["/opt/colmap/bin/colmap", "help"], capture_output=True, text=True, env=env)
-        lines = (res.stdout or res.stderr or "").strip().splitlines()
-        return lines[0] if lines else "COLMAP installed"
+        res = subprocess.run(["/opt/colmap/bin/colmap", "-h"], capture_output=True, text=True, env=env)
+        out = (res.stdout or res.stderr or "")
+        dev_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "None"
+        return f"CUDA: {torch.cuda.is_available()} ({dev_name})\nCOLMAP info:\n{out[:500]}"
 
     @commercial_app.function(image=commercial_image, gpu="a10g", timeout=1200)
     def reconstruct_commercial_cloud(
@@ -339,7 +340,7 @@ if commercial_app is not None:
             np.random.choice(len(sample_indices), min(len(sample_indices), 200))], :]
         dists = np.sqrt(np.sum(diff**2, axis=-1))
         np.fill_diagonal(dists, np.inf)
-        init_scale = np.clip(np.median(np.min(dists, axis=1)), 0.005, 0.2)
+        init_scale = np.clip(np.median(np.min(dists, axis=1)) * 0.3, 0.005, 0.03)
 
         scales = torch.full((N, 3), np.log(init_scale), dtype=torch.float32, device=device).requires_grad_(True)
         opacities = torch.full((N,), -2.1972, dtype=torch.float32, device=device).requires_grad_(True)
@@ -370,6 +371,11 @@ if commercial_app is not None:
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+            # Clamp scales so Gaussians stay tight, sharp, and non-blurry (max 3.5cm)
+            with torch.no_grad():
+                scales.clamp_(max=np.log(0.035))
+
             if it == 1 or it % 100 == 0 or it == num_iterations:
                 loss_history.append({"step": it, "loss": float(loss.item())})
 
@@ -390,8 +396,6 @@ if commercial_app is not None:
             )
 
             # 2. Inria 3DGS compliant PLY (log scale, logit opacity, SH DC coefficients)
-            # GaussianSplats3D PlyParser expects log(scale) to apply Math.exp(),
-            # logit(opacity) to apply sigmoid(), and SH DC (C0=0.28209479) to extract RGB.
             SH_C0 = 0.28209479177387814
             ply_sh0 = (sh0 - 0.5) / SH_C0
             ply_bytes = gsplat.export_splats(
@@ -404,6 +408,53 @@ if commercial_app is not None:
                 format="ply"
             )
 
+            # 3. Dense surface point cloud with RGB vertex colors for Three.js PLYLoader
+            pts_means_np = final_means.cpu().numpy()
+            pts_colors_np = (final_colors.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+            dense_xyz_list = [pts_xyz, pts_means_np]
+            dense_rgb_list = [(np.clip(pts_rgb, 0.0, 1.0) * 255.0).astype(np.uint8), pts_colors_np]
+
+            for dx, dy, dz in [[0.008, 0, 0], [-0.008, 0, 0], [0, 0.008, 0], [0, -0.008, 0], [0, 0, 0.008], [0, 0, -0.008]]:
+                jitter = np.array([dx, dy, dz], dtype=np.float32)
+                dense_xyz_list.append(pts_means_np + jitter)
+                dense_rgb_list.append(pts_colors_np)
+
+            all_xyz = np.vstack(dense_xyz_list).astype(np.float32)
+            all_rgb = np.vstack(dense_rgb_list).astype(np.uint8)
+            total_dense_pts = len(all_xyz)
+
+            pts_buf = io.BytesIO()
+            pts_buf.write((
+                f"ply\n"
+                f"format binary_little_endian 1.0\n"
+                f"element vertex {total_dense_pts}\n"
+                f"property float x\n"
+                f"property float y\n"
+                f"property float z\n"
+                f"property float nx\n"
+                f"property float ny\n"
+                f"property float nz\n"
+                f"property uchar red\n"
+                f"property uchar green\n"
+                f"property uchar blue\n"
+                f"end_header\n"
+            ).encode("ascii"))
+
+            vertex_dtype = np.dtype([
+                ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                ('nx', '<f4'), ('ny', '<f4'), ('nz', '<f4'),
+                ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')
+            ])
+            s_pts = np.zeros(total_dense_pts, dtype=vertex_dtype)
+            s_pts['x'] = all_xyz[:, 0]
+            s_pts['y'] = all_xyz[:, 1]
+            s_pts['z'] = all_xyz[:, 2]
+            s_pts['red'] = all_rgb[:, 0]
+            s_pts['green'] = all_rgb[:, 1]
+            s_pts['blue'] = all_rgb[:, 2]
+            pts_buf.write(s_pts.tobytes())
+            points3d_bytes = pts_buf.getvalue()
+
         # Cleanup
         try:
             shutil.rmtree(workspace_dir)
@@ -411,11 +462,12 @@ if commercial_app is not None:
             pass
 
         t1 = time.time()
-        print(f"[CLOUD-COLMAP] Pipeline done in {t1 - t0:.1f}s: {int(final_means.shape[0])} Gaussians")
+        print(f"[CLOUD-COLMAP] Pipeline done in {t1 - t0:.1f}s: {int(final_means.shape[0])} Gaussians, {total_dense_pts} point cloud vertices")
         return {
             "num_points": int(final_means.shape[0]),
             "ply_bytes": ply_bytes,
             "splat_bytes": splat_bytes,
+            "points3d_bytes": points3d_bytes,
             "scale_calibration": scale_calibration,
             "camera_poses": colmap_poses_out,
             "loss_history": loss_history,
@@ -575,7 +627,7 @@ if commercial_app is not None:
         diff = pts_xyz[sample_indices, None, :] - pts_xyz[sample_indices[np.random.choice(len(sample_indices), min(len(sample_indices), 200))], :]
         dists = np.sqrt(np.sum(diff**2, axis=-1))
         np.fill_diagonal(dists, np.inf)
-        init_scale = np.clip(np.median(np.min(dists, axis=1)), 0.005, 0.2)
+        init_scale = np.clip(np.median(np.min(dists, axis=1)) * 0.3, 0.005, 0.03)
 
         scales = torch.full((N, 3), np.log(init_scale), dtype=torch.float32, device=device).requires_grad_(True)
         opacities = torch.full((N,), -2.1972, dtype=torch.float32, device=device).requires_grad_(True)
@@ -618,6 +670,10 @@ if commercial_app is not None:
             loss.backward()
             optimizer.step()
 
+            # Clamp scales so Gaussians stay tight and crisp (max 3.5cm)
+            with torch.no_grad():
+                scales.clamp_(max=np.log(0.035))
+
             if it == 1 or it % 50 == 0 or it == num_iterations:
                 loss_history.append({"step": it, "loss": float(loss.item())})
 
@@ -652,11 +708,59 @@ if commercial_app is not None:
                 format="ply"
             )
 
+            # 3. Dense surface point cloud with RGB vertex colors for Three.js PLYLoader
+            pts_means_np = final_means.cpu().numpy()
+            pts_colors_np = (final_colors.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+            dense_xyz_list = [pts_xyz, pts_means_np]
+            dense_rgb_list = [(np.clip(pts_rgb, 0.0, 1.0) * 255.0).astype(np.uint8), pts_colors_np]
+
+            for dx, dy, dz in [[0.008, 0, 0], [-0.008, 0, 0], [0, 0.008, 0], [0, -0.008, 0], [0, 0, 0.008], [0, 0, -0.008]]:
+                jitter = np.array([dx, dy, dz], dtype=np.float32)
+                dense_xyz_list.append(pts_means_np + jitter)
+                dense_rgb_list.append(pts_colors_np)
+
+            all_xyz = np.vstack(dense_xyz_list).astype(np.float32)
+            all_rgb = np.vstack(dense_rgb_list).astype(np.uint8)
+            total_dense_pts = len(all_xyz)
+
+            pts_buf = io.BytesIO()
+            pts_buf.write((
+                f"ply\n"
+                f"format binary_little_endian 1.0\n"
+                f"element vertex {total_dense_pts}\n"
+                f"property float x\n"
+                f"property float y\n"
+                f"property float z\n"
+                f"property float nx\n"
+                f"property float ny\n"
+                f"property float nz\n"
+                f"property uchar red\n"
+                f"property uchar green\n"
+                f"property uchar blue\n"
+                f"end_header\n"
+            ).encode("ascii"))
+
+            vertex_dtype = np.dtype([
+                ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+                ('nx', '<f4'), ('ny', '<f4'), ('nz', '<f4'),
+                ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')
+            ])
+            s_pts = np.zeros(total_dense_pts, dtype=vertex_dtype)
+            s_pts['x'] = all_xyz[:, 0]
+            s_pts['y'] = all_xyz[:, 1]
+            s_pts['z'] = all_xyz[:, 2]
+            s_pts['red'] = all_rgb[:, 0]
+            s_pts['green'] = all_rgb[:, 1]
+            s_pts['blue'] = all_rgb[:, 2]
+            pts_buf.write(s_pts.tobytes())
+            points3d_bytes = pts_buf.getvalue()
+
         t1 = time.time()
         return {
             "num_points": int(final_means.shape[0]),
             "splat_bytes": splat_bytes,
             "ply_bytes": ply_bytes,
+            "points3d_bytes": points3d_bytes,
             "loss_history": loss_history,
             "duration_sec": t1 - t0
         }

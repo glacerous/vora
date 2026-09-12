@@ -203,9 +203,9 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
 
                 ply_path = os.path.join(output_dir, "points3d.ply")
                 splat_ply_path = os.path.join(output_dir, "result.ply")
-                splat_path = os.path.join(output_dir, "model.splat")
+                pts_bytes = res.get("points3d_bytes") or ply_bytes
                 with open(ply_path, "wb") as f:
-                    f.write(ply_bytes)
+                    f.write(pts_bytes)
                 with open(splat_ply_path, "wb") as f:
                     f.write(ply_bytes)
                 with open(splat_path, "wb") as f:
@@ -280,8 +280,12 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
             res = fn.remote(bundle_bytes, num_iterations=iterations)
 
             ply_path = os.path.join(output_dir, "points3d.ply")
+            splat_ply_path = os.path.join(output_dir, "result.ply")
             splat_path = os.path.join(output_dir, "model.splat")
+            pts_bytes = res.get("points3d_bytes") or res["ply_bytes"]
             with open(ply_path, "wb") as f:
+                f.write(pts_bytes)
+            with open(splat_ply_path, "wb") as f:
                 f.write(res["ply_bytes"])
             with open(splat_path, "wb") as f:
                 f.write(res["splat_bytes"])

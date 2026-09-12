@@ -984,6 +984,10 @@ def extract_dbh_with_2d_clicks(ply_path: str, P1: np.ndarray, P2: np.ndarray, sc
     yc_2d = float(np.median([c[1] for c in centers_2d]))
 
     center_3d = xc_2d * u1 + yc_2d * u2 + h_target * v
+    if slice_points_all is not None and len(slice_points_all) >= 5:
+        slice_centroid = np.mean(slice_points_all, axis=0)
+        h_proj = np.dot(slice_centroid, v)
+        center_3d = slice_centroid + (h_target - h_proj) * v
 
     slice_count = int(slice_points_all.shape[0])
     mean_err_cm = 0.0
