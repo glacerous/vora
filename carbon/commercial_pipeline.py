@@ -387,12 +387,13 @@ if commercial_app is not None:
             final_opacities = torch.sigmoid(opacities).detach()
             final_colors = torch.clamp(colors.detach(), 0.0, 1.0)
             sh0 = final_colors.unsqueeze(1)
-            shN = torch.empty((final_means.shape[0], 0, 3), device=device, dtype=torch.float32)
+            SH_C0 = 0.28209479177387814
+            ply_sh0 = (sh0 - 0.5) / SH_C0
 
             # 1. Native 32-byte .splat binary (direct linear scale, linear opacity, direct RGB)
             splat_bytes = gsplat.export_splats(
                 means=final_means, scales=final_scales, quats=final_quats,
-                opacities=final_opacities, sh0=sh0, shN=shN, format="splat"
+                opacities=final_opacities, sh0=ply_sh0, shN=shN, format="splat"
             )
 
             # 2. Inria 3DGS compliant PLY (log scale, logit opacity, SH DC coefficients)
@@ -687,17 +688,18 @@ if commercial_app is not None:
             sh0 = final_colors.unsqueeze(1)
             shN = torch.empty((final_means.shape[0], 0, 3), device=final_means.device, dtype=torch.float32)
 
+            SH_C0 = 0.28209479177387814
+            ply_sh0 = (sh0 - 0.5) / SH_C0
+
             splat_bytes = gsplat.export_splats(
                 means=final_means,
                 scales=final_scales,
                 quats=final_quats,
                 opacities=final_opacities,
-                sh0=sh0,
+                sh0=ply_sh0,
                 shN=shN,
                 format="splat"
             )
-            SH_C0 = 0.28209479177387814
-            ply_sh0 = (sh0 - 0.5) / SH_C0
             ply_bytes = gsplat.export_splats(
                 means=final_means,
                 scales=scales.detach(),
