@@ -1055,6 +1055,9 @@ def _reconstruct_thread(
                 "splat": c_ply_bytes,  # 3D Gaussian Splat in PLY format for result.ply viewer
                 "splat_binary": c_splat_bytes,
                 "scale_calibration": c_res.scale_calibration,
+                "geometry_3d": c_res.geometry_3d,
+                "dbh_cm": c_res.dbh_cm,
+                "height_m": c_res.height_m,
             }
         else:
 
@@ -1451,6 +1454,12 @@ def _reconstruct_thread(
                 pass
         
         geom_dict = carbon_est.get("geometry_3d") or {}
+        if (not geom_dict or "error" in geom_dict) and result.get("geometry_3d"):
+            geom_dict = result["geometry_3d"]
+            if carbon_est.get("dbh_cm") is None and result.get("dbh_cm"):
+                carbon_est["dbh_cm"] = result["dbh_cm"]
+            if carbon_est.get("height_m") is None and result.get("height_m"):
+                carbon_est["height_m"] = result["height_m"]
         if sha256_hash:
             geom_dict["ply_sha256"] = sha256_hash
         carbon_est["geometry_3d"] = geom_dict

@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,8 +8,10 @@
     <!-- Modern Premium Typography -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Anton&family=Outfit:wght@300;400;600;800&family=Space+Grotesk:wght@400;700&display=swap" rel="stylesheet">
-    
+    <link
+        href="https://fonts.googleapis.com/css2?family=Anton&family=Outfit:wght@300;400;600;800&family=Space+Grotesk:wght@400;700&display=swap"
+        rel="stylesheet">
+
     <!-- Import map for Three.js and Gaussian Splats 3D library -->
     <script type="importmap">
     {
@@ -49,7 +52,9 @@
         }
 
         /* bg-glow hidden — white bg now used */
-        .bg-glow { display: none; }
+        .bg-glow {
+            display: none;
+        }
 
         #splat-container {
             width: 100%;
@@ -61,7 +66,9 @@
         }
 
         /* Control panel hidden — parent Next.js page owns UI */
-        .control-panel { display: none !important; }
+        .control-panel {
+            display: none !important;
+        }
 
         h1 {
             font-family: var(--font-title);
@@ -144,19 +151,23 @@
             max-width: 90%;
             line-height: 1.4;
         }
+
         .toast-container.show {
             transform: translateX(-50%) translateY(0);
             opacity: 1;
             pointer-events: auto;
         }
+
         .toast-error {
             border: 1px solid rgba(239, 68, 68, 0.3);
             background: rgba(239, 68, 68, 0.95);
         }
+
         .toast-success {
             border: 1px solid rgba(16, 185, 129, 0.3);
             background: rgba(16, 185, 129, 0.95);
         }
+
         .toast-close-btn {
             background: none;
             border: none;
@@ -167,6 +178,7 @@
             opacity: 0.7;
             font-size: 12px;
         }
+
         .toast-close-btn:hover {
             opacity: 1;
         }
@@ -185,7 +197,9 @@
         }
 
         /* Instructions hidden — parent page owns UI */
-        .instructions { display: none !important; }
+        .instructions {
+            display: none !important;
+        }
 
         .instruction-item strong {
             color: var(--text-color);
@@ -206,10 +220,14 @@
             flex-direction: column;
             gap: 10px;
             animation: fadeIn 0.3s ease;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
             min-width: 180px;
         }
-        .rotation-panel.visible { display: flex; }
+
+        .rotation-panel.visible {
+            display: flex;
+        }
+
         .rotation-panel-title {
             font-size: 11px;
             font-weight: 600;
@@ -217,20 +235,23 @@
             color: var(--text-secondary);
             text-transform: uppercase;
         }
+
         .rotation-axis-row {
             display: flex;
             align-items: center;
             gap: 6px;
         }
+
         .axis-label {
             font-size: 12px;
             font-weight: 700;
             width: 20px;
             color: var(--text-color);
         }
+
         .rot-btn {
             flex: 1;
-            background: rgba(8,29,42,0.06);
+            background: rgba(8, 29, 42, 0.06);
             border: 1px solid var(--border-color);
             color: var(--text-color);
             border-radius: 8px;
@@ -239,15 +260,17 @@
             cursor: pointer;
             transition: background 0.15s, border-color 0.15s;
         }
+
         .rot-btn:hover {
-            background: rgba(2,132,199,0.15);
-            border-color: rgba(2,132,199,0.3);
+            background: rgba(2, 132, 199, 0.15);
+            border-color: rgba(2, 132, 199, 0.3);
         }
+
         .rot-reset-btn {
             width: 100%;
             margin-top: 2px;
-            background: rgba(239,68,68,0.1);
-            border: 1px solid rgba(239,68,68,0.25);
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.25);
             color: #b91c1c;
             border-radius: 8px;
             padding: 6px 0;
@@ -256,10 +279,20 @@
             cursor: pointer;
             transition: background 0.15s;
         }
-        .rot-reset-btn:hover { background: rgba(239,68,68,0.2); }
+
+        .rot-reset-btn:hover {
+            background: rgba(239, 68, 68, 0.2);
+        }
+
         /* Orientation toggle hidden — parent page owns UI */
-        .rot-toggle-btn { display: none !important; }
-        .rot-toggle-btn:hover { color: var(--text-color); border-color: rgba(8,29,42,0.3); }
+        .rot-toggle-btn {
+            display: none !important;
+        }
+
+        .rot-toggle-btn:hover {
+            color: var(--text-color);
+            border-color: rgba(8, 29, 42, 0.3);
+        }
 
         /* Render Controls Panel - Floating Top-Left */
         .viewer-controls {
@@ -272,10 +305,11 @@
             border: 1px solid var(--border-color);
             border-radius: 16px;
             padding: 14px 16px;
-            display: none; /* shown after load */
+            display: none;
+            /* shown after load */
             flex-direction: column;
             gap: 10px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
             min-width: 220px;
             animation: fadeIn 0.3s ease;
         }
@@ -293,24 +327,27 @@
             padding: 16px;
             width: 320px;
             color: #f8fafc;
-            box-shadow: 0 12px 40px rgba(0,0,0,0.35);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
             display: none;
             flex-direction: column;
             gap: 10px;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             animation: fadeIn 0.3s ease;
         }
+
         .mrv-card-header {
             display: flex;
             align-items: center;
             justify-content: space-between;
         }
+
         .mrv-tree-title {
             font-size: 15px;
             font-weight: 700;
             color: #38bdf8;
             letter-spacing: 0.02em;
         }
+
         .mrv-badge {
             font-size: 10px;
             font-weight: 700;
@@ -319,13 +356,48 @@
             text-transform: uppercase;
             letter-spacing: 0.05em;
         }
-        .mrv-badge-calibrated { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
-        .mrv-badge-aruco { background: rgba(6, 182, 212, 0.2); color: #22d3ee; border: 1px solid rgba(6, 182, 212, 0.4); }
-        .mrv-badge-vio { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4); }
-        .mrv-badge-prior { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
-        .mrv-badge-uncalibrated { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
-        .mrv-badge-fit-success { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
-        .mrv-badge-fit-fallback { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
+
+        .mrv-badge-calibrated {
+            background: rgba(16, 185, 129, 0.2);
+            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.4);
+        }
+
+        .mrv-badge-aruco {
+            background: rgba(6, 182, 212, 0.2);
+            color: #22d3ee;
+            border: 1px solid rgba(6, 182, 212, 0.4);
+        }
+
+        .mrv-badge-vio {
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+            border: 1px solid rgba(59, 130, 246, 0.4);
+        }
+
+        .mrv-badge-prior {
+            background: rgba(245, 158, 11, 0.2);
+            color: #fbbf24;
+            border: 1px solid rgba(245, 158, 11, 0.4);
+        }
+
+        .mrv-badge-uncalibrated {
+            background: rgba(239, 68, 68, 0.2);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.4);
+        }
+
+        .mrv-badge-fit-success {
+            background: rgba(16, 185, 129, 0.2);
+            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.4);
+        }
+
+        .mrv-badge-fit-fallback {
+            background: rgba(245, 158, 11, 0.2);
+            color: #fbbf24;
+            border: 1px solid rgba(245, 158, 11, 0.4);
+        }
 
         .mrv-species-row {
             font-size: 12px;
@@ -333,6 +405,7 @@
             color: #cbd5e1;
             margin-top: -4px;
         }
+
         .mrv-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -342,25 +415,30 @@
             border-radius: 12px;
             border: 1px solid rgba(255, 255, 255, 0.06);
         }
+
         .mrv-stat {
             display: flex;
             flex-direction: column;
         }
+
         .mrv-stat-label {
             font-size: 9px;
             text-transform: uppercase;
             letter-spacing: 0.06em;
             color: #94a3b8;
         }
+
         .mrv-stat-val {
             font-size: 14px;
             font-weight: 700;
             color: #f1f5f9;
         }
+
         .mrv-stat-sub {
             font-size: 9px;
             color: #64748b;
         }
+
         .mrv-carbon-section {
             display: flex;
             flex-direction: column;
@@ -370,6 +448,7 @@
             border-radius: 10px;
             padding: 8px 12px;
         }
+
         .mrv-carbon-row {
             display: flex;
             justify-content: space-between;
@@ -377,12 +456,14 @@
             font-size: 11px;
             color: #e2e8f0;
         }
+
         .mrv-uncertainty {
             font-size: 10px;
             color: #6ee7b7;
             text-align: right;
             margin-top: 2px;
         }
+
         .mrv-footer-note {
             font-size: 10px;
             color: #94a3b8;
@@ -390,15 +471,22 @@
             border-top: 1px solid rgba(255, 255, 255, 0.08);
             padding-top: 8px;
         }
+
         .embed-mode .viewer-controls {
             top: 85px;
         }
-        .viewer-controls.visible { display: flex; pointer-events: all; }
+
+        .viewer-controls.visible {
+            display: flex;
+            pointer-events: all;
+        }
+
         .control-group {
             display: flex;
             flex-direction: column;
             gap: 4px;
         }
+
         .control-label {
             font-size: 10px;
             font-weight: 700;
@@ -406,8 +494,9 @@
             letter-spacing: 0.05em;
             color: var(--text-secondary);
         }
+
         .control-select {
-            background: rgba(8,29,42,0.06);
+            background: rgba(8, 29, 42, 0.06);
             border: 1px solid var(--border-color);
             color: var(--text-color);
             border-radius: 8px;
@@ -418,9 +507,10 @@
             cursor: pointer;
             width: 100%;
         }
+
         .control-select:hover {
-            background: rgba(2,132,199,0.1);
-            border-color: rgba(2,132,199,0.25);
+            background: rgba(2, 132, 199, 0.1);
+            border-color: rgba(2, 132, 199, 0.25);
         }
 
 
@@ -435,9 +525,11 @@
                 top: 12px !important;
                 left: 12px !important;
             }
+
             .control-label {
                 font-size: 8px !important;
             }
+
             .control-select {
                 padding: 4px 6px !important;
                 font-size: 11px !important;
@@ -451,13 +543,15 @@
             top: 50%;
             transform: translateY(-50%);
             z-index: 10;
-            display: none; /* shown via JS after metrics load */
+            display: none;
+            /* shown via JS after metrics load */
             flex-direction: column;
             gap: 8px;
             width: 200px;
             pointer-events: none;
             animation: fadeIn 0.5s ease;
         }
+
         .carbon-pill {
             background: rgba(255, 255, 255, 0.92);
             backdrop-filter: blur(12px);
@@ -471,9 +565,11 @@
             gap: 1px;
             pointer-events: auto;
         }
+
         .carbon-pill:hover {
             box-shadow: 0 4px 18px rgba(0, 0, 0, 0.12);
         }
+
         .pill-label {
             font-size: 9px;
             font-weight: 700;
@@ -481,6 +577,7 @@
             letter-spacing: 0.07em;
             color: #94a3b8;
         }
+
         .pill-value {
             font-family: 'Outfit', sans-serif;
             font-size: 20px;
@@ -491,6 +588,7 @@
             align-items: baseline;
             gap: 3px;
         }
+
         .pill-unit {
             font-family: 'Outfit', sans-serif;
             font-size: 10px;
@@ -510,11 +608,13 @@
             pointer-events: none;
             display: none;
         }
+
         .anno-line {
             stroke: rgba(8, 29, 42, 0.35);
             stroke-width: 1.5;
             stroke-dasharray: 4 4;
         }
+
         .anno-target {
             fill: #0284c7;
             stroke: #fff;
@@ -522,19 +622,34 @@
         }
 
         @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.6; }
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.6;
+            }
         }
 
         /* Completely hide default spinner and progress bar elements from the library */
         [class*="spinnerOuterContainer"] {
             display: none !important;
         }
+
         .progressBarOuterContainer {
             display: none !important;
         }
@@ -563,351 +678,244 @@
             letter-spacing: 0.05em;
         }
 
-        /* From Uiverse.io by AatreyuShau */ 
+        /* From Uiverse.io by AatreyuShau */
         .loader {
-          scale: 0.75;
-          position: relative;
-          width: 200px;
-          height: 200px;
-          translate: 10px -20px;
+            scale: 0.75;
+            position: relative;
+            width: 200px;
+            height: 200px;
+            translate: 10px -20px;
         }
+
         .loader svg {
-          position: absolute;
-          top: 0;
-          left: 0;
+            position: absolute;
+            top: 0;
+            left: 0;
         }
+
         .head {
-          translate: 27px -30px;
-          z-index: 3;
-          animation: bob 1s infinite ease-in;
+            translate: 27px -30px;
+            z-index: 3;
+            animation: bob 1s infinite ease-in;
         }
+
         .bod {
-          translate: 0px 30px;
-          z-index: 3;
-          animation: bob 1s infinite ease-in-out;
+            translate: 0px 30px;
+            z-index: 3;
+            animation: bob 1s infinite ease-in-out;
         }
+
         .legr {
-          translate: 75px 135px;
-          z-index: 0;
-          animation: rstep 1s infinite ease-in;
+            translate: 75px 135px;
+            z-index: 0;
+            animation: rstep 1s infinite ease-in;
         }
+
         .legr {
-          animation-delay: 0.45s;
+            animation-delay: 0.45s;
         }
 
         .legl {
-          translate: 30px 155px;
-          z-index: 3;
-          animation: lstep 1s infinite ease-in;
+            translate: 30px 155px;
+            z-index: 3;
+            animation: lstep 1s infinite ease-in;
         }
 
         @keyframes bob {
-          0% {
-            transform: translateY(0) rotate(3deg);
-          }
-          5% {
-            transform: translateY(0) rotate(3deg);
-          }
-          25% {
-            transform: translateY(5px) rotate(0deg);
-          }
-          50% {
-            transform: translateY(0px) rotate(-3deg);
-          }
-          70% {
-            transform: translateY(5px) rotate(0deg);
-          }
-          100% {
-            transform: translateY(0) rotate(3deg);
-          }
+            0% {
+                transform: translateY(0) rotate(3deg);
+            }
+
+            5% {
+                transform: translateY(0) rotate(3deg);
+            }
+
+            25% {
+                transform: translateY(5px) rotate(0deg);
+            }
+
+            50% {
+                transform: translateY(0px) rotate(-3deg);
+            }
+
+            70% {
+                transform: translateY(5px) rotate(0deg);
+            }
+
+            100% {
+                transform: translateY(0) rotate(3deg);
+            }
         }
 
         @keyframes lstep {
-          0% {
-            transform: translateY(0) rotate(-5deg);
-          }
-          33% {
-            transform: translateY(-15px) translate(32px) rotate(35deg);
-          }
-          66% {
-            transform: translateY(0) translate(25px) rotate(-25deg);
-          }
-          100% {
-            transform: translateY(0) rotate(-5deg);
-          }
+            0% {
+                transform: translateY(0) rotate(-5deg);
+            }
+
+            33% {
+                transform: translateY(-15px) translate(32px) rotate(35deg);
+            }
+
+            66% {
+                transform: translateY(0) translate(25px) rotate(-25deg);
+            }
+
+            100% {
+                transform: translateY(0) rotate(-5deg);
+            }
         }
 
         @keyframes rstep {
-          0% {
-            transform: translateY(0) translate(0px) rotate(-5deg);
-          }
-          33% {
-            transform: translateY(-10px) translate(30px) rotate(35deg);
-          }
-          66% {
-            transform: translateY(0) translate(20px) rotate(-25deg);
-          }
-          100% {
-            transform: translateY(0) translate(0px) rotate(-5deg);
-          }
+            0% {
+                transform: translateY(0) translate(0px) rotate(-5deg);
+            }
+
+            33% {
+                transform: translateY(-10px) translate(30px) rotate(35deg);
+            }
+
+            66% {
+                transform: translateY(0) translate(20px) rotate(-25deg);
+            }
+
+            100% {
+                transform: translateY(0) translate(0px) rotate(-5deg);
+            }
         }
 
         #gnd {
-          translate: -140px 0;
-          rotate: 10deg;
-          z-index: -1;
-          filter: blur(0.5px) drop-shadow(1px 3px 5px #000000);
-          opacity: 0.25;
-          animation: scroll 5s infinite linear;
+            translate: -140px 0;
+            rotate: 10deg;
+            z-index: -1;
+            filter: blur(0.5px) drop-shadow(1px 3px 5px #000000);
+            opacity: 0.25;
+            animation: scroll 5s infinite linear;
         }
 
         @keyframes scroll {
-          0% {
-            transform: translateY(25px) translate(50px);
-            opacity: 0;
-          }
-          33% {
-            opacity: 0.25;
-          }
-          66% {
-            opacity: 0.25;
-          }
-          to {
-            transform: translateY(-50px) translate(-100px);
-            opacity: 0;
-          }
+            0% {
+                transform: translateY(25px) translate(50px);
+                opacity: 0;
+            }
+
+            33% {
+                opacity: 0.25;
+            }
+
+            66% {
+                opacity: 0.25;
+            }
+
+            to {
+                transform: translateY(-50px) translate(-100px);
+                opacity: 0;
+            }
         }
     </style>
 </head>
+
 <body>
     <!-- Custom Loading Overlay -->
     <div id="custom-loader-container" class="custom-loader-container">
-      <div id="loader-percent-label" class="loader-percent-label">Downloading: 0%</div>
-      <div class="loader">
-        <svg
-          class="legl"
-          version="1.1"
-          xmlns="http://www.w3.org/2000/svg"
-          width="20.69332"
-          height="68.19944"
-          viewBox="0,0,20.69332,68.19944"
-        >
-          <g transform="translate(-201.44063,-235.75466)">
-            <g stroke-miterlimit="10">
-              <path d="" fill="#ffffff" stroke="none" stroke-width="0.5"></path>
-              <path
-                d=""
-                fill-opacity="0.26667"
-                fill="#97affd"
-                stroke-opacity="0.48627"
-                stroke="#ffffff"
-                stroke-width="0"
-              ></path>
-              <path
-                d="M218.11971,301.20087c-2.20708,1.73229 -4.41416,0 -4.41416,0l-1.43017,-1.1437c-1.42954,-1.40829 -3.04351,-2.54728 -4.56954,-3.87927c-0.95183,-0.8308 -2.29837,-1.49883 -2.7652,-2.55433c-0.42378,-0.95815 0.14432,-2.02654 0.29355,-3.03399c0.41251,-2.78499 1.82164,-5.43386 2.41472,-8.22683c1.25895,-4.44509 2.73863,-8.98683 3.15318,-13.54796c0.22615,-2.4883 -0.21672,-5.0155 -0.00278,-7.50605c0.30636,-3.56649 1.24602,-7.10406 1.59992,-10.6738c0.29105,-2.93579 -0.00785,-5.9806 -0.00785,-8.93046c0,0 0,-2.44982 3.12129,-2.44982c3.12129,0 3.12129,2.44982 3.12129,2.44982c0,3.06839 0.28868,6.22201 -0.00786,9.27779c-0.34637,3.56935 -1.30115,7.10906 -1.59992,10.6738c-0.2103,2.50918 0.22586,5.05326 -0.00278,7.56284c-0.43159,4.7371 -1.94029,9.46317 -3.24651,14.07835c-0.47439,2.23403 -1.29927,4.31705 -2.05805,6.47156c-0.18628,0.52896 -0.1402,1.0974 -0.327,1.62624c-0.09463,0.26791 -0.64731,0.47816 -0.50641,0.73323c0.19122,0.34617 0.86423,0.3445 1.2346,0.58502c1.88637,1.22503 3.50777,2.79494 5.03,4.28305l0.96971,0.73991c0,0 2.20708,1.73229 0,3.46457z"
-                fill="none"
-                stroke="#191e2e"
-                stroke-width="7"
-              ></path>
-            </g>
-          </g>
-        </svg>
+        <div id="loader-percent-label" class="loader-percent-label">Downloading: 0%</div>
+        <div class="loader">
+            <svg class="legl" version="1.1" xmlns="http://www.w3.org/2000/svg" width="20.69332" height="68.19944"
+                viewBox="0,0,20.69332,68.19944">
+                <g transform="translate(-201.44063,-235.75466)">
+                    <g stroke-miterlimit="10">
+                        <path d="" fill="#ffffff" stroke="none" stroke-width="0.5"></path>
+                        <path d="" fill-opacity="0.26667" fill="#97affd" stroke-opacity="0.48627" stroke="#ffffff"
+                            stroke-width="0"></path>
+                        <path
+                            d="M218.11971,301.20087c-2.20708,1.73229 -4.41416,0 -4.41416,0l-1.43017,-1.1437c-1.42954,-1.40829 -3.04351,-2.54728 -4.56954,-3.87927c-0.95183,-0.8308 -2.29837,-1.49883 -2.7652,-2.55433c-0.42378,-0.95815 0.14432,-2.02654 0.29355,-3.03399c0.41251,-2.78499 1.82164,-5.43386 2.41472,-8.22683c1.25895,-4.44509 2.73863,-8.98683 3.15318,-13.54796c0.22615,-2.4883 -0.21672,-5.0155 -0.00278,-7.50605c0.30636,-3.56649 1.24602,-7.10406 1.59992,-10.6738c0.29105,-2.93579 -0.00785,-5.9806 -0.00785,-8.93046c0,0 0,-2.44982 3.12129,-2.44982c3.12129,0 3.12129,2.44982 3.12129,2.44982c0,3.06839 0.28868,6.22201 -0.00786,9.27779c-0.34637,3.56935 -1.30115,7.10906 -1.59992,10.6738c-0.2103,2.50918 0.22586,5.05326 -0.00278,7.56284c-0.43159,4.7371 -1.94029,9.46317 -3.24651,14.07835c-0.47439,2.23403 -1.29927,4.31705 -2.05805,6.47156c-0.18628,0.52896 -0.1402,1.0974 -0.327,1.62624c-0.09463,0.26791 -0.64731,0.47816 -0.50641,0.73323c0.19122,0.34617 0.86423,0.3445 1.2346,0.58502c1.88637,1.22503 3.50777,2.79494 5.03,4.28305l0.96971,0.73991c0,0 2.20708,1.73229 0,3.46457z"
+                            fill="none" stroke="#191e2e" stroke-width="7"></path>
+                    </g>
+                </g>
+            </svg>
 
-        <svg
-          class="legr"
-          version="1.1"
-          xmlns="http://www.w3.org/2000/svg"
-          width="41.02537"
-          height="64.85502"
-          viewBox="0,0,41.02537,64.85502"
-        >
-          <g transform="translate(-241.54137,-218.44347)">
-            <g stroke-miterlimit="10">
-              <path
-                d="M279.06674,279.42662c-2.27967,1.98991 -6.08116,0.58804 -6.08116,0.58804l-2.47264,-0.92915c-2.58799,-1.18826 -5.31176,-2.08831 -7.99917,-3.18902c-1.67622,-0.68654 -3.82471,-1.16116 -4.93147,-2.13229c-1.00468,-0.88156 -0.69132,-2.00318 -0.92827,-3.00935c-0.65501,-2.78142 0.12275,-5.56236 -0.287,-8.37565c-0.2181,-4.51941 -0.17458,-9.16283 -1.60696,-13.68334c-0.78143,-2.46614 -2.50162,-4.88125 -3.30086,-7.34796c-1.14452,-3.53236 -1.40387,-7.12078 -2.48433,-10.66266c-0.88858,-2.91287 -2.63779,-5.85389 -3.93351,-8.74177c0,0 -1.07608,-2.39835 3.22395,-2.81415c4.30003,-0.41581 2.41605,1.98254 2.41605,1.98254c1.34779,3.00392 3.13072,6.05282 4.06444,9.0839c1.09065,3.54049 1.33011,7.13302 2.48433,10.66266c0.81245,2.48448 2.5308,4.917 3.31813,7.40431c1.48619,4.69506 1.48366,9.52281 1.71137,14.21503c0.32776,2.25028 0.10631,4.39942 0.00736,6.60975c-0.02429,0.54266 0.28888,1.09302 0.26382,1.63563c-0.01269,0.27488 -0.68173,0.55435 -0.37558,0.78529c0.41549,0.31342 1.34191,0.22213 1.95781,0.40826c3.13684,0.94799 6.06014,2.26892 8.81088,3.52298l1.66093,0.59519c0,0 6.76155,1.40187 4.48187,3.39177z"
-                fill="none"
-                stroke="#000000"
-                stroke-width="7"
-              ></path>
-              <path d="" fill="#ffffff" stroke="none" stroke-width="0.5"></path>
-              <path
-                d=""
-                fill-opacity="0.26667"
-                fill="#97affd"
-                stroke-opacity="0.48627"
-                stroke="#ffffff"
-                stroke-width="0"
-              ></path>
-            </g>
-          </g>
-        </svg>
+            <svg class="legr" version="1.1" xmlns="http://www.w3.org/2000/svg" width="41.02537" height="64.85502"
+                viewBox="0,0,41.02537,64.85502">
+                <g transform="translate(-241.54137,-218.44347)">
+                    <g stroke-miterlimit="10">
+                        <path
+                            d="M279.06674,279.42662c-2.27967,1.98991 -6.08116,0.58804 -6.08116,0.58804l-2.47264,-0.92915c-2.58799,-1.18826 -5.31176,-2.08831 -7.99917,-3.18902c-1.67622,-0.68654 -3.82471,-1.16116 -4.93147,-2.13229c-1.00468,-0.88156 -0.69132,-2.00318 -0.92827,-3.00935c-0.65501,-2.78142 0.12275,-5.56236 -0.287,-8.37565c-0.2181,-4.51941 -0.17458,-9.16283 -1.60696,-13.68334c-0.78143,-2.46614 -2.50162,-4.88125 -3.30086,-7.34796c-1.14452,-3.53236 -1.40387,-7.12078 -2.48433,-10.66266c-0.88858,-2.91287 -2.63779,-5.85389 -3.93351,-8.74177c0,0 -1.07608,-2.39835 3.22395,-2.81415c4.30003,-0.41581 2.41605,1.98254 2.41605,1.98254c1.34779,3.00392 3.13072,6.05282 4.06444,9.0839c1.09065,3.54049 1.33011,7.13302 2.48433,10.66266c0.81245,2.48448 2.5308,4.917 3.31813,7.40431c1.48619,4.69506 1.48366,9.52281 1.71137,14.21503c0.32776,2.25028 0.10631,4.39942 0.00736,6.60975c-0.02429,0.54266 0.28888,1.09302 0.26382,1.63563c-0.01269,0.27488 -0.68173,0.55435 -0.37558,0.78529c0.41549,0.31342 1.34191,0.22213 1.95781,0.40826c3.13684,0.94799 6.06014,2.26892 8.81088,3.52298l1.66093,0.59519c0,0 6.76155,1.40187 4.48187,3.39177z"
+                            fill="none" stroke="#000000" stroke-width="7"></path>
+                        <path d="" fill="#ffffff" stroke="none" stroke-width="0.5"></path>
+                        <path d="" fill-opacity="0.26667" fill="#97affd" stroke-opacity="0.48627" stroke="#ffffff"
+                            stroke-width="0"></path>
+                    </g>
+                </g>
+            </svg>
 
-        <div class="bod">
-          <svg
-            version="1.1"
-            xmlns="http://www.w3.org/2000/svg"
-            width="144.10576"
-            height="144.91623"
-            viewBox="0,0,144.10576,144.91623"
-          >
-            <g transform="translate(-164.41679,-112.94712)">
-              <g stroke-miterlimit="10">
-                <path
-                  d="M166.9168,184.02633c0,-36.49454 35.0206,-66.07921 72.05288,-66.07921c37.03228,0 67.05288,29.58467 67.05288,66.07921c0,6.94489 -1.08716,13.63956 -3.10292,19.92772c-2.71464,8.46831 -7.1134,16.19939 -12.809,22.81158c-2.31017,2.68194 -7.54471,12.91599 -7.54471,12.91599c0,0 -5.46714,-1.18309 -8.44434,0.6266c-3.86867,2.35159 -10.95356,10.86714 -10.95356,10.86714c0,0 -6.96906,-3.20396 -9.87477,-2.58085c-2.64748,0.56773 -6.72538,5.77072 -6.72538,5.77072c0,0 -5.5023,-4.25969 -7.5982,-4.25969c-3.08622,0 -9.09924,3.48259 -9.09924,3.48259c0,0 -6.0782,-5.11244 -9.00348,-5.91884c-4.26461,-1.17561 -12.23343,0.75049 -12.23343,0.75049c0,0 -5.18164,-8.26065 -7.60688,-9.90388c-3.50443,-2.37445 -8.8271,-3.95414 -8.8271,-3.95414c0,0 -5.33472,-8.81718 -7.27019,-11.40895c-4.81099,-6.44239 -13.46422,-9.83437 -15.65729,-17.76175c-1.53558,-5.55073 -2.35527,-21.36472 -2.35527,-21.36472z"
-                  fill="#191e2e"
-                  stroke="#000000"
-                  stroke-width="5"
-                  stroke-linecap="butt"
-                ></path>
-                <path
-                  d="M167.94713,180c0,-37.03228 35.0206,-67.05288 72.05288,-67.05288c37.03228,0 67.05288,30.0206 67.05288,67.05288c0,7.04722 -1.08716,13.84053 -3.10292,20.22135c-2.71464,8.59309 -7.1134,16.43809 -12.809,23.14771c-2.31017,2.72146 -7.54471,13.1063 -7.54471,13.1063c0,0 -5.46714,-1.20052 -8.44434,0.63584c-3.86867,2.38624 -10.95356,11.02726 -10.95356,11.02726c0,0 -6.96906,-3.25117 -9.87477,-2.61888c-2.64748,0.5761 -6.72538,5.85575 -6.72538,5.85575c0,0 -5.5023,-4.32246 -7.5982,-4.32246c-3.08622,0 -9.09924,3.5339 -9.09924,3.5339c0,0 -6.0782,-5.18777 -9.00348,-6.00605c-4.26461,-1.19293 -12.23343,0.76155 -12.23343,0.76155c0,0 -5.18164,-8.38236 -7.60688,-10.04981c-3.50443,-2.40943 -8.8271,-4.0124 -8.8271,-4.0124c0,0 -5.33472,-8.9471 -7.27019,-11.57706c-4.81099,-6.53732 -13.46422,-9.97928 -15.65729,-18.02347c-1.53558,-5.63252 -2.35527,-21.67953 -2.35527,-21.67953z"
-                  fill="#191e2e"
-                  stroke="none"
-                  stroke-width="0"
-                  stroke-linecap="butt"
-                ></path>
-                <path
-                  d=""
-                  fill="#ffffff"
-                  stroke="none"
-                  stroke-width="0.5"
-                  stroke-linecap="butt"
-                ></path>
-                <path
-                  d=""
-                  fill-opacity="0.26667"
-                  fill="#97affd"
-                  stroke-opacity="0.48627"
-                  stroke="#ffffff"
-                  stroke-width="0"
-                  stroke-linecap="butt"
-                ></path>
-                <path
-                  d="M216.22445,188.06994c0,0 1.02834,11.73245 -3.62335,21.11235c-4.65169,9.3799 -13.06183,10.03776 -13.06183,10.03776c0,0 7.0703,-3.03121 10.89231,-10.7381c4.34839,-8.76831 5.79288,-20.41201 5.79288,-20.41201z"
-                  fill="none"
-                  stroke="#2f3a50"
-                  stroke-width="3"
-                  stroke-linecap="round"
-                ></path>
-              </g>
-            </g>
-          </svg>
+            <div class="bod">
+                <svg version="1.1" xmlns="http://www.w3.org/2000/svg" width="144.10576" height="144.91623"
+                    viewBox="0,0,144.10576,144.91623">
+                    <g transform="translate(-164.41679,-112.94712)">
+                        <g stroke-miterlimit="10">
+                            <path
+                                d="M166.9168,184.02633c0,-36.49454 35.0206,-66.07921 72.05288,-66.07921c37.03228,0 67.05288,29.58467 67.05288,66.07921c0,6.94489 -1.08716,13.63956 -3.10292,19.92772c-2.71464,8.46831 -7.1134,16.19939 -12.809,22.81158c-2.31017,2.68194 -7.54471,12.91599 -7.54471,12.91599c0,0 -5.46714,-1.18309 -8.44434,0.6266c-3.86867,2.35159 -10.95356,10.86714 -10.95356,10.86714c0,0 -6.96906,-3.20396 -9.87477,-2.58085c-2.64748,0.56773 -6.72538,5.77072 -6.72538,5.77072c0,0 -5.5023,-4.25969 -7.5982,-4.25969c-3.08622,0 -9.09924,3.48259 -9.09924,3.48259c0,0 -6.0782,-5.11244 -9.00348,-5.91884c-4.26461,-1.17561 -12.23343,0.75049 -12.23343,0.75049c0,0 -5.18164,-8.26065 -7.60688,-9.90388c-3.50443,-2.37445 -8.8271,-3.95414 -8.8271,-3.95414c0,0 -5.33472,-8.81718 -7.27019,-11.40895c-4.81099,-6.44239 -13.46422,-9.83437 -15.65729,-17.76175c-1.53558,-5.55073 -2.35527,-21.36472 -2.35527,-21.36472z"
+                                fill="#191e2e" stroke="#000000" stroke-width="5" stroke-linecap="butt"></path>
+                            <path
+                                d="M167.94713,180c0,-37.03228 35.0206,-67.05288 72.05288,-67.05288c37.03228,0 67.05288,30.0206 67.05288,67.05288c0,7.04722 -1.08716,13.84053 -3.10292,20.22135c-2.71464,8.59309 -7.1134,16.43809 -12.809,23.14771c-2.31017,2.72146 -7.54471,13.1063 -7.54471,13.1063c0,0 -5.46714,-1.20052 -8.44434,0.63584c-3.86867,2.38624 -10.95356,11.02726 -10.95356,11.02726c0,0 -6.96906,-3.25117 -9.87477,-2.61888c-2.64748,0.5761 -6.72538,5.85575 -6.72538,5.85575c0,0 -5.5023,-4.32246 -7.5982,-4.32246c-3.08622,0 -9.09924,3.5339 -9.09924,3.5339c0,0 -6.0782,-5.18777 -9.00348,-6.00605c-4.26461,-1.19293 -12.23343,0.76155 -12.23343,0.76155c0,0 -5.18164,-8.38236 -7.60688,-10.04981c-3.50443,-2.40943 -8.8271,-4.0124 -8.8271,-4.0124c0,0 -5.33472,-8.9471 -7.27019,-11.57706c-4.81099,-6.53732 -13.46422,-9.97928 -15.65729,-18.02347c-1.53558,-5.63252 -2.35527,-21.67953 -2.35527,-21.67953z"
+                                fill="#191e2e" stroke="none" stroke-width="0" stroke-linecap="butt"></path>
+                            <path d="" fill="#ffffff" stroke="none" stroke-width="0.5" stroke-linecap="butt"></path>
+                            <path d="" fill-opacity="0.26667" fill="#97affd" stroke-opacity="0.48627" stroke="#ffffff"
+                                stroke-width="0" stroke-linecap="butt"></path>
+                            <path
+                                d="M216.22445,188.06994c0,0 1.02834,11.73245 -3.62335,21.11235c-4.65169,9.3799 -13.06183,10.03776 -13.06183,10.03776c0,0 7.0703,-3.03121 10.89231,-10.7381c4.34839,-8.76831 5.79288,-20.41201 5.79288,-20.41201z"
+                                fill="none" stroke="#2f3a50" stroke-width="3" stroke-linecap="round"></path>
+                        </g>
+                    </g>
+                </svg>
 
-          <svg
-            class="head"
-            version="1.1"
-            xmlns="http://www.w3.org/2000/svg"
-            width="115.68559"
-            height="88.29441"
-            viewBox="0,0,115.68559,88.29441"
-          >
-            <g transform="translate(-191.87889,-75.62023)">
-              <g stroke-miterlimit="10">
-                <path
-                  d=""
-                  fill="#ffffff"
-                  stroke="none"
-                  stroke-width="0.5"
-                  stroke-linecap="butt"
-                ></path>
-                <path
-                  d="M195.12889,128.77752c0,-26.96048 21.33334,-48.81626 47.64934,-48.81626c26.316,0 47.64935,21.85578 47.64935,48.81626c0,0.60102 -9.22352,20.49284 -9.22352,20.49284l-7.75885,0.35623l-7.59417,6.15039l-8.64295,-1.74822l-11.70703,6.06119l-6.38599,-4.79382l-6.45999,2.36133l-7.01451,-7.38888l-8.11916,1.29382l-6.19237,-6.07265l-7.6263,-1.37795l-4.19835,-7.87062l-4.24236,-4.16907c0,0 -0.13314,-2.0999 -0.13314,-3.29458z"
-                  fill="none"
-                  stroke="#2f3a50"
-                  stroke-width="6"
-                  stroke-linecap="butt"
-                ></path>
-                <path
-                  d="M195.31785,124.43649c0,-26.96048 21.33334,-48.81626 47.64934,-48.81626c26.316,0 47.64935,21.85578 47.64935,48.81626c0,1.03481 -0.08666,2.8866 -0.08666,2.8866c0,0 16.8538,15.99287 16.21847,17.23929c-0.66726,1.30905 -23.05667,-4.14265 -23.05667,-4.14265l-2.29866,4.5096l-7.75885,0.35623l-7.59417,6.15039l-8.64295,-1.74822l-11.70703,6.06119l-6.38599,-4.79382l-6.45999,2.36133l-7.01451,-7.38888l-8.11916,1.29382l-6.19237,-6.07265l-7.6263,-1.37795l-4.19835,-7.87062l-4.24236,-4.16907c0,0 -0.13314,-2.0999 -0.13314,-3.29458z"
-                  fill="#191e2e"
-                  stroke-opacity="0.48627"
-                  stroke="#ffffff"
-                  stroke-width="0"
-                  stroke-linecap="butt"
-                ></path>
-                <path
-                  d="M271.10348,122.46768l10.06374,-3.28166l24.06547,24.28424"
-                  fill="none"
-                  stroke="#2f3a50"
-                  stroke-width="6"
-                  stroke-linecap="round"
-                ></path>
-                <path
-                  d="M306.56448,144.85764l-41.62024,-8.16845l2.44004,-7.87698"
-                  fill="none"
-                  stroke="#000000"
-                  stroke-width="3.5"
-                  stroke-linecap="round"
-                ></path>
-                <path
-                  d="M276.02738,115.72434c-0.66448,-4.64715 2.56411,-8.95308 7.21127,-9.61756c4.64715,-0.66448 8.95309,2.56411 9.61757,7.21126c0.46467,3.24972 -1.94776,8.02206 -5.96624,9.09336c-2.11289,-1.73012 -5.08673,-5.03426 -5.08673,-5.03426c0,0 -4.12095,1.16329 -4.60481,1.54229c-0.16433,-0.04891 -0.62732,-0.38126 -0.72803,-0.61269c-0.30602,-0.70328 -0.36302,-2.02286 -0.44303,-2.58239z"
-                  fill="#ffffff"
-                  stroke="none"
-                  stroke-width="0.5"
-                  stroke-linecap="butt"
-                ></path>
-                <path
-                  d="M242.49281,125.6424c0,-4.69442 3.80558,-8.5 8.5,-8.5c4.69442,0 8.5,3.80558 8.5,8.5c0,4.69442 -3.80558,8.5 -8.5,8.5c-4.69442,0 -8.5,-3.80558 -8.5,-8.5z"
-                  fill="#ffffff"
-                  stroke="none"
-                  stroke-width="0.5"
-                  stroke-linecap="butt"
-                ></path>
-                <path
-                  d=""
-                  fill-opacity="0.26667"
-                  fill="#97affd"
-                  stroke-opacity="0.48627"
-                  stroke="#ffffff"
-                  stroke-width="0"
-                  stroke-linecap="butt"
-                ></path>
-              </g>
-            </g>
-          </svg>
+                <svg class="head" version="1.1" xmlns="http://www.w3.org/2000/svg" width="115.68559" height="88.29441"
+                    viewBox="0,0,115.68559,88.29441">
+                    <g transform="translate(-191.87889,-75.62023)">
+                        <g stroke-miterlimit="10">
+                            <path d="" fill="#ffffff" stroke="none" stroke-width="0.5" stroke-linecap="butt"></path>
+                            <path
+                                d="M195.12889,128.77752c0,-26.96048 21.33334,-48.81626 47.64934,-48.81626c26.316,0 47.64935,21.85578 47.64935,48.81626c0,0.60102 -9.22352,20.49284 -9.22352,20.49284l-7.75885,0.35623l-7.59417,6.15039l-8.64295,-1.74822l-11.70703,6.06119l-6.38599,-4.79382l-6.45999,2.36133l-7.01451,-7.38888l-8.11916,1.29382l-6.19237,-6.07265l-7.6263,-1.37795l-4.19835,-7.87062l-4.24236,-4.16907c0,0 -0.13314,-2.0999 -0.13314,-3.29458z"
+                                fill="none" stroke="#2f3a50" stroke-width="6" stroke-linecap="butt"></path>
+                            <path
+                                d="M195.31785,124.43649c0,-26.96048 21.33334,-48.81626 47.64934,-48.81626c26.316,0 47.64935,21.85578 47.64935,48.81626c0,1.03481 -0.08666,2.8866 -0.08666,2.8866c0,0 16.8538,15.99287 16.21847,17.23929c-0.66726,1.30905 -23.05667,-4.14265 -23.05667,-4.14265l-2.29866,4.5096l-7.75885,0.35623l-7.59417,6.15039l-8.64295,-1.74822l-11.70703,6.06119l-6.38599,-4.79382l-6.45999,2.36133l-7.01451,-7.38888l-8.11916,1.29382l-6.19237,-6.07265l-7.6263,-1.37795l-4.19835,-7.87062l-4.24236,-4.16907c0,0 -0.13314,-2.0999 -0.13314,-3.29458z"
+                                fill="#191e2e" stroke-opacity="0.48627" stroke="#ffffff" stroke-width="0"
+                                stroke-linecap="butt"></path>
+                            <path d="M271.10348,122.46768l10.06374,-3.28166l24.06547,24.28424" fill="none"
+                                stroke="#2f3a50" stroke-width="6" stroke-linecap="round"></path>
+                            <path d="M306.56448,144.85764l-41.62024,-8.16845l2.44004,-7.87698" fill="none"
+                                stroke="#000000" stroke-width="3.5" stroke-linecap="round"></path>
+                            <path
+                                d="M276.02738,115.72434c-0.66448,-4.64715 2.56411,-8.95308 7.21127,-9.61756c4.64715,-0.66448 8.95309,2.56411 9.61757,7.21126c0.46467,3.24972 -1.94776,8.02206 -5.96624,9.09336c-2.11289,-1.73012 -5.08673,-5.03426 -5.08673,-5.03426c0,0 -4.12095,1.16329 -4.60481,1.54229c-0.16433,-0.04891 -0.62732,-0.38126 -0.72803,-0.61269c-0.30602,-0.70328 -0.36302,-2.02286 -0.44303,-2.58239z"
+                                fill="#ffffff" stroke="none" stroke-width="0.5" stroke-linecap="butt"></path>
+                            <path
+                                d="M242.49281,125.6424c0,-4.69442 3.80558,-8.5 8.5,-8.5c4.69442,0 8.5,3.80558 8.5,8.5c0,4.69442 -3.80558,8.5 -8.5,8.5c-4.69442,0 -8.5,-3.80558 -8.5,-8.5z"
+                                fill="#ffffff" stroke="none" stroke-width="0.5" stroke-linecap="butt"></path>
+                            <path d="" fill-opacity="0.26667" fill="#97affd" stroke-opacity="0.48627" stroke="#ffffff"
+                                stroke-width="0" stroke-linecap="butt"></path>
+                        </g>
+                    </g>
+                </svg>
+            </div>
+
+            <svg id="gnd" version="1.1" xmlns="http://www.w3.org/2000/svg" width="475" height="530"
+                viewBox="0,0,163.40011,85.20095">
+                <g transform="translate(-176.25,-207.64957)">
+                    <g stroke="#000000" stroke-width="2.5" stroke-linecap="round" stroke-miterlimit="10">
+                        <path
+                            d="M295.5,273.1829c0,0 -57.38915,6.69521 -76.94095,-9.01465c-13.65063,-10.50609 15.70098,-20.69467 -2.5451,-19.94465c-30.31027,2.05753 -38.51396,-26.84135 -38.51396,-26.84135c0,0 6.50084,13.30023 18.93224,19.17888c9.53286,4.50796 26.23632,-1.02541 32.09529,4.95137c3.62417,3.69704 2.8012,6.33005 0.66517,8.49452c-3.79415,3.84467 -11.7312,6.21103 -6.24682,10.43645c22.01082,16.95812 72.55412,12.73944 72.55412,12.73944z"
+                            fill="#000000"></path>
+                        <path
+                            d="M338.92138,217.76285c0,0 -17.49626,12.55408 -45.36424,10.00353c-8.39872,-0.76867 -17.29557,-6.23066 -17.29557,-6.23066c0,0 3.06461,-2.23972 15.41857,0.72484c26.30467,6.31228 47.24124,-4.49771 47.24124,-4.49771z"
+                            fill="#000000"></path>
+                        <path d="M209.14443,223.00182l1.34223,15.4356l-10.0667,-15.4356" fill="none"></path>
+                        <path d="M198.20391,230.41806l12.95386,7.34824l6.71113,-12.08004" fill="none"></path>
+                        <path d="M211.19621,238.53825l8.5262,-6.09014" fill="none"></path>
+                        <path d="M317.57068,215.80173l5.27812,6.49615l0.40601,-13.39831" fill="none"></path>
+                        <path d="M323.66082,222.70389l6.09014,-9.33822" fill="none"></path>
+                    </g>
+                </g>
+            </svg>
         </div>
-
-        <svg
-          id="gnd"
-          version="1.1"
-          xmlns="http://www.w3.org/2000/svg"
-          width="475"
-          height="530"
-          viewBox="0,0,163.40011,85.20095"
-        >
-          <g transform="translate(-176.25,-207.64957)">
-            <g
-              stroke="#000000"
-              stroke-width="2.5"
-              stroke-linecap="round"
-              stroke-miterlimit="10"
-            >
-              <path
-                d="M295.5,273.1829c0,0 -57.38915,6.69521 -76.94095,-9.01465c-13.65063,-10.50609 15.70098,-20.69467 -2.5451,-19.94465c-30.31027,2.05753 -38.51396,-26.84135 -38.51396,-26.84135c0,0 6.50084,13.30023 18.93224,19.17888c9.53286,4.50796 26.23632,-1.02541 32.09529,4.95137c3.62417,3.69704 2.8012,6.33005 0.66517,8.49452c-3.79415,3.84467 -11.7312,6.21103 -6.24682,10.43645c22.01082,16.95812 72.55412,12.73944 72.55412,12.73944z"
-                fill="#000000"
-              ></path>
-              <path
-                d="M338.92138,217.76285c0,0 -17.49626,12.55408 -45.36424,10.00353c-8.39872,-0.76867 -17.29557,-6.23066 -17.29557,-6.23066c0,0 3.06461,-2.23972 15.41857,0.72484c26.30467,6.31228 47.24124,-4.49771 47.24124,-4.49771z"
-                fill="#000000"
-              ></path>
-              <path
-                d="M209.14443,223.00182l1.34223,15.4356l-10.0667,-15.4356"
-                fill="none"
-              ></path>
-              <path
-                d="M198.20391,230.41806l12.95386,7.34824l6.71113,-12.08004"
-                fill="none"
-              ></path>
-              <path d="M211.19621,238.53825l8.5262,-6.09014" fill="none"></path>
-              <path
-                d="M317.57068,215.80173l5.27812,6.49615l0.40601,-13.39831"
-                fill="none"
-              ></path>
-              <path d="M323.66082,222.70389l6.09014,-9.33822" fill="none"></path>
-            </g>
-          </g>
-        </svg>
-      </div>
     </div>
     <div class="bg-glow"></div>
 
@@ -937,15 +945,16 @@
                 <span class="control-label">Point Thickness</span>
                 <span id="point-size-val" style="font-size: 11px; font-weight: 700; color: #0284c7;">0.018m</span>
             </div>
-            <input type="range" id="point-size-slider" min="0.005" max="0.060" step="0.002" value="0.018" style="width: 100%; accent-color: #0284c7; cursor: pointer; height: 4px; margin-top: 4px;" />
+            <input type="range" id="point-size-slider" min="0.005" max="0.060" step="0.002" value="0.018"
+                style="width: 100%; accent-color: #0284c7; cursor: pointer; height: 4px; margin-top: 4px;" />
         </div>
     </div>
-
     <!-- Control Panel -->
     <div class="control-panel">
         <h1>InstantSplat 3D Viewer</h1>
-        <div class="subtitle">WebGL viewer for Gaussian Splatting models reconstructed using InstantSplat on Modal.</div>
-        
+        <div class="subtitle">WebGL viewer for Gaussian Splatting models reconstructed using InstantSplat on Modal.
+        </div>
+
         <div class="meta-group">
             <div class="meta-item">
                 <span class="meta-label">Splat Path</span>
@@ -968,7 +977,7 @@
             </div>
         </div>
         <div class="mrv-species-row" id="mrv-species-name">Forest Scan Analysis</div>
-        
+
         <div class="mrv-grid">
             <div class="mrv-stat">
                 <span class="mrv-stat-label">DBH (Diameter)</span>
@@ -1003,14 +1012,15 @@
             </div>
             <div class="mrv-uncertainty" id="mrv-uncertainty-val">±15% Allometric Uncertainty Interval</div>
         </div>
-        
+
         <div class="mrv-footer-note" id="mrv-scale-note">
             Scale: MASt3R metric geometric prior (~5-9% relative)
         </div>
     </div>
 
     <!-- Scene Orientation Toggle Button (shown after load) -->
-    <button class="rot-toggle-btn" id="rot-toggle" onclick="document.getElementById('rot-panel').classList.toggle('visible')">⟳ Orientation</button>
+    <button class="rot-toggle-btn" id="rot-toggle"
+        onclick="document.getElementById('rot-panel').classList.toggle('visible')">⟳ Orientation</button>
 
     <!-- Scene Rotation Controls -->
     <div class="rotation-panel" id="rot-panel">
@@ -1034,14 +1044,16 @@
     </div>
 
     <!-- Interactions Instruction -->
-    <div class="instructions" style="border-radius: 12px; padding: 10px 20px; font-size: 11px; max-width: 90%; flex-wrap: wrap; justify-content: center;">
+    <div class="instructions"
+        style="border-radius: 12px; padding: 10px 20px; font-size: 11px; max-width: 90%; flex-wrap: wrap; justify-content: center;">
         <span class="instruction-item">🖱️ <strong>Left Click + Drag</strong> to Orbit</span>
         <span class="instruction-item">🖱️ <strong>Right Click + Drag</strong> to Pan</span>
         <span class="instruction-item">📜 <strong>Scroll</strong> to Zoom</span>
         <span class="instruction-item">⌨️ <strong>WASD</strong> to Fly</span>
         <span class="instruction-item">⌨️ <strong>Q/E</strong> for Up/Down</span>
         <span class="instruction-item">⚡ <strong>Shift</strong> Speed Boost</span>
-        <span class="instruction-item">⚙️ <strong>[ / ]</strong> Adjust Flight Speed: <span id="speed-indicator">0.05</span></span>
+        <span class="instruction-item">⚙️ <strong>[ / ]</strong> Adjust Flight Speed: <span
+                id="speed-indicator">0.05</span></span>
     </div>
 
     <script type="module">
@@ -1063,13 +1075,13 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ level, message })
-            }).catch(() => {});
+            }).catch(() => { });
         }
 
-        console.log = function() { originalLog.apply(console, arguments); sendLog('LOG', arguments); };
-        console.error = function() { originalError.apply(console, arguments); sendLog('ERROR', arguments); };
-        console.info = function() { originalInfo.apply(console, arguments); sendLog('INFO', arguments); };
-        console.warn = function() { originalWarn.apply(console, arguments); sendLog('WARN', arguments); };
+        console.log = function () { originalLog.apply(console, arguments); sendLog('LOG', arguments); };
+        console.error = function () { originalError.apply(console, arguments); sendLog('ERROR', arguments); };
+        console.info = function () { originalInfo.apply(console, arguments); sendLog('INFO', arguments); };
+        console.warn = function () { originalWarn.apply(console, arguments); sendLog('WARN', arguments); };
 
         window.addEventListener('error', (event) => {
             sendLog('UNHANDLED', [event.error || event.message]);
@@ -1092,15 +1104,15 @@
 
         function _postTiming(phase, ms, extra) {
             const payload = JSON.stringify({ type: 'vora_timing', phase, ms: Math.round(ms), extra: extra || null });
-            try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(payload); } catch(e) {}
-            try { window.parent && window.parent.postMessage(JSON.parse(payload), '*'); } catch(e) {}
+            try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(payload); } catch (e) { }
+            try { window.parent && window.parent.postMessage(JSON.parse(payload), '*'); } catch (e) { }
             console.info('[VORA TIMING]', phase, Math.round(ms) + 'ms', extra ? JSON.stringify(extra) : '');
         }
 
         // Intercept XHR/fetch to measure (a) network phase
         // We wrap fetch at the module level — captures the .ksplat/.ply download
         const _origFetch = window.fetch;
-        window.fetch = function(input, init) {
+        window.fetch = function (input, init) {
             const url = typeof input === 'string' ? input : (input && input.url);
             const isSplatFile = url && (url.endsWith('.ksplat') || url.endsWith('.ply') || url.endsWith('.splat') || url.includes('tree_scans'));
             if (isSplatFile) {
@@ -1197,9 +1209,9 @@
             _postTiming('lib_init', _tLibInitEnd - _tLibInitStart, {
                 sincePageLoad: Math.round(_tLibInitEnd - _t0)
             });
-            
+
             statusBadge.textContent = "Loading Splat...";
-            
+
             // (a) Network fetch start — track when addSplatScene begins downloading
             const _tSplatFetchStart = performance.now();
             let _splatFetchPhaseReported = false;
@@ -1223,212 +1235,212 @@
                     }
                 }
             })
-            .then(() => {
-                // (b) parse/init complete — time from fetch-start to scene ready
-                const _tSceneReady = performance.now();
-                const _totalFetchAndParse = _tSceneReady - _tSplatFetchStart;
-                _postTiming('splat_parse_and_init', _totalFetchAndParse, {
-                    sincePageLoad: Math.round(_tSceneReady - _t0),
-                    url: SPLAT_PATH
-                });
+                .then(() => {
+                    // (b) parse/init complete — time from fetch-start to scene ready
+                    const _tSceneReady = performance.now();
+                    const _totalFetchAndParse = _tSceneReady - _tSplatFetchStart;
+                    _postTiming('splat_parse_and_init', _totalFetchAndParse, {
+                        sincePageLoad: Math.round(_tSceneReady - _t0),
+                        url: SPLAT_PATH
+                    });
 
-                // Notify parent (iframe or React Native bridge)
-                const _sceneLoadedMsg = 'vora_scene_loaded';
-                try { window.parent.postMessage(_sceneLoadedMsg, '*'); } catch (e) {}
-                try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(_sceneLoadedMsg); } catch (e) {}
+                    // Notify parent (iframe or React Native bridge)
+                    const _sceneLoadedMsg = 'vora_scene_loaded';
+                    try { window.parent.postMessage(_sceneLoadedMsg, '*'); } catch (e) { }
+                    try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(_sceneLoadedMsg); } catch (e) { }
 
-                const loaderEl = document.getElementById('custom-loader-container');
-                if (loaderEl) {
-                    loaderEl.style.transition = 'opacity 0.4s ease, visibility 0.4s';
-                    loaderEl.style.opacity = 0;
-                    loaderEl.style.visibility = 'hidden';
-                    setTimeout(() => {
-                        loaderEl.remove();
-                    }, 400);
-                }
-                currentSpeed = 0.05;
-                const speedIndicator = document.getElementById('speed-indicator');
+                    const loaderEl = document.getElementById('custom-loader-container');
+                    if (loaderEl) {
+                        loaderEl.style.transition = 'opacity 0.4s ease, visibility 0.4s';
+                        loaderEl.style.opacity = 0;
+                        loaderEl.style.visibility = 'hidden';
+                        setTimeout(() => {
+                            loaderEl.remove();
+                        }, 400);
+                    }
+                    currentSpeed = 0.05;
+                    const speedIndicator = document.getElementById('speed-indicator');
 
-                statusBadge.textContent = "Active";
-                statusBadge.className = "status-badge success";
-                window.viewer = viewer;
+                    statusBadge.textContent = "Active";
+                    statusBadge.className = "status-badge success";
+                    window.viewer = viewer;
 
-                // Start the render loop FIRST so viewer.controls is initialized
-                viewer.start();
+                    // Start the render loop FIRST so viewer.controls is initialized
+                    viewer.start();
 
-                // (c) Measure first frame render time — wait for next rAF after start()
-                requestAnimationFrame(() => {
+                    // (c) Measure first frame render time — wait for next rAF after start()
                     requestAnimationFrame(() => {
-                        _tFirstFrameRendered = performance.now();
-                        _postTiming('first_frame_render', _tFirstFrameRendered - _tSceneReady, {
-                            totalSincePageLoad: Math.round(_tFirstFrameRendered - _t0)
+                        requestAnimationFrame(() => {
+                            _tFirstFrameRendered = performance.now();
+                            _postTiming('first_frame_render', _tFirstFrameRendered - _tSceneReady, {
+                                totalSincePageLoad: Math.round(_tFirstFrameRendered - _t0)
+                            });
                         });
                     });
-                });
 
-                // Create the scene-root sync group for CAD/point cloud objects.
-                // Its matrix is kept in sync with splatMesh every frame so that
-                // scene rotations from the rotation panel propagate correctly
-                // to the overlay and PLY point cloud without double-transforming.
-                syncGroup = new THREE.Group();
-                syncGroup.name = 'vora_sync_group';
-                syncGroup.matrixAutoUpdate = false;
-                viewer.threeScene.add(syncGroup);
+                    // Create the scene-root sync group for CAD/point cloud objects.
+                    // Its matrix is kept in sync with splatMesh every frame so that
+                    // scene rotations from the rotation panel propagate correctly
+                    // to the overlay and PLY point cloud without double-transforming.
+                    syncGroup = new THREE.Group();
+                    syncGroup.name = 'vora_sync_group';
+                    syncGroup.matrixAutoUpdate = false;
+                    viewer.threeScene.add(syncGroup);
 
-                // Initialize TransformControls
-                if (viewer.camera && viewer.renderer) {
-                    transformControls = new TransformControls(viewer.camera, viewer.renderer.domElement);
-                    transformControls.addEventListener('change', () => {
-                        // triggers redraw
-                    });
-                    transformControls.addEventListener('dragging-changed', (event) => {
-                        if (viewer.controls) {
-                            viewer.controls.enabled = !event.value;
+                    // Initialize TransformControls
+                    if (viewer.camera && viewer.renderer) {
+                        transformControls = new TransformControls(viewer.camera, viewer.renderer.domElement);
+                        transformControls.addEventListener('change', () => {
+                            // triggers redraw
+                        });
+                        transformControls.addEventListener('dragging-changed', (event) => {
+                            if (viewer.controls) {
+                                viewer.controls.enabled = !event.value;
+                            }
+                        });
+                        viewer.threeScene.add(transformControls);
+                    }
+
+                    // Show orientation & render controls now that the scene is loaded
+                    document.getElementById('rot-toggle').classList.add('visible');
+                    document.getElementById('viewer-controls').classList.add('visible');
+
+                    // Load point cloud immediately, independent of carbon data fetch
+                    // This ensures Laser Scan / Hybrid modes are always enabled when points3d.ply exists
+                    loadPointCloud(SPLAT_PATH);
+
+                    // Fetch carbon metrics + CAD overlay (separate from point cloud loading)
+                    fetchAndDisplayCarbon(SPLAT_PATH);
+
+                    // Toggle view modes (Splat, Laser Scan, Hybrid)
+                    const viewModeSelect = document.getElementById('view-mode-select');
+                    const cadOverlaySelect = document.getElementById('cad-overlay-select');
+
+
+                    viewModeSelect.onchange = (e) => {
+                        currentRenderMode = e.target.value;
+                        updateRenderStates();
+                    };
+
+                    cadOverlaySelect.onchange = (e) => {
+                        cadOverlayMode = e.target.value;
+                        updateRenderStates();
+                    };
+
+
+
+                    const STEP = Math.PI / 12; // 15 degrees
+                    const mesh = () => viewer.splatMesh;
+
+                    function rotateScene(axis, delta) {
+                        if (mesh()) mesh().rotation[axis] += delta;
+                    }
+
+                    document.getElementById('rx-neg').onclick = () => rotateScene('x', -STEP);
+                    document.getElementById('rx-pos').onclick = () => rotateScene('x', STEP);
+                    document.getElementById('ry-neg').onclick = () => rotateScene('y', -STEP);
+                    document.getElementById('ry-pos').onclick = () => rotateScene('y', STEP);
+                    document.getElementById('rz-neg').onclick = () => rotateScene('z', -STEP);
+                    document.getElementById('rz-pos').onclick = () => rotateScene('z', STEP);
+                    document.getElementById('rot-reset').onclick = () => {
+                        if (mesh()) mesh().rotation.set(0, 0, 0);
+                    };
+
+                    // ── Custom WASD + QE Flying Controls ─────────────────────────────
+                    const activeKeys = {};
+                    window.addEventListener('keydown', (e) => {
+                        // Prevent Ctrl+S / Cmd+S from triggering browser Save Page dialog
+                        if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S' || e.code === 'KeyS')) {
+                            e.preventDefault();
+                        }
+
+                        // Prevent page scrolling/navigation behavior for flying keys when focused in iframe
+                        const controlKeys = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+                        if (controlKeys.includes(e.code)) {
+                            e.preventDefault();
+                        }
+
+                        activeKeys[e.code] = true;
+
+                        // Manual flight speed adjustment using [ and ]
+                        if (e.code === 'BracketLeft') {
+                            currentSpeed = Math.max(0.001, currentSpeed * 0.7);
+                            speedIndicator.textContent = currentSpeed.toFixed(3);
+                        } else if (e.code === 'BracketRight') {
+                            currentSpeed = Math.min(2.0, currentSpeed * 1.3);
+                            speedIndicator.textContent = currentSpeed.toFixed(3);
                         }
                     });
-                    viewer.threeScene.add(transformControls);
-                }
+                    window.addEventListener('keyup', (e) => {
+                        activeKeys[e.code] = false;
+                    });
 
-                // Show orientation & render controls now that the scene is loaded
-                document.getElementById('rot-toggle').classList.add('visible');
-                document.getElementById('viewer-controls').classList.add('visible');
+                    // Re-usable vector memory
+                    const tempDir = new THREE.Vector3();
+                    const tempSide = new THREE.Vector3();
+                    const tempUp = new THREE.Vector3();
 
-                // Load point cloud immediately, independent of carbon data fetch
-                // This ensures Laser Scan / Hybrid modes are always enabled when points3d.ply exists
-                loadPointCloud(SPLAT_PATH);
+                    function updateMovement() {
+                        // Always re-schedule regardless of camera/controls state so loop never stops
+                        requestAnimationFrame(updateMovement);
 
-                // Fetch carbon metrics + CAD overlay (separate from point cloud loading)
-                fetchAndDisplayCarbon(SPLAT_PATH);
+                        if (!viewer.camera) return;
 
-                // Toggle view modes (Splat, Laser Scan, Hybrid)
-                const viewModeSelect = document.getElementById('view-mode-select');
-                const cadOverlaySelect = document.getElementById('cad-overlay-select');
+                        // Sync the scene-root syncGroup matrix with splatMesh every frame.
+                        // cadGroup and pointCloudObj are children of syncGroup, so they automatically
+                        // inherit scene rotations (rotation panel) without double-transforming.
+                        if (viewer.splatMesh && syncGroup) {
+                            syncGroup.matrix.copy(viewer.splatMesh.matrix);
+                            syncGroup.matrixWorldNeedsUpdate = true;
+                        }
 
+                        let dx = 0, dy = 0, dz = 0;
+                        const isEditing = transformControls && transformControls.object;
+                        if (!isEditing) {
+                            if (activeKeys['KeyW']) dz -= 1;
+                            if (activeKeys['KeyS']) dz += 1;
+                            if (activeKeys['KeyA']) dx -= 1;
+                            if (activeKeys['KeyD']) dx += 1;
+                            if (activeKeys['KeyQ']) dy -= 1;
+                            if (activeKeys['KeyE']) dy += 1;
+                        }
 
-                viewModeSelect.onchange = (e) => {
-                    currentRenderMode = e.target.value;
-                    updateRenderStates();
-                };
+                        if (dx !== 0 || dy !== 0 || dz !== 0) {
+                            const boost = (activeKeys['ShiftLeft'] || activeKeys['ShiftRight']) ? 3.0 : 1.0;
+                            const step = currentSpeed * boost;
 
-                cadOverlaySelect.onchange = (e) => {
-                    cadOverlayMode = e.target.value;
-                    updateRenderStates();
-                };
+                            viewer.camera.getWorldDirection(tempDir);
+                            tempSide.crossVectors(tempDir, viewer.camera.up).normalize();
+                            tempUp.copy(viewer.camera.up).normalize();
 
+                            const offset = new THREE.Vector3()
+                                .addScaledVector(tempDir, -dz * step)
+                                .addScaledVector(tempSide, dx * step)
+                                .addScaledVector(tempUp, -dy * step);
 
-
-                const STEP = Math.PI / 12; // 15 degrees
-                const mesh = () => viewer.splatMesh;
-
-                function rotateScene(axis, delta) {
-                    if (mesh()) mesh().rotation[axis] += delta;
-                }
-
-                document.getElementById('rx-neg').onclick = () => rotateScene('x', -STEP);
-                document.getElementById('rx-pos').onclick = () => rotateScene('x', STEP);
-                document.getElementById('ry-neg').onclick = () => rotateScene('y', -STEP);
-                document.getElementById('ry-pos').onclick = () => rotateScene('y', STEP);
-                document.getElementById('rz-neg').onclick = () => rotateScene('z', -STEP);
-                document.getElementById('rz-pos').onclick = () => rotateScene('z', STEP);
-                document.getElementById('rot-reset').onclick = () => {
-                    if (mesh()) mesh().rotation.set(0, 0, 0);
-                };
-
-                // ── Custom WASD + QE Flying Controls ─────────────────────────────
-                const activeKeys = {};
-                window.addEventListener('keydown', (e) => {
-                    // Prevent Ctrl+S / Cmd+S from triggering browser Save Page dialog
-                    if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S' || e.code === 'KeyS')) {
-                        e.preventDefault();
-                    }
-                    
-                    // Prevent page scrolling/navigation behavior for flying keys when focused in iframe
-                    const controlKeys = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
-                    if (controlKeys.includes(e.code)) {
-                        e.preventDefault();
+                            viewer.camera.position.add(offset);
+                            if (viewer.controls) {
+                                viewer.controls.target.add(offset);
+                                viewer.controls.update();
+                            }
+                        }
                     }
 
-                    activeKeys[e.code] = true;
-
-                    // Manual flight speed adjustment using [ and ]
-                    if (e.code === 'BracketLeft') {
-                        currentSpeed = Math.max(0.001, currentSpeed * 0.7);
-                        speedIndicator.textContent = currentSpeed.toFixed(3);
-                    } else if (e.code === 'BracketRight') {
-                        currentSpeed = Math.min(2.0, currentSpeed * 1.3);
-                        speedIndicator.textContent = currentSpeed.toFixed(3);
-                    }
-                });
-                window.addEventListener('keyup', (e) => {
-                    activeKeys[e.code] = false;
-                });
-
-                // Re-usable vector memory
-                const tempDir = new THREE.Vector3();
-                const tempSide = new THREE.Vector3();
-                const tempUp = new THREE.Vector3();
-
-                function updateMovement() {
-                    // Always re-schedule regardless of camera/controls state so loop never stops
+                    // Launch movement loop (viewer.start() already called above, controls are ready)
                     requestAnimationFrame(updateMovement);
 
-                    if (!viewer.camera) return;
-
-                    // Sync the scene-root syncGroup matrix with splatMesh every frame.
-                    // cadGroup and pointCloudObj are children of syncGroup, so they automatically
-                    // inherit scene rotations (rotation panel) without double-transforming.
-                    if (viewer.splatMesh && syncGroup) {
-                        syncGroup.matrix.copy(viewer.splatMesh.matrix);
-                        syncGroup.matrixWorldNeedsUpdate = true;
-                    }
-
-                    let dx = 0, dy = 0, dz = 0;
-                    const isEditing = transformControls && transformControls.object;
-                    if (!isEditing) {
-                        if (activeKeys['KeyW']) dz -= 1;
-                        if (activeKeys['KeyS']) dz += 1;
-                        if (activeKeys['KeyA']) dx -= 1;
-                        if (activeKeys['KeyD']) dx += 1;
-                        if (activeKeys['KeyQ']) dy -= 1;
-                        if (activeKeys['KeyE']) dy += 1;
-                    }
-
-                    if (dx !== 0 || dy !== 0 || dz !== 0) {
-                        const boost = (activeKeys['ShiftLeft'] || activeKeys['ShiftRight']) ? 3.0 : 1.0;
-                        const step = currentSpeed * boost;
-
-                        viewer.camera.getWorldDirection(tempDir);
-                        tempSide.crossVectors(tempDir, viewer.camera.up).normalize();
-                        tempUp.copy(viewer.camera.up).normalize();
-
-                        const offset = new THREE.Vector3()
-                            .addScaledVector(tempDir, -dz * step)
-                            .addScaledVector(tempSide, dx * step)
-                            .addScaledVector(tempUp, -dy * step);
-
-                        viewer.camera.position.add(offset);
-                        if (viewer.controls) {
-                            viewer.controls.target.add(offset);
-                            viewer.controls.update();
-                        }
-                    }
-                }
-
-                // Launch movement loop (viewer.start() already called above, controls are ready)
-                requestAnimationFrame(updateMovement);
-
-            })
-            .catch((err) => {
-                console.error(err);
-                const loaderEl = document.getElementById('custom-loader-container');
-                if (loaderEl) loaderEl.remove();
-                statusBadge.textContent = "Error Loading File";
-                statusBadge.className = "status-badge";
-                statusBadge.style.color = "#f87171";
-                statusBadge.style.background = "rgba(239, 68, 68, 0.1)";
-                statusBadge.style.borderColor = "rgba(239, 68, 68, 0.2)";
-                showToast("Failed to load splat file: " + SPLAT_PATH + "\n\nMake sure the file exists and that you are serving this directory, or opening with a browser that allows local file sharing (some browsers block local file loading via file:// due to CORS policies. In that case, start a quick python server using `python -m http.server 8000` in the directory, and visit http://localhost:8000/viewer.html).", "error");
-            });
+                })
+                .catch((err) => {
+                    console.error(err);
+                    const loaderEl = document.getElementById('custom-loader-container');
+                    if (loaderEl) loaderEl.remove();
+                    statusBadge.textContent = "Error Loading File";
+                    statusBadge.className = "status-badge";
+                    statusBadge.style.color = "#f87171";
+                    statusBadge.style.background = "rgba(239, 68, 68, 0.1)";
+                    statusBadge.style.borderColor = "rgba(239, 68, 68, 0.2)";
+                    showToast("Failed to load splat file: " + SPLAT_PATH + "\n\nMake sure the file exists and that you are serving this directory, or opening with a browser that allows local file sharing (some browsers block local file loading via file:// due to CORS policies. In that case, start a quick python server using `python -m http.server 8000` in the directory, and visit http://localhost:8000/viewer.html).", "error");
+                });
 
         } catch (e) {
             console.error("Initialization error", e);
@@ -1441,12 +1453,12 @@
             if (!viewer) return;
             const scene = viewer.threeScene;
             const splatMesh = viewer.splatMesh;
-            
+
             // Toggle splatMesh visibility directly — CAD/point cloud are in scene root, not children
             if (splatMesh) {
                 splatMesh.visible = (currentRenderMode === 'splat' || currentRenderMode === 'hybrid');
             }
-            
+
             if (pointCloudObj) {
                 pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
             }
@@ -1457,10 +1469,10 @@
             }
 
 
-            
+
             // Look for cadOverlay in syncGroup first, then fall back to scene root
             const cadOverlay = (syncGroup ? syncGroup.getObjectByName('cad_measurement_overlay') : null)
-                             || (scene ? scene.getObjectByName('cad_measurement_overlay') : null);
+                || (scene ? scene.getObjectByName('cad_measurement_overlay') : null);
             if (cadOverlay) {
                 if (cadOverlayMode === 'disabled') {
                     cadOverlay.visible = false;
@@ -1481,7 +1493,7 @@
             if (match) {
                 treeCode = match[1];
             }
-            
+
             if (treeCode) {
                 fetch(`/history/${treeCode}`)
                     .then(res => res.json())
@@ -1500,7 +1512,7 @@
             } else {
                 fallbackToStatus();
             }
-            
+
             function fallbackToStatus() {
                 fetch('/status')
                     .then(res => res.json())
@@ -1511,7 +1523,7 @@
                     })
                     .catch(err => console.warn("Failed to fetch status:", err));
             }
-            
+
             function displayMetrics(metrics) {
                 // ── Populate MRV Methodology & Accuracy Inspector Card ──────
                 if (metrics) {
@@ -1529,7 +1541,7 @@
                                 specEl.textContent = 'Screening Biomassa Pohon (MRV)';
                             }
                         }
-                        
+
                         const badge = document.getElementById('mrv-scale-badge');
                         if (badge) {
                             const status = metrics.scale_status || (metrics.calibrated ? 'calibrated' : 'uncalibrated');
@@ -1569,10 +1581,10 @@
 
                         const dbhEl = document.getElementById('mrv-dbh-val');
                         if (dbhEl && metrics.dbh_cm !== undefined) dbhEl.textContent = metrics.dbh_cm + ' cm';
-                        
+
                         const hEl = document.getElementById('mrv-height-val');
                         if (hEl && metrics.height_m !== undefined) hEl.textContent = metrics.height_m + ' m';
-                        
+
                         const hSub = document.getElementById('mrv-height-sub');
                         if (hSub) {
                             hSub.textContent = metrics.height_validated ? 'Canopy validated' : (metrics.height_used || 'DBH-only fallback');
@@ -1600,7 +1612,7 @@
 
                         const bioEl = document.getElementById('mrv-biomass-val');
                         if (bioEl && metrics.biomass_kg !== undefined) bioEl.textContent = Number(metrics.biomass_kg).toFixed(1) + ' kg';
-                        
+
                         const co2El = document.getElementById('mrv-co2e-val');
                         if (co2El && metrics.co2e_kg !== undefined) co2El.textContent = Number(metrics.co2e_kg).toFixed(1) + ' kg';
 
@@ -1621,10 +1633,10 @@
                     try {
                         const g3d = metrics.geometry_3d;
                         const scene = window.viewer.threeScene;
-                        
+
                         // Remove existing overlay if present (check syncGroup and scene root)
                         const prevOverlay = (syncGroup ? syncGroup.getObjectByName('cad_measurement_overlay') : null)
-                                         || scene.getObjectByName('cad_measurement_overlay');
+                            || scene.getObjectByName('cad_measurement_overlay');
                         if (prevOverlay && prevOverlay.parent) prevOverlay.parent.remove(prevOverlay);
 
                         if (!g3d || g3d.error || g3d.center_x === undefined || g3d.radius_units === undefined || g3d.radius_units <= 0) {
@@ -1681,10 +1693,15 @@
 
                                 const fov = window.viewer.camera ? window.viewer.camera.fov : 50;
                                 const fovRad = (fov * Math.PI) / 180;
-                                const h_m = metrics.height_m || actualHeight;
-                                const distance = (h_m / 2) / Math.tan(fovRad / 2) * 1.2;
+                                const trunkRadius = actualRadius || metrics.radius || 0.15;
+                                // Frame the trunk zone close-up (matching POHON-7185) so the trunk and ground fill the viewport
+                                const targetFramingSpan = Math.min(0.75, Math.max(0.35, trunkRadius * 4.5));
+                                const distance = Math.min(1.1, Math.max(0.65, (targetFramingSpan / 2) / Math.tan(fovRad / 2) * 1.2));
 
-                                const camPos = center_cyl.clone().addScaledVector(sideDir, distance);
+                                // Slightly elevate camera along trunk axis (+15% of distance) so we look down slightly at the base & ground like POHON-7185
+                                const camPos = center_cyl.clone()
+                                    .addScaledVector(sideDir, distance)
+                                    .addScaledVector(dir_3d, distance * 0.15);
                                 window.viewer.camera.position.copy(camPos);
                                 if (window.viewer.controls) {
                                     window.viewer.controls.target.copy(center_cyl);
@@ -1692,9 +1709,9 @@
                                 } else {
                                     window.viewer.camera.lookAt(center_cyl);
                                 }
-                                console.log('Auto-fit camera perpendicular to trunk:', camPos, '→ look at', center_cyl);
-                                
-                                currentSpeed = Math.max(0.005, h_m / 100);
+                                console.log('Auto-fit camera perpendicular to trunk (POHON-7185 style):', camPos, '→ look at', center_cyl, 'dist:', distance);
+
+                                currentSpeed = Math.max(0.005, distance / 100);
                                 const speedIndicator = document.getElementById('speed-indicator');
                                 if (speedIndicator) {
                                     speedIndicator.textContent = currentSpeed.toFixed(3);
@@ -1750,7 +1767,7 @@
                         const ringMesh = new THREE.Mesh(ringGeo, ringMat);
                         const qTorus = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
                         ringMesh.quaternion.copy(qTorus);
-                        
+
                         // Ring is placed at the exact breast height position relative to cylinder center
                         const ringY = actualHTarget - (actualHMin + actualHMax) * 0.5;
                         ringMesh.position.set(0, ringY, 0);
@@ -1758,8 +1775,8 @@
 
                         // 3. Vertical Height Axis Line (along local Y)
                         const points = [
-                            new THREE.Vector3(0, -totalHeight/2, 0),
-                            new THREE.Vector3(0, totalHeight/2, 0)
+                            new THREE.Vector3(0, -totalHeight / 2, 0),
+                            new THREE.Vector3(0, totalHeight / 2, 0)
                         ];
                         const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
                         const lineMat = new THREE.LineDashedMaterial({
@@ -1777,7 +1794,7 @@
                             g3d.slice_points_3d.forEach(pt => {
                                 pointsArr.push(new THREE.Vector3(pt[0], pt[1], pt[2]));
                             });
-                            
+
                             const highlightGeo = new THREE.BufferGeometry().setFromPoints(pointsArr);
                             const highlightMat = new THREE.PointsMaterial({
                                 color: 0xff0000, // bright red
@@ -1920,25 +1937,25 @@
                 toastEl.className = 'toast-container';
                 document.body.appendChild(toastEl);
             }
-            
+
             toastEl.className = 'toast-container';
             if (type === 'error') toastEl.classList.add('toast-error');
             else if (type === 'success') toastEl.classList.add('toast-success');
-            
+
             toastEl.innerHTML = `
                 <span>${message.replace(/\n/g, '<br>')}</span>
                 <button class="toast-close-btn" onclick="document.getElementById('custom-toast-notification').classList.remove('show')">✕</button>
             `;
-            
+
             toastEl.classList.add('show');
-            
+
             if (window.toastTimeout) clearTimeout(window.toastTimeout);
             window.toastTimeout = setTimeout(() => {
                 toastEl.classList.remove('show');
             }, 6000);
         }
 
-        window.setTransformMode = function(mode) {
+        window.setTransformMode = function (mode) {
             if (transformControls) {
                 transformControls.setMode(mode);
                 // Update button active styles
@@ -1958,9 +1975,9 @@
             if (e.key === 'r' || e.key === 'R') setTransformMode('scale');
         });
 
-        window.saveManualAdjustment = async function() {
+        window.saveManualAdjustment = async function () {
             if (!cadGeomGroup || currentScanId === null) return;
-            
+
             const btn = document.getElementById('btn-save-adjust');
             const originalText = btn ? btn.textContent : 'Saving...';
             if (btn) {
@@ -2019,7 +2036,7 @@
                 if (transformControls) {
                     transformControls.detach();
                 }
-                
+
                 // Notify parent page to reload metrics in UI
                 try {
                     window.parent.postMessage({ type: 'vora_metrics_updated', tree_code: currentTreeCode }, '*');
@@ -2041,7 +2058,7 @@
 
         window.addEventListener('message', (event) => {
             if (!event.data) return;
-            
+
             if (event.data.type === 'vora_metrics_updated') {
                 console.log("[VIEWER] Received metrics updated message, refreshing carbon overlay...");
                 if (transformControls) transformControls.detach();
@@ -2068,4 +2085,5 @@
         });
     </script>
 </body>
+
 </html>

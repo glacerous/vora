@@ -67,6 +67,9 @@ class ReconstructionResult:
     splat_ply_path: Optional[str] = None
     camera_poses: Optional[List[Dict[str, float]]] = None
     scale_calibration: Optional[Dict[str, Any]] = None
+    geometry_3d: Optional[Dict[str, Any]] = None
+    dbh_cm: Optional[float] = None
+    height_m: Optional[float] = None
     manifest: Optional[EngineLicenseManifest] = None
     execution_time_sec: float = 0.0
     error_message: Optional[str] = None
@@ -245,6 +248,9 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
                     splat_model_path=final_splat,
                     camera_poses=colmap_poses,
                     scale_calibration=scale_cal,
+                    geometry_3d=res.get("geometry_3d"),
+                    dbh_cm=res.get("dbh_cm"),
+                    height_m=res.get("height_m"),
                     manifest=self.get_manifest(),
                     execution_time_sec=t1 - t0,
                 )
