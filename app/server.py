@@ -3842,4 +3842,5 @@ async def download_carbon_certificate(tree_code: str, request: Request):
 # ── Dev entry point ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=False)
+    target = "app.server:app" if os.path.exists("app/server.py") else "server:app"
+    uvicorn.run(target, host="0.0.0.0", port=8001, reload=False)

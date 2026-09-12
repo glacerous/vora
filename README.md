@@ -67,6 +67,67 @@ kolom metadata akurasi (`scale_status`, `height_used`, `height_validated`,
 `root_to_shoot_ratio`, `co2e_low_kg`, dst.) ke tabel `tree_scans`. Terapkan migrasi
 001–007 sebelum menjalankan versi baru.
 
-**Test:** `python test_accuracy.py` (butuh numpy; test server berjalan bila
-fastapi/boto3/opencv terpasang).
+---
+
+## Repository Structure
+
+```
+vora/
+├── app/                  # Core backend entrypoints (FastAPI server, Modal GPU app)
+│   ├── server.py
+│   └── modal_app.py
+├── carbon/               # Core MRV allometrics, geometry extraction, and reconstruction engines
+│   ├── allometric.py
+│   ├── dbh_extractor.py
+│   ├── reconstruction_engine.py
+│   ├── commercial_pipeline.py
+│   └── scale_calibrator.py
+├── web/                  # Web frontend assets and viewers
+│   ├── index.html
+│   ├── viewer.html
+│   └── gaussian-splats-3d.umd.js
+├── storage/              # Cloud storage clients (Cloudflare R2, D1, auth utils)
+├── scripts/              # Operational & CLI utility scripts
+│   ├── calibrate_scale.py
+│   ├── cleanup_ply.py
+│   ├── keep_alive.py
+│   ├── seed_demo_account.py
+│   ├── COLMAP.bat
+│   └── RUN_TESTS.bat
+├── tests/                # Automated test suites and regression evaluations
+│   ├── test_accuracy.py
+│   ├── test_concurrency_and_gates.py
+│   ├── test_carbon.py
+│   ├── test_storage.py
+│   ├── test_bandwidth_verification.py
+│   ├── run_test.py
+│   ├── benchmark_accuracy.py
+│   └── scratch_eval/     # Standalone historical evaluation & audit scripts
+├── db/                   # Database schemas and migrations (D1 SQLite)
+├── bin/                  # Prebuilt binaries and DLLs (COLMAP, ONNX Runtime CUDA, Qt plugins)
+├── docs/                 # Architectural specifications, licensing docs, and benchmark reports
+├── output/               # Gitignored output directory for job reconstructions
+└── scratch/              # Gitignored live working directory for ephemeral pipeline processing
+```
+
+## Running the Application
+
+- **Start Local API Server**:
+  ```bash
+  uvicorn app.server:app --host 0.0.0.0 --port 8000 --reload
+  # or
+  python app/server.py
+  ```
+
+- **Deploy Modal GPU App**:
+  ```bash
+  modal deploy app/modal_app.py
+  ```
+
+- **Run Automated Test Suite**:
+  ```bash
+  python tests/test_accuracy.py
+  python tests/test_concurrency_and_gates.py
+  ```
+
 
