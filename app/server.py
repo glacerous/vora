@@ -1032,21 +1032,24 @@ def _reconstruct_thread(
             c_res = c_engine.reconstruct(
                 frames_dir=job_frames_dir,
                 output_dir=c_out_dir,
-                iterations=max(iterations, 3000),
+                iterations=2000,
                 camera_poses=camera_poses,
                 r2_frames_prefix=r2_frames_prefix or None,
                 r2_config=c_r2_config,
             )
             if not c_res.success:
                 raise RuntimeError(f"Commercial reconstruction failed: {c_res.error_message}")
-            with open(c_res.points3d_ply_path, "rb") as f_ply:
+            with open(c_res.splat_ply_path or c_res.points3d_ply_path, "rb") as f_ply:
                 c_ply_bytes = f_ply.read()
-            with open(c_res.splat_model_path, "rb") as f_splat:
-                c_splat_bytes = f_splat.read()
+            c_splat_bytes = b""
+            if c_res.splat_model_path and os.path.exists(c_res.splat_model_path):
+                with open(c_res.splat_model_path, "rb") as f_splat:
+                    c_splat_bytes = f_splat.read()
             result = {
                 "uploaded": False,
                 "points3d": c_ply_bytes,
-                "splat": c_splat_bytes,
+                "splat": c_ply_bytes,  # 3D Gaussian Splat in PLY format for result.ply viewer
+                "splat_binary": c_splat_bytes,
                 "scale_calibration": c_res.scale_calibration,
             }
         else:
@@ -1483,6 +1486,18 @@ def _reconstruct_thread(
                         print(f"[RECONSTRUCT] Uploaded MASt3R points3D_all.npy with timestamp {ts}")
                     except Exception as upload_err:
                         print(f"Failed to upload points3D_all.npy to R2: {upload_err}")
+
+                # If binary .splat was provided, upload result.splat too
+                splat_bin = result.get("splat_binary")
+                if splat_bin:
+                    try:
+                        splat_bin_path = os.path.join(job_output_dir, "result.splat")
+                        with open(splat_bin_path, "wb") as fb:
+                            fb.write(splat_bin)
+                        upload_splat(splat_bin_path, tree_code, custom_timestamp=ts)
+                        print(f"[RECONSTRUCT] Uploaded binary result.splat to R2")
+                    except Exception as bin_err:
+                        print(f"Failed to upload result.splat: {bin_err}")
 
                 # Select representative frame matching pointmap as thumbnail
                 thumbnail_url = None

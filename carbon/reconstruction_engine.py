@@ -64,6 +64,7 @@ class ReconstructionResult:
     success: bool
     points3d_ply_path: Optional[str] = None
     splat_model_path: Optional[str] = None
+    splat_ply_path: Optional[str] = None
     camera_poses: Optional[List[Dict[str, float]]] = None
     scale_calibration: Optional[Dict[str, Any]] = None
     manifest: Optional[EngineLicenseManifest] = None
@@ -141,7 +142,7 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
         frames_dir: str,
         output_dir: str,
         scale_calibration: Optional[Dict[str, Any]] = None,
-        iterations: int = 3000,
+        iterations: int = 2000,
         camera_poses: Optional[List[Dict[str, Any]]] = None,
         r2_frames_prefix: Optional[str] = None,
         r2_config: Optional[Dict[str, str]] = None,
@@ -175,16 +176,14 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
         os.makedirs(output_dir, exist_ok=True)
 
         try:
-            # ── Production path: single Modal call (COLMAP + gsplat in one container) ──
-            use_cloud = bool(r2_frames_prefix and r2_config and not local_mode)
-
-            if use_cloud:
+            # ── Production cloud path: Modal downloads from R2, runs COLMAP + gsplat ──
+            if not local_mode and r2_frames_prefix and r2_config:
                 logger.info(
                     f"[ENGINE] Cloud path: dispatching reconstruct_commercial_cloud "
-                    f"(prefix={r2_frames_prefix!r}, iters={iterations})"
+                    f"to Modal (r2_prefix='{r2_frames_prefix}', iters={iterations})..."
                 )
-                import modal
                 try:
+                    import modal
                     fn = modal.Function.from_name("vora-commercial-engine", "reconstruct_commercial_cloud")
                     res = fn.remote(
                         r2_frames_prefix=r2_frames_prefix,
@@ -203,22 +202,35 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
                 colmap_poses = res.get("camera_poses", [])
 
                 ply_path = os.path.join(output_dir, "points3d.ply")
+                splat_ply_path = os.path.join(output_dir, "result.ply")
                 splat_path = os.path.join(output_dir, "model.splat")
                 with open(ply_path, "wb") as f:
                     f.write(ply_bytes)
+                with open(splat_ply_path, "wb") as f:
+                    f.write(ply_bytes)
                 with open(splat_path, "wb") as f:
                     f.write(splat_bytes)
+
+                final_ply = splat_ply_path
+                final_pts = ply_path
+                final_splat = splat_path
 
                 # Apply metric scale if calibrated
                 if scale_cal and scale_cal.get("is_calibrated"):
                     sf = float(scale_cal["scale_factor"])
                     if sf > 0 and abs(sf - 1.0) > 1e-5:
-                        metric_ply_path = os.path.join(output_dir, "points3d_metric.ply")
-                        apply_scale_to_ply_file(ply_path, metric_ply_path, sf)
+                        metric_ply_path = os.path.join(output_dir, "result_metric.ply")
+                        apply_scale_to_ply_file(splat_ply_path, metric_ply_path, sf)
+                        metric_pts_path = os.path.join(output_dir, "points3d_metric.ply")
+                        apply_scale_to_ply_file(ply_path, metric_pts_path, sf)
                         scaled_splat_bytes = apply_scale_to_splat_bytes(splat_bytes, sf)
-                        with open(os.path.join(output_dir, "model_metric.splat"), "wb") as f:
+                        metric_splat_path = os.path.join(output_dir, "model_metric.splat")
+                        with open(metric_splat_path, "wb") as f:
                             f.write(scaled_splat_bytes)
-                        logger.info(f"[ENGINE] Applied metric scale {sf:.6f}: points3d_metric.ply + model_metric.splat written.")
+                        final_ply = metric_ply_path
+                        final_pts = metric_pts_path
+                        final_splat = metric_splat_path
+                        logger.info(f"[ENGINE] Applied metric scale {sf:.6f}: {metric_ply_path} + {metric_splat_path} written.")
 
                 t1 = time.time()
                 logger.info(
@@ -228,8 +240,9 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
                 return ReconstructionResult(
                     engine_mode=EngineMode.COMMERCIAL_PERMISSIVE,
                     success=True,
-                    points3d_ply_path=ply_path,
-                    splat_model_path=splat_path,
+                    points3d_ply_path=final_pts,
+                    splat_ply_path=final_ply,
+                    splat_model_path=final_splat,
                     camera_poses=colmap_poses,
                     scale_calibration=scale_cal,
                     manifest=self.get_manifest(),
@@ -293,6 +306,7 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
                 engine_mode=EngineMode.COMMERCIAL_PERMISSIVE,
                 success=True,
                 points3d_ply_path=ply_path,
+                splat_ply_path=ply_path,
                 splat_model_path=splat_path,
                 camera_poses=colmap_poses,
                 scale_calibration=scale_calibration,

@@ -61,7 +61,7 @@ if commercial_app is not None:
         r2_frames_prefix: str,
         r2_config: dict,
         camera_poses: list = None,
-        num_iterations: int = 3000,
+        num_iterations: int = 2000,
     ) -> dict:
         """
         Combined remote pipeline — runs inside Modal A10G GPU container:
