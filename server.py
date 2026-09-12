@@ -1660,7 +1660,7 @@ async def index():
 @app.get("/viewer", include_in_schema=False)
 @app.get("/viewer.html", include_in_schema=False)
 async def viewer():
-    return FileResponse(os.path.join(BASE_DIR, "viewer.html"))
+    return FileResponse(os.path.join(WEB_DIR, "viewer.html"))
 
 @app.get("/gaussian-splats-3d.umd.js", include_in_schema=False)
 async def splat_js():
