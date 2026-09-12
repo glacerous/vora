@@ -36,8 +36,12 @@ try:
             "curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj -C /tmp bin/micromamba",
             "CONDA_OVERRIDE_CUDA='12.1' /tmp/bin/micromamba create -y -p /opt/colmap -c conda-forge colmap",
             "ln -s /opt/colmap/bin/colmap /usr/local/bin/colmap",
-            "pip install boto3 https://github.com/nerfstudio-project/gsplat/releases/download/v1.5.3/gsplat-1.5.3%2Bpt21cu121-cp310-cp310-linux_x86_64.whl"
+            # boto3, gsplat + Depth Anything V2 (Apache 2.0) foundation depth
+            "pip install boto3 'transformers>=4.42.0,<4.45.0' accelerate torchvision==0.16.1 https://github.com/nerfstudio-project/gsplat/releases/download/v1.5.3/gsplat-1.5.3%2Bpt21cu121-cp310-cp310-linux_x86_64.whl",
+            # Pre-download model weights into the image layer so inference is instant at runtime
+            "python3 -c \"from transformers import AutoImageProcessor, AutoModelForDepthEstimation; AutoImageProcessor.from_pretrained('depth-anything/Depth-Anything-V2-Small-hf'); AutoModelForDepthEstimation.from_pretrained('depth-anything/Depth-Anything-V2-Small-hf')\""
         )
+        .add_local_python_source("carbon")
     )
 except ImportError:
     commercial_app = None
@@ -387,6 +391,7 @@ if commercial_app is not None:
             final_opacities = torch.sigmoid(opacities).detach()
             final_colors = torch.clamp(colors.detach(), 0.0, 1.0)
             sh0 = final_colors.unsqueeze(1)
+            shN = torch.empty((final_means.shape[0], 0, 3), device=final_means.device, dtype=torch.float32)
             SH_C0 = 0.28209479177387814
             ply_sh0 = (sh0 - 0.5) / SH_C0
 
@@ -409,60 +414,29 @@ if commercial_app is not None:
                 format="ply"
             )
 
-            # 3. Dense surface point cloud with continuous surface barycentric filling
-            pts_means_np = final_means.cpu().numpy()
-            pts_colors_np = (final_colors.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
-            
-            # Continuous surface filling via kNN surface graph interpolation
-            from scipy.spatial import KDTree
-            base_xyz = np.vstack([pts_xyz, pts_means_np]).astype(np.float32)
-            base_rgb = np.vstack([(np.clip(pts_rgb, 0.0, 1.0) * 255.0).astype(np.uint8), pts_colors_np]).astype(np.float32)
-            
-            N_base = len(base_xyz)
-            if N_base > 10:
-                k_neigh = min(12, N_base)
-                kdt = KDTree(base_xyz)
-                dists, indices = kdt.query(base_xyz, k=k_neigh)
-                max_edge = 0.08  # 8cm edge to bridge trunk surface gaps seamlessly
-                tri_list = []
-                for i in range(N_base):
-                    for j in range(1, min(6, k_neigh)):
-                        for k in range(j + 1, k_neigh):
-                            if dists[i, j] < max_edge and dists[i, k] < max_edge:
-                                idx_j = indices[i, j]
-                                idx_k = indices[i, k]
-                                if np.linalg.norm(base_xyz[idx_j] - base_xyz[idx_k]) < max_edge:
-                                    tri_list.append((i, idx_j, idx_k))
-                
-                if len(tri_list) > 0:
-                    tri_arr = np.array(tri_list)
-                    bary_weights = [
-                        (0.333, 0.333, 0.334),
-                        (0.600, 0.200, 0.200),
-                        (0.200, 0.600, 0.200),
-                        (0.200, 0.200, 0.600),
-                        (0.450, 0.450, 0.100),
-                        (0.100, 0.450, 0.450),
-                    ]
-                    interp_xyz = []
-                    interp_rgb = []
-                    for w1, w2, w3 in bary_weights:
-                        interp_xyz.append(w1 * base_xyz[tri_arr[:, 0]] + w2 * base_xyz[tri_arr[:, 1]] + w3 * base_xyz[tri_arr[:, 2]])
-                        interp_rgb.append(w1 * base_rgb[tri_arr[:, 0]] + w2 * base_rgb[tri_arr[:, 1]] + w3 * base_rgb[tri_arr[:, 2]])
-                    all_xyz = np.vstack([base_xyz] + interp_xyz).astype(np.float32)
-                    all_rgb = np.vstack([base_rgb] + interp_rgb).clip(0, 255).astype(np.uint8)
-                else:
-                    all_xyz = base_xyz
-                    all_rgb = base_rgb.clip(0, 255).astype(np.uint8)
-            else:
-                all_xyz = base_xyz
-                all_rgb = base_rgb.clip(0, 255).astype(np.uint8)
-                
-            if len(all_xyz) > 400000:
-                sub_sel = np.random.choice(len(all_xyz), 400000, replace=False)
-                all_xyz = all_xyz[sub_sel]
-                all_rgb = all_rgb[sub_sel]
-                
+            # 3. Dense surface point cloud via Depth Anything V2 neural unprojection
+            #    100% authentic photographic texture — zero synthetic primitives, zero fake colors
+            #    Apache 2.0 permissive license — 100% commercially permissive
+            try:
+                from carbon.dense_depth import reconstruct_dense_cloud_from_colmap
+            except ImportError:
+                import sys as _sys
+                import os as _os
+                # When running as a modal deploy function, add parent of carbon to sys.path
+                _carbon_parent = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+                if _carbon_parent not in _sys.path:
+                    _sys.path.insert(0, _carbon_parent)
+                from carbon.dense_depth import reconstruct_dense_cloud_from_colmap
+
+            all_xyz, all_rgb = reconstruct_dense_cloud_from_colmap(
+                images_dir=images_dir,
+                sparse_dir=sparse_dir,
+                device="cuda",
+                target_points=400000,
+                stride=2,
+                voxel_size=0.012,
+            )
+
             total_dense_pts = len(all_xyz)
 
             pts_buf = io.BytesIO()

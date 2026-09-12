@@ -932,6 +932,13 @@
                 <option value="disabled">Disabled</option>
             </select>
         </div>
+        <div class="control-group" id="point-size-group" style="display: none;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+                <span class="control-label">Point Thickness</span>
+                <span id="point-size-val" style="font-size: 11px; font-weight: 700; color: #0284c7;">0.050m</span>
+            </div>
+            <input type="range" id="point-size-slider" min="0.010" max="0.120" step="0.005" value="0.050" style="width: 100%; accent-color: #0284c7; cursor: pointer; height: 4px; margin-top: 4px;" />
+        </div>
     </div>
 
     <!-- Control Panel -->
@@ -1444,6 +1451,11 @@
                 pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
             }
 
+            const ptGroup = document.getElementById('point-size-group');
+            if (ptGroup) {
+                ptGroup.style.display = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid') ? 'flex' : 'none';
+            }
+
 
             
             // Look for cadOverlay in syncGroup first, then fall back to scene root
@@ -1831,16 +1843,56 @@
                 try {
                     // Material with vertex colors (falls back to cyan if no color)
                     const hasColors = geometry.attributes.color !== undefined;
+
+                    // Generate smooth circular disc texture for natural splat/laser scan rendering
+                    let pointTexture = null;
+                    try {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = 64;
+                        canvas.height = 64;
+                        const ctx = canvas.getContext('2d');
+                        const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+                        grad.addColorStop(0, 'rgba(255,255,255,1.0)');
+                        grad.addColorStop(0.80, 'rgba(255,255,255,0.95)');
+                        grad.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+                        ctx.fillStyle = grad;
+                        ctx.beginPath();
+                        ctx.arc(32, 32, 32, 0, Math.PI * 2);
+                        ctx.fill();
+                        pointTexture = new THREE.CanvasTexture(canvas);
+                    } catch (texErr) {
+                        console.warn('Could not generate point disc texture:', texErr);
+                    }
+
+                    const sliderEl = document.getElementById('point-size-slider');
+                    const initialSize = sliderEl ? parseFloat(sliderEl.value) : 0.050;
+
                     const material = new THREE.PointsMaterial({
-                        size: 0.012,
+                        size: initialSize,
+                        map: pointTexture || null,
+                        alphaTest: 0.08,
                         vertexColors: hasColors,
-                        color: hasColors ? undefined : 0x38bdf8,
-                        transparent: false,
-                        opacity: 1.0
+                        color: hasColors ? 0xffffff : 0x38bdf8,
+                        transparent: true,
+                        opacity: 1.0,
+                        sizeAttenuation: true
                     });
 
                     pointCloudObj = new THREE.Points(geometry, material);
                     pointCloudObj.name = 'laser_scan_points';
+
+                    // Connect live point thickness slider
+                    if (sliderEl) {
+                        sliderEl.oninput = (e) => {
+                            const val = parseFloat(e.target.value);
+                            const valLabel = document.getElementById('point-size-val');
+                            if (valLabel) valLabel.textContent = val.toFixed(3) + 'm';
+                            if (pointCloudObj && pointCloudObj.material) {
+                                pointCloudObj.material.size = val;
+                                pointCloudObj.material.needsUpdate = true;
+                            }
+                        };
+                    }
 
                     // Add Point Cloud under syncGroup (which mirrors splatMesh.matrix each frame).
                     // Visibility is independent of splatMesh.visible.
