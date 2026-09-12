@@ -63,6 +63,12 @@
             top: 0;
             left: 0;
             z-index: 1;
+            background: transparent;
+        }
+
+        /* White background when showing laser scan (no splat) */
+        #splat-container.laser-bg {
+            background: #ffffff;
         }
 
         /* Control panel hidden — parent Next.js page owns UI */
@@ -943,9 +949,9 @@
         <div class="control-group" id="point-size-group" style="display: none;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
                 <span class="control-label">Point Thickness</span>
-                <span id="point-size-val" style="font-size: 11px; font-weight: 700; color: #0284c7;">0.10m</span>
+                <span id="point-size-val" style="font-size: 11px; font-weight: 700; color: #0284c7;">0.12m</span>
             </div>
-            <input type="range" id="point-size-slider" min="0.002" max="0.250" step="0.005" value="0.100"
+            <input type="range" id="point-size-slider" min="0.005" max="0.250" step="0.005" value="0.120"
                 style="width: 100%; accent-color: #0284c7; cursor: pointer; height: 4px; margin-top: 4px;" />
         </div>
     </div>
@@ -1496,7 +1502,11 @@
                 ptGroup.style.display = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid') ? 'flex' : 'none';
             }
 
-
+            // White background in laser-scan-only mode so dark canvas doesn't bleed through sparse gaps
+            const splatContainer = document.getElementById('splat-container');
+            if (splatContainer) {
+                splatContainer.classList.toggle('laser-bg', currentRenderMode === 'laser');
+            }
 
             // Look for cadOverlay in syncGroup first, then fall back to scene root
             const cadOverlay = (syncGroup ? syncGroup.getObjectByName('cad_measurement_overlay') : null)
@@ -1894,16 +1904,19 @@
                     const hasColors = geometry.attributes.color !== undefined;
 
                     const sliderEl = document.getElementById('point-size-slider');
-                    const initialSize = sliderEl ? parseFloat(sliderEl.value) : 0.10;
+                    const initialSize = sliderEl ? parseFloat(sliderEl.value) : 0.12;
 
-                    // Plain PointsMaterial — renders solid colored SQUARES that tile like a game texture.
-                    // This is the desired "voxel/game texture" look. No circular shader needed.
+                    // Opaque solid squares — commercial look matching the dense POHON-7185 style.
+                    // depthWrite:true + transparent:false = proper depth occlusion, no see-through gaps,
+                    // no dark background bleeding through sparse areas.
                     const material = new THREE.PointsMaterial({
                         size: initialSize,
                         vertexColors: hasColors,
                         color: hasColors ? 0xffffff : 0x38bdf8,
                         sizeAttenuation: true,
-                        depthWrite: false
+                        depthWrite: true,
+                        transparent: false,
+                        opacity: 1.0
                     });
 
                     pointCloudObj = new THREE.Points(geometry, material);
