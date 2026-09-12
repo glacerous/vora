@@ -420,13 +420,13 @@ if commercial_app is not None:
             
             N_base = len(base_xyz)
             if N_base > 10:
-                k_neigh = min(6, N_base)
+                k_neigh = min(12, N_base)
                 kdt = KDTree(base_xyz)
                 dists, indices = kdt.query(base_xyz, k=k_neigh)
-                max_edge = 0.035  # 3.5cm max triangle edge
+                max_edge = 0.08  # 8cm edge to bridge trunk surface gaps seamlessly
                 tri_list = []
                 for i in range(N_base):
-                    for j in range(1, min(4, k_neigh)):
+                    for j in range(1, min(6, k_neigh)):
                         for k in range(j + 1, k_neigh):
                             if dists[i, j] < max_edge and dists[i, k] < max_edge:
                                 idx_j = indices[i, j]
@@ -762,13 +762,13 @@ if commercial_app is not None:
             
             N_base = len(base_xyz)
             if N_base > 10:
-                k_neigh = min(6, N_base)
+                k_neigh = min(12, N_base)
                 kdt = KDTree(base_xyz)
                 dists, indices = kdt.query(base_xyz, k=k_neigh)
-                max_edge = 0.035  # 3.5cm max triangle edge
+                max_edge = 0.08  # 8cm edge to bridge trunk surface gaps seamlessly
                 tri_list = []
                 for i in range(N_base):
-                    for j in range(1, min(4, k_neigh)):
+                    for j in range(1, min(6, k_neigh)):
                         for k in range(j + 1, k_neigh):
                             if dists[i, j] < max_edge and dists[i, k] < max_edge:
                                 idx_j = indices[i, j]
