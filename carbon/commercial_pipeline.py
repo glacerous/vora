@@ -600,33 +600,87 @@ if commercial_app is not None:
                 all_xyz = all_xyz[pts_inlier]
                 all_rgb = all_rgb[pts_inlier]
 
-            # 4. Accurate Trunk Cylinder Extraction directly on point cloud
-            h_clean = np.dot(all_xyz, trunk_axis_est)
-            h_g_clean = np.percentile(h_clean, 5)
-            h_top_clean = np.percentile(h_clean, 95)
-            trunk_height_est = float(h_top_clean - h_g_clean)
+            # 4. Accurate Trunk Cylinder Extraction using ground-separated RANSAC & trunk PCA
+            from carbon.dbh_extractor import fit_plane_ransac, fit_circle_robust
+
+            sample_cloud = all_xyz[::max(1, len(all_xyz) // 20000)]
+            plane_res, grnd_inliers = fit_plane_ransac(sample_cloud, max_iterations=150, threshold=0.04)
+            if plane_res is not None and np.sum(grnd_inliers) > len(sample_cloud) * 0.05:
+                n_g, d_g = plane_res
+                h_g_pts = np.dot(sample_cloud, n_g) + d_g
+                if np.median(h_g_pts) < 0:
+                    n_g, d_g = -n_g, -d_g
+                    h_g_pts = -h_g_pts
+                fg_samples = sample_cloud[h_g_pts > 0.04]
+            else:
+                n_g = np.array([0.0, -1.0, 0.0])
+                d_g = 0.0
+                fg_samples = sample_cloud
+
+            # Project foreground samples to cross-section to find trunk core peak
+            ref_n = np.array([1.0, 0.0, 0.0]) if abs(n_g[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+            u1_g = np.cross(n_g, ref_n); u1_g = u1_g / (np.linalg.norm(u1_g) + 1e-9)
+            u2_g = np.cross(n_g, u1_g)
+            p_u1_g = np.dot(fg_samples, u1_g)
+            p_u2_g = np.dot(fg_samples, u2_g)
+            hist_g, xed_g, yed_g = np.histogram2d(p_u1_g, p_u2_g, bins=40)
+            max_idx_g = np.unravel_index(np.argmax(hist_g), hist_g.shape)
+            peak_u1_g = 0.5 * (xed_g[max_idx_g[0]] + xed_g[max_idx_g[0] + 1])
+            peak_u2_g = 0.5 * (yed_g[max_idx_g[1]] + yed_g[max_idx_g[1] + 1])
+
+            # Crop all foreground points around trunk core
+            p_u1_all = np.dot(all_xyz, u1_g)
+            p_u2_all = np.dot(all_xyz, u2_g)
+            h_g_all = np.dot(all_xyz, n_g) + d_g
+            dist_sq_g = (p_u1_all - peak_u1_g)**2 + (p_u2_all - peak_u2_g)**2
+            trunk_pts_mask = (dist_sq_g <= 0.25**2) & (h_g_all > 0.04) & (h_g_all < 2.5)
+            pts_trunk = all_xyz[trunk_pts_mask] if np.sum(trunk_pts_mask) >= 20 else all_xyz
+
+            # Refine trunk axis via PCA on isolated trunk bark
+            mean_tr = pts_trunk.mean(axis=0)
+            cov_tr = np.cov((pts_trunk - mean_tr).T)
+            eigvals_tr, eigvecs_tr = np.linalg.eigh(cov_tr)
+            aligns_tr = [abs(float(np.dot(eigvecs_tr[:, i], n_g))) for i in range(3)]
+            vert_cands = [(aligns_tr[i], eigvals_tr[i], i) for i in range(3) if aligns_tr[i] >= 0.4]
+            if vert_cands:
+                best_idx_tr = max(vert_cands, key=lambda c: c[1])[2]
+                trunk_axis_final = eigvecs_tr[:, best_idx_tr]
+            else:
+                trunk_axis_final = n_g.copy()
+            if np.dot(trunk_axis_final, n_g) < 0:
+                trunk_axis_final = -trunk_axis_final
+            trunk_axis_final = trunk_axis_final / (np.linalg.norm(trunk_axis_final) + 1e-9)
+
+            # Orthonormal basis for refined trunk axis
+            ref_tr = np.array([1.0, 0.0, 0.0]) if abs(trunk_axis_final[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+            u1_tr = np.cross(trunk_axis_final, ref_tr); u1_tr = u1_tr / (np.linalg.norm(u1_tr) + 1e-9)
+            u2_tr = np.cross(trunk_axis_final, u1_tr)
+
+            h_clean = np.dot(pts_trunk, trunk_axis_final)
+            h_g_clean = float(np.percentile(h_clean, 3))
+            h_top_clean = float(np.percentile(h_clean, 97))
+            trunk_height_est = float(max(0.3, h_top_clean - h_g_clean))
             h_breast_target = float(h_g_clean + min(1.3, max(0.3, trunk_height_est * 0.5)))
 
             # Slice cross section at breast height
-            slice_mask = np.abs(h_clean - h_breast_target) <= 0.05
-            slice_pts = all_xyz[slice_mask]
+            slice_mask = np.abs(h_clean - h_breast_target) <= min(0.05, trunk_height_est * 0.1)
+            slice_pts = pts_trunk[slice_mask]
             
-            from carbon.dbh_extractor import fit_circle_robust
             if len(slice_pts) >= 10:
-                slice_p1 = np.dot(slice_pts, u1_axis)
-                slice_p2 = np.dot(slice_pts, u2_axis)
+                slice_p1 = np.dot(slice_pts, u1_tr)
+                slice_p2 = np.dot(slice_pts, u2_tr)
                 slice_2d = np.column_stack([slice_p1, slice_p2])
                 c1, c2, r_fit, _, _ = fit_circle_robust(slice_2d)
-                if r_fit is not None and 0.02 <= r_fit <= 0.8:
-                    cyl_center = c1 * u1_axis + c2 * u2_axis + h_breast_target * trunk_axis_est
+                if r_fit is not None and 0.02 <= r_fit <= 0.35:
+                    cyl_center = c1 * u1_tr + c2 * u2_tr + h_breast_target * trunk_axis_final
                     dbh_est_cm = float(round(r_fit * 2.0 * 100.0, 2))
                     radius_fit = float(r_fit)
                 else:
-                    cyl_center = peak_p1 * u1_axis + peak_p2 * u2_axis + h_breast_target * trunk_axis_est
+                    cyl_center = mean_tr[:3]
                     dbh_est_cm = 12.0
                     radius_fit = 0.06
             else:
-                cyl_center = peak_p1 * u1_axis + peak_p2 * u2_axis + h_breast_target * trunk_axis_est
+                cyl_center = mean_tr[:3]
                 dbh_est_cm = 12.0
                 radius_fit = 0.06
 
@@ -634,9 +688,9 @@ if commercial_app is not None:
                 "center_x": float(cyl_center[0]),
                 "center_y": float(cyl_center[1]),
                 "center_z": float(cyl_center[2]),
-                "dir_x": float(trunk_axis_est[0]),
-                "dir_y": float(trunk_axis_est[1]),
-                "dir_z": float(trunk_axis_est[2]),
+                "dir_x": float(trunk_axis_final[0]),
+                "dir_y": float(trunk_axis_final[1]),
+                "dir_z": float(trunk_axis_final[2]),
                 "radius": radius_fit,
                 "radius_units": radius_fit,
                 "h_min": float(h_g_clean),
