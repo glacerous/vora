@@ -943,9 +943,9 @@
         <div class="control-group" id="point-size-group" style="display: none;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
                 <span class="control-label">Point Thickness</span>
-                <span id="point-size-val" style="font-size: 11px; font-weight: 700; color: #0284c7;">0.018m</span>
+                <span id="point-size-val" style="font-size: 11px; font-weight: 700; color: #0284c7;">0.08m</span>
             </div>
-            <input type="range" id="point-size-slider" min="0.005" max="0.060" step="0.002" value="0.018"
+            <input type="range" id="point-size-slider" min="0.005" max="0.300" step="0.005" value="0.080"
                 style="width: 100%; accent-color: #0284c7; cursor: pointer; height: 4px; margin-top: 4px;" />
         </div>
     </div>
@@ -1865,38 +1865,48 @@
                     // Material with vertex colors (falls back to cyan if no color)
                     const hasColors = geometry.attributes.color !== undefined;
 
-                    // Generate smooth circular disc texture for natural splat/laser scan rendering
-                    let pointTexture = null;
-                    try {
-                        const canvas = document.createElement('canvas');
-                        canvas.width = 64;
-                        canvas.height = 64;
-                        const ctx = canvas.getContext('2d');
-                        const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
-                        grad.addColorStop(0, 'rgba(255,255,255,1.0)');
-                        grad.addColorStop(0.85, 'rgba(255,255,255,0.95)');
-                        grad.addColorStop(1.0, 'rgba(255,255,255,0.0)');
-                        ctx.fillStyle = grad;
-                        ctx.beginPath();
-                        ctx.arc(32, 32, 32, 0, Math.PI * 2);
-                        ctx.fill();
-                        pointTexture = new THREE.CanvasTexture(canvas);
-                    } catch (texErr) {
-                        console.warn('Could not generate point disc texture:', texErr);
-                    }
-
                     const sliderEl = document.getElementById('point-size-slider');
-                    const initialSize = sliderEl ? parseFloat(sliderEl.value) : 0.015;
+                    const initialSize = sliderEl ? parseFloat(sliderEl.value) : 0.08;
 
-                    const material = new THREE.PointsMaterial({
-                        size: initialSize,
-                        map: pointTexture || null,
-                        alphaTest: 0.1,
-                        vertexColors: hasColors,
-                        color: hasColors ? 0xffffff : 0x38bdf8,
+                    // Use custom ShaderMaterial for guaranteed circular points.
+                    // THREE.PointsMaterial renders square quads; only a custom GLSL discard
+                    // in the fragment shader reliably produces true circular splats.
+                    const material = new THREE.ShaderMaterial({
+                        uniforms: {
+                            pointSize: { value: initialSize * 3000.0 }, // tuned so 0.08m → ~80px at 3m camera dist
+                            opacity:   { value: 0.95 },
+                            useVertexColor: { value: hasColors ? 1.0 : 0.0 },
+                            fallbackColor: { value: new THREE.Color(0x38bdf8) }
+                        },
+                        vertexShader: /* glsl */`
+                            uniform float pointSize;
+                            varying vec3 vColor;
+                            attribute vec3 color;
+                            uniform float useVertexColor;
+                            uniform vec3 fallbackColor;
+                            void main() {
+                                vColor = (useVertexColor > 0.5) ? color : fallbackColor;
+                                vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                                gl_PointSize = pointSize / (-mvPosition.z + 0.001);
+                                gl_Position = projectionMatrix * mvPosition;
+                            }
+                        `,
+                        fragmentShader: /* glsl */`
+                            uniform float opacity;
+                            varying vec3 vColor;
+                            void main() {
+                                // Discard fragments outside unit circle — eliminates square corners
+                                vec2 uv = gl_PointCoord - vec2(0.5);
+                                float r = dot(uv, uv);
+                                if (r > 0.25) discard;
+                                // Soft wide Gaussian — neighbors blend together for solid filled surface
+                                float alpha = opacity * exp(-r * 5.0);
+                                gl_FragColor = vec4(vColor, alpha);
+                            }
+                        `,
                         transparent: true,
-                        opacity: 0.95,
-                        sizeAttenuation: true
+                        depthWrite: false,
+                        blending: THREE.NormalBlending
                     });
 
                     pointCloudObj = new THREE.Points(geometry, material);
@@ -1908,9 +1918,9 @@
                             const val = parseFloat(e.target.value);
                             const valLabel = document.getElementById('point-size-val');
                             if (valLabel) valLabel.textContent = val.toFixed(3) + 'm';
-                            if (pointCloudObj && pointCloudObj.material) {
-                                pointCloudObj.material.size = val;
-                                pointCloudObj.material.needsUpdate = true;
+                            if (pointCloudObj && pointCloudObj.material && pointCloudObj.material.uniforms) {
+                                // ShaderMaterial uses uniforms.pointSize (3000 matches slider scale)
+                                pointCloudObj.material.uniforms.pointSize.value = val * 3000.0;
                             }
                         };
                     }
