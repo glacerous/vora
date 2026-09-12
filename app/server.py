@@ -985,16 +985,32 @@ def _reconstruct_thread(
         
         active_engine_mode = os.environ.get("VORA_ENGINE_MODE", "commercial_permissive_gsplat")
         if active_engine_mode == "commercial_permissive_gsplat":
-            print(f"[RECONSTRUCT] Commercial Permissive Mode active: routing to CommercialPermissiveEngine (COLMAP+gsplat)...")
+            print(f"[RECONSTRUCT] Commercial Permissive Mode active: routing to CommercialPermissiveEngine (COLMAP+gsplat on Modal)...")
             from carbon.reconstruction_engine import CommercialPermissiveEngine
             c_engine = CommercialPermissiveEngine()
             c_out_dir = os.path.join(SCRATCH_DIR, f"job_{tree_code}")
             camera_poses = job_st.get("camera_poses")
+
+            # Build R2 config for direct cloud frame download (Render never uploads frames to Modal)
+            c_r2_config = {
+                "CLOUDFLARE_ACCOUNT_ID": os.environ.get("CLOUDFLARE_ACCOUNT_ID", ""),
+                "R2_ACCESS_KEY_ID": os.environ.get("R2_ACCESS_KEY_ID", ""),
+                "R2_SECRET_ACCESS_KEY": os.environ.get("R2_SECRET_ACCESS_KEY", ""),
+                "R2_BUCKET_NAME": os.environ.get("R2_BUCKET_NAME", ""),
+            } if r2_frames_prefix else None
+
+            if r2_frames_prefix:
+                print(f"[RECONSTRUCT] Cloud mode: Modal will fetch frames from R2 prefix '{r2_frames_prefix}' and run COLMAP+gsplat remotely.")
+            else:
+                print(f"[RECONSTRUCT] Local fallback mode: no R2 prefix found, COLMAP will run locally (dev-only).")
+
             c_res = c_engine.reconstruct(
                 frames_dir=job_frames_dir,
                 output_dir=c_out_dir,
                 iterations=max(iterations, 3000),
-                camera_poses=camera_poses
+                camera_poses=camera_poses,
+                r2_frames_prefix=r2_frames_prefix or None,
+                r2_config=c_r2_config,
             )
             if not c_res.success:
                 raise RuntimeError(f"Commercial reconstruction failed: {c_res.error_message}")
@@ -1009,6 +1025,7 @@ def _reconstruct_thread(
                 "scale_calibration": c_res.scale_calibration,
             }
         else:
+
             fn = modal.Function.from_name("instantsplat-app", "run_reconstruction")
             
             # Resolve R2 config for direct upload from Modal (prevents OOM on Render)

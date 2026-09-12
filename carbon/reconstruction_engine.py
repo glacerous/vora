@@ -113,7 +113,7 @@ class ResearchEngine(BaseReconstructionEngine):
         # Delegates to existing Modal/local pipeline
         ply_path = os.path.join(output_dir, "points3d.ply")
         splat_path = os.path.join(output_dir, "model.splat")
-        
+
         return ReconstructionResult(
             engine_mode=EngineMode.RESEARCH,
             success=True,
@@ -142,8 +142,21 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
         output_dir: str,
         scale_calibration: Optional[Dict[str, Any]] = None,
         iterations: int = 3000,
-        camera_poses: Optional[List[Dict[str, Any]]] = None
+        camera_poses: Optional[List[Dict[str, Any]]] = None,
+        r2_frames_prefix: Optional[str] = None,
+        r2_config: Optional[Dict[str, str]] = None,
+        local_mode: bool = False,
     ) -> ReconstructionResult:
+        """
+        Runs commercial reconstruction (COLMAP global mapper + gsplat).
+
+        Production path (default): calls reconstruct_commercial_cloud.remote() on Modal,
+        which downloads frames from R2, runs COLMAP + gsplat GPU training all in one
+        container — Render host is a pure orchestrator (zero local binary dependency).
+
+        Local fallback (local_mode=True or no R2 prefix): runs local COLMAP binary +
+        dispatches gsplat-only training to Modal. Use only for local dev.
+        """
         import time
         import io
         import zipfile
@@ -162,43 +175,97 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
         os.makedirs(output_dir, exist_ok=True)
 
         try:
-            # ── Phase 1: Sparse Reconstruction via COLMAP Global Mapper ──
+            # ── Production path: single Modal call (COLMAP + gsplat in one container) ──
+            use_cloud = bool(r2_frames_prefix and r2_config and not local_mode)
+
+            if use_cloud:
+                logger.info(
+                    f"[ENGINE] Cloud path: dispatching reconstruct_commercial_cloud "
+                    f"(prefix={r2_frames_prefix!r}, iters={iterations})"
+                )
+                import modal
+                try:
+                    fn = modal.Function.from_name("vora-commercial-engine", "reconstruct_commercial_cloud")
+                    res = fn.remote(
+                        r2_frames_prefix=r2_frames_prefix,
+                        r2_config=r2_config,
+                        camera_poses=camera_poses,
+                        num_iterations=iterations,
+                    )
+                except Exception as modal_err:
+                    logger.error(f"[ENGINE] Modal reconstruct_commercial_cloud failed: {modal_err}")
+                    raise RuntimeError(f"Cloud reconstruction failed: {modal_err}")
+
+                # Unpack result
+                ply_bytes = res["ply_bytes"]
+                splat_bytes = res["splat_bytes"]
+                scale_cal = res.get("scale_calibration") or scale_calibration
+                colmap_poses = res.get("camera_poses", [])
+
+                ply_path = os.path.join(output_dir, "points3d.ply")
+                splat_path = os.path.join(output_dir, "model.splat")
+                with open(ply_path, "wb") as f:
+                    f.write(ply_bytes)
+                with open(splat_path, "wb") as f:
+                    f.write(splat_bytes)
+
+                # Apply metric scale if calibrated
+                if scale_cal and scale_cal.get("is_calibrated"):
+                    sf = float(scale_cal["scale_factor"])
+                    if sf > 0 and abs(sf - 1.0) > 1e-5:
+                        metric_ply_path = os.path.join(output_dir, "points3d_metric.ply")
+                        apply_scale_to_ply_file(ply_path, metric_ply_path, sf)
+                        scaled_splat_bytes = apply_scale_to_splat_bytes(splat_bytes, sf)
+                        with open(os.path.join(output_dir, "model_metric.splat"), "wb") as f:
+                            f.write(scaled_splat_bytes)
+                        logger.info(f"[ENGINE] Applied metric scale {sf:.6f}: points3d_metric.ply + model_metric.splat written.")
+
+                t1 = time.time()
+                logger.info(
+                    f"[ENGINE] Cloud reconstruction done in {t1-t0:.2f}s "
+                    f"({res['num_points']} points, scale={scale_cal.get('source','?')})"
+                )
+                return ReconstructionResult(
+                    engine_mode=EngineMode.COMMERCIAL_PERMISSIVE,
+                    success=True,
+                    points3d_ply_path=ply_path,
+                    splat_model_path=splat_path,
+                    camera_poses=colmap_poses,
+                    scale_calibration=scale_cal,
+                    manifest=self.get_manifest(),
+                    execution_time_sec=t1 - t0,
+                )
+
+            # ── Local fallback: COLMAP runs locally, gsplat dispatched to Modal ──
+            logger.warning(
+                "[ENGINE] Local mode: running COLMAP locally (dev-only). "
+                "In production, always provide r2_frames_prefix + r2_config."
+            )
+
             workspace_dir = os.path.join(output_dir, "colmap_workspace")
             sparse_dir = run_colmap_global_mapper(frames_dir, workspace_dir)
 
-            # Read camera poses and calculate reconstructed path length from COLMAP images.bin
             images_bin = os.path.join(sparse_dir, "images.bin")
             colmap_recon_path_len, colmap_poses, _ = compute_colmap_camera_trajectory(images_bin)
 
-            # ── Derive metric scale (ARCore / ARKit VIO path length ratio) ──
-            # Reuses the exact path length ratio formula from modal_app.py:364-374:
-            #   scale_factor = vio_path_len / recon_path_len
             if scale_calibration is None or not scale_calibration.get("is_calibrated"):
                 scale_calibration = derive_commercial_scale(camera_poses, images_bin)
 
-            # ── Phase 2: Gaussian Splatting Training via gsplat ──
-            # Bundle sparse artifacts and frames for GPU training
+            # Bundle sparse artifacts and images for GPU training
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for sf in ["cameras.bin", "images.bin", "points3D.bin"]:
-                    zf.write(os.path.join(sparse_dir, sf), arcname=os.path.join("sparse", sf))
+                for sf_name in ["cameras.bin", "images.bin", "points3D.bin"]:
+                    zf.write(os.path.join(sparse_dir, sf_name), arcname=os.path.join("sparse", sf_name))
                 for fname in os.listdir(frames_dir):
                     if fname.lower().endswith((".jpg", ".png", ".jpeg")):
                         zf.write(os.path.join(frames_dir, fname), arcname=os.path.join("images", fname))
             bundle_bytes = buf.getvalue()
 
-            # Execute gsplat training on cloud GPU
             logger.info(f"[ENGINE] Dispatching {len(bundle_bytes)/(1024*1024):.2f} MB bundle to gsplat GPU trainer...")
             import modal
-            try:
-                fn = modal.Function.from_name("vora-commercial-engine", "train_gsplat_cloud")
-                res = fn.remote(bundle_bytes, num_iterations=iterations)
-            except Exception:
-                from carbon.commercial_pipeline import commercial_app
-                with commercial_app.run():
-                    res = train_gsplat_cloud.remote(bundle_bytes, num_iterations=iterations)
+            fn = modal.Function.from_name("vora-commercial-engine", "train_gsplat_cloud")
+            res = fn.remote(bundle_bytes, num_iterations=iterations)
 
-            # Save raw PLY and SPLAT artifacts
             ply_path = os.path.join(output_dir, "points3d.ply")
             splat_path = os.path.join(output_dir, "model.splat")
             with open(ply_path, "wb") as f:
@@ -206,25 +273,22 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
             with open(splat_path, "wb") as f:
                 f.write(res["splat_bytes"])
 
-            # If metric scale is calibrated, generate metric point cloud and splat
             if scale_calibration and scale_calibration.get("is_calibrated"):
                 sf = float(scale_calibration["scale_factor"])
                 if sf > 0 and abs(sf - 1.0) > 1e-5:
                     metric_ply_path = os.path.join(output_dir, "points3d_metric.ply")
                     apply_scale_to_ply_file(ply_path, metric_ply_path, sf)
                     scaled_splat_bytes = apply_scale_to_splat_bytes(res["splat_bytes"], sf)
-                    metric_splat_path = os.path.join(output_dir, "model_metric.splat")
-                    with open(metric_splat_path, "wb") as f:
+                    with open(os.path.join(output_dir, "model_metric.splat"), "wb") as f:
                         f.write(scaled_splat_bytes)
                     logger.info(f"[ENGINE] Applied metric scale {sf:.6f}: generated points3d_metric.ply and model_metric.splat")
 
             t1 = time.time()
             logger.info(
-                f"[ENGINE] Commercial reconstruction succeeded in {t1 - t0:.2f}s "
-                f"({res['num_points']} points, splat: {len(res['splat_bytes'])} bytes, "
-                f"scale_status={'calibrated' if scale_calibration.get('is_calibrated') else 'uncalibrated'})."
+                f"[ENGINE] Local reconstruction done in {t1-t0:.2f}s "
+                f"({res['num_points']} points, scale_status="
+                f"{'calibrated' if scale_calibration.get('is_calibrated') else 'uncalibrated'})"
             )
-
             return ReconstructionResult(
                 engine_mode=EngineMode.COMMERCIAL_PERMISSIVE,
                 success=True,
@@ -233,7 +297,7 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
                 camera_poses=colmap_poses,
                 scale_calibration=scale_calibration,
                 manifest=self.get_manifest(),
-                execution_time_sec=t1 - t0
+                execution_time_sec=t1 - t0,
             )
 
         except Exception as e:
@@ -246,7 +310,6 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
                 execution_time_sec=t1 - t0,
                 error_message=str(e)
             )
-
 
 
 def validate_engine_compliance(mode: EngineMode) -> bool:
@@ -265,4 +328,3 @@ def get_engine(mode: Optional[str] = None) -> BaseReconstructionEngine:
     if active_mode == EngineMode.RESEARCH.value:
         return ResearchEngine()
     return CommercialPermissiveEngine()
-
