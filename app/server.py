@@ -10,6 +10,7 @@ Production start command (after Flask removal):
 import asyncio
 import glob
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from typing import Any, List, Optional
@@ -23,15 +24,26 @@ from pydantic import BaseModel
 import boto3
 from botocore.config import Config
 
-load_dotenv()
-
 # ── Directory setup ──────────────────────────────────────────────────────────
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-FRAMES_DIR = os.path.join(BASE_DIR, "test_images")
-OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+# Root directory of the repository (parent dir when running inside app/)
+if os.path.basename(os.path.dirname(os.path.abspath(__file__))) == "app":
+    REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+else:
+    REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-for _d in (UPLOAD_DIR, FRAMES_DIR, OUTPUT_DIR):
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+load_dotenv(os.path.join(REPO_ROOT, ".env"))
+
+BASE_DIR   = REPO_ROOT
+WEB_DIR    = os.path.join(REPO_ROOT, "web")
+UPLOAD_DIR = os.path.join(REPO_ROOT, "uploads")
+FRAMES_DIR = os.path.join(REPO_ROOT, "test_images")
+OUTPUT_DIR = os.path.join(REPO_ROOT, "output")
+SCRATCH_DIR = os.path.join(REPO_ROOT, "scratch")
+
+for _d in (UPLOAD_DIR, FRAMES_DIR, OUTPUT_DIR, SCRATCH_DIR):
     os.makedirs(_d, exist_ok=True)
 
 def get_job_frames_dir(tree_code: str = None) -> str:
@@ -974,7 +986,7 @@ def _reconstruct_thread(
             print(f"[RECONSTRUCT] Commercial Permissive Mode active: routing to CommercialPermissiveEngine (COLMAP+gsplat)...")
             from carbon.reconstruction_engine import CommercialPermissiveEngine
             c_engine = CommercialPermissiveEngine()
-            c_out_dir = os.path.join("scratch", f"job_{tree_code}")
+            c_out_dir = os.path.join(SCRATCH_DIR, f"job_{tree_code}")
             camera_poses = job_st.get("camera_poses")
             c_res = c_engine.reconstruct(
                 frames_dir=job_frames_dir,
@@ -1647,16 +1659,16 @@ async def ping_server():
 
 @app.get("/", include_in_schema=False)
 async def index():
-    return FileResponse(os.path.join(BASE_DIR, "index.html"))
+    return FileResponse(os.path.join(WEB_DIR, "index.html"))
 
 @app.get("/viewer", include_in_schema=False)
 @app.get("/viewer.html", include_in_schema=False)
 async def viewer():
-    return FileResponse(os.path.join(BASE_DIR, "viewer.html"))
+    return FileResponse(os.path.join(WEB_DIR, "viewer.html"))
 
 @app.get("/gaussian-splats-3d.umd.js", include_in_schema=False)
 async def splat_js():
-    return FileResponse(os.path.join(BASE_DIR, "gaussian-splats-3d.umd.js"))
+    return FileResponse(os.path.join(WEB_DIR, "gaussian-splats-3d.umd.js"))
 
 @app.get("/output/{fn:path}", include_in_schema=False)
 async def output_file(fn: str):
@@ -2535,7 +2547,7 @@ async def adjust_geometry(scan_id: int, body: AdjustGeometryRequest):
                     print(f"[ADJUST GEOMETRY] Recalculated {len(slice_points_3d)} slice points around new cylinder.")
             except Exception as slice_err:
                 import traceback
-                with open("scratch/adjust_error.log", "w") as f_err:
+                with open(os.path.join(SCRATCH_DIR, "adjust_error.log"), "w") as f_err:
                     traceback.print_exc(file=f_err)
                 print(f"[ADJUST GEOMETRY ERROR] Failed to recalculate slice points: {slice_err}")
 
@@ -3830,4 +3842,5 @@ async def download_carbon_certificate(tree_code: str, request: Request):
 # ── Dev entry point ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=False)
+    target = "app.server:app" if os.path.exists("app/server.py") else "server:app"
+    uvicorn.run(target, host="0.0.0.0", port=8001, reload=False)

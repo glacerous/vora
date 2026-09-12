@@ -5,7 +5,11 @@ import glob
 from PIL import Image
 from dotenv import load_dotenv
 
-load_dotenv()
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+load_dotenv(os.path.join(REPO_ROOT, ".env"))
 
 print("=== OUTBOUND BANDWIDTH AUDIT & VERIFICATION ===")
 

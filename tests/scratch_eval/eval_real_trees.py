@@ -2,7 +2,7 @@ import os
 import sys
 import numpy as np
 
-sys.path.insert(0, r"c:\codes\3dtest")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from carbon.dbh_extractor import parse_ply_points, extract_dbh_from_mast3r, extract_dbh_with_2d_clicks
 
 # =============================================================================

@@ -1,8 +1,8 @@
 import os
 import sys
 
-# Ensure project root is in the path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from carbon.dbh_extractor import extract_dbh
 from carbon.allometric import estimate_carbon

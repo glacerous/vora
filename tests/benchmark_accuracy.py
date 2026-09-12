@@ -23,8 +23,11 @@ import math
 import argparse
 from typing import List, Dict, Any
 
-DATASET_PATH = os.path.join(os.path.dirname(__file__), "carbon", "data", "UNVERIFIED_synthetic_example.json")
-REPORT_PATH = os.path.join(os.path.dirname(__file__), "docs", "accuracy_benchmark_report.md")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
+
+DATASET_PATH = os.path.join(REPO_ROOT, "carbon", "data", "UNVERIFIED_synthetic_example.json")
+REPORT_PATH = os.path.join(REPO_ROOT, "docs", "accuracy_benchmark_report.md")
 
 
 def load_dataset(path: str = DATASET_PATH) -> List[Dict[str, Any]]:
