@@ -969,67 +969,90 @@ def _reconstruct_thread(
         else:
             print(f"[RECONSTRUCT] Uploading {len(imgs)} frames to GPU cloud (background removed on Modal: {remove_background})...")
         
-        fn = modal.Function.from_name("instantsplat-app", "run_reconstruction")
-        
-        # Resolve R2 config for direct upload from Modal (prevents OOM on Render)
-        r2_config = {
-            "CLOUDFLARE_ACCOUNT_ID": os.environ.get("CLOUDFLARE_ACCOUNT_ID"),
-            "R2_ACCESS_KEY_ID": os.environ.get("R2_ACCESS_KEY_ID"),
-            "R2_SECRET_ACCESS_KEY": os.environ.get("R2_SECRET_ACCESS_KEY"),
-            "R2_BUCKET_NAME": os.environ.get("R2_BUCKET_NAME"),
-            "R2_PUBLIC_URL_PREFIX": os.environ.get("R2_PUBLIC_URL_PREFIX"),
-        }
-
-        t_remote_start = time.time()
-        try:
+        active_engine_mode = os.environ.get("VORA_ENGINE_MODE", "research_instantsplat_mast3r")
+        if active_engine_mode == "commercial_permissive_gsplat":
+            print(f"[RECONSTRUCT] Commercial Permissive Mode active: routing to CommercialPermissiveEngine (COLMAP+gsplat)...")
+            from carbon.reconstruction_engine import CommercialPermissiveEngine
+            c_engine = CommercialPermissiveEngine()
+            c_out_dir = os.path.join("scratch", f"job_{tree_code}")
             camera_poses = job_st.get("camera_poses")
-            try:
-                if r2_frames_prefix:
-                    result = fn.remote(None, tree_code, remove_background, r2_config, iterations, camera_poses=camera_poses, r2_frames_prefix=r2_frames_prefix)
-                elif camera_poses is not None:
-                    result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations, camera_poses=camera_poses)
-                else:
-                    result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
-            except TypeError as te:
-                if "takes from" in str(te) or "unexpected keyword" in str(te) or "positional argument" in str(te) or "argument" in str(te):
-                    print(f"[RECONSTRUCT] Signature mismatch on remote, falling back to legacy call: {te}")
-                    result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
-                else:
-                    raise te
-        except Exception as remote_exc:
-            # If it's a TypeError / argument error / signature mismatch, fail immediately
-            if isinstance(remote_exc, (TypeError, ValueError)) and "takes from" not in str(remote_exc):
-                print(f"[RECONSTRUCT] fn.remote() failed with non-recoverable error: {remote_exc}")
-                raise remote_exc
+            c_res = c_engine.reconstruct(
+                frames_dir=job_frames_dir,
+                output_dir=c_out_dir,
+                iterations=iterations,
+                camera_poses=camera_poses
+            )
+            with open(c_res.points3d_ply_path, "rb") as f_ply:
+                c_ply_bytes = f_ply.read()
+            with open(c_res.splat_model_path, "rb") as f_splat:
+                c_splat_bytes = f_splat.read()
+            result = {
+                "uploaded": False,
+                "points3d": c_ply_bytes,
+                "splat": c_splat_bytes,
+                "scale_calibration": c_res.scale_calibration,
+            }
+        else:
+            fn = modal.Function.from_name("instantsplat-app", "run_reconstruction")
+            
+            # Resolve R2 config for direct upload from Modal (prevents OOM on Render)
+            r2_config = {
+                "CLOUDFLARE_ACCOUNT_ID": os.environ.get("CLOUDFLARE_ACCOUNT_ID"),
+                "R2_ACCESS_KEY_ID": os.environ.get("R2_ACCESS_KEY_ID"),
+                "R2_SECRET_ACCESS_KEY": os.environ.get("R2_SECRET_ACCESS_KEY"),
+                "R2_BUCKET_NAME": os.environ.get("R2_BUCKET_NAME"),
+                "R2_PUBLIC_URL_PREFIX": os.environ.get("R2_PUBLIC_URL_PREFIX"),
+            }
 
-            # Otherwise, fn.remote() failed due to connection drop/timeout — this typically happens
-            # when the Render server restarted while the Modal job was still running (connection reset).
-            # The Modal job may have finished and written its completion marker to
-            # the shared Dict. Poll for it for up to 20 minutes before giving up.
-            print(f"[RECONSTRUCT] fn.remote() raised: {remote_exc}")
-            print(f"[RECONSTRUCT] Checking Modal Dict for crash-recovery completion marker…")
-            result = None
-            import modal as _modal
-            _prog_dict = _modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
-            complete_key = f"{tree_code}_complete"
-            for _attempt in range(120):  # poll up to 20 min (10s intervals)
+            t_remote_start = time.time()
+            try:
+                camera_poses = job_st.get("camera_poses")
                 try:
-                    if complete_key in _prog_dict:
-                        result = {**_prog_dict[complete_key], "uploaded": True}
-                        del _prog_dict[complete_key]  # consume it
-                        print(f"[RECONSTRUCT] Crash-recovery: found completion marker after {_attempt * 10}s. URLs restored.")
-                        break
-                except Exception:
-                    pass
-                upd(tree_code, "reconstructing", f"Server restarted mid-job — waiting for Modal to finish… ({_attempt * 10}s)")
-                time.sleep(10)
-            if result is None:
-                raise RuntimeError(f"fn.remote() failed and Modal did not complete within 20 min: {remote_exc}") from remote_exc
-        t_remote_end = time.time()
-        
-        elapsed_remote = t_remote_end - t_remote_start
-        print(f"[RECONSTRUCT] GPU Reconstruction remote call completed at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t_remote_end))}")
-        print(f"[RECONSTRUCT] Remote duration: {elapsed_remote:.2f} seconds")
+                    if r2_frames_prefix:
+                        result = fn.remote(None, tree_code, remove_background, r2_config, iterations, camera_poses=camera_poses, r2_frames_prefix=r2_frames_prefix)
+                    elif camera_poses is not None:
+                        result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations, camera_poses=camera_poses)
+                    else:
+                        result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
+                except TypeError as te:
+                    if "takes from" in str(te) or "unexpected keyword" in str(te) or "positional argument" in str(te) or "argument" in str(te):
+                        print(f"[RECONSTRUCT] Signature mismatch on remote, falling back to legacy call: {te}")
+                        result = fn.remote(imgs, tree_code, remove_background, r2_config, iterations)
+                    else:
+                        raise te
+            except Exception as remote_exc:
+                # If it's a TypeError / argument error / signature mismatch, fail immediately
+                if isinstance(remote_exc, (TypeError, ValueError)) and "takes from" not in str(remote_exc):
+                    print(f"[RECONSTRUCT] fn.remote() failed with non-recoverable error: {remote_exc}")
+                    raise remote_exc
+
+                # Otherwise, fn.remote() failed due to connection drop/timeout — this typically happens
+                # when the Render server restarted while the Modal job was still running (connection reset).
+                # The Modal job may have finished and written its completion marker to
+                # the shared Dict. Poll for it for up to 20 minutes before giving up.
+                print(f"[RECONSTRUCT] fn.remote() raised: {remote_exc}")
+                print(f"[RECONSTRUCT] Checking Modal Dict for crash-recovery completion marker…")
+                result = None
+                import modal as _modal
+                _prog_dict = _modal.Dict.from_name("instantsplat-progress-dict", create_if_missing=True)
+                complete_key = f"{tree_code}_complete"
+                for _attempt in range(120):  # poll up to 20 min (10s intervals)
+                    try:
+                        if complete_key in _prog_dict:
+                            result = {**_prog_dict[complete_key], "uploaded": True}
+                            del _prog_dict[complete_key]  # consume it
+                            print(f"[RECONSTRUCT] Crash-recovery: found completion marker after {_attempt * 10}s. URLs restored.")
+                            break
+                    except Exception:
+                        pass
+                    upd(tree_code, "reconstructing", f"Server restarted mid-job — waiting for Modal to finish… ({_attempt * 10}s)")
+                    time.sleep(10)
+                if result is None:
+                    raise RuntimeError(f"fn.remote() failed and Modal did not complete within 20 min: {remote_exc}") from remote_exc
+            t_remote_end = time.time()
+            elapsed_remote = t_remote_end - t_remote_start
+            print(f"[RECONSTRUCT] GPU Reconstruction remote call completed at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t_remote_end))}")
+            print(f"[RECONSTRUCT] Remote duration: {elapsed_remote:.2f} seconds")
 
         # ── Unpack result (new dict format: {splat, points3d}) ──────────────
         scale_calibration = None

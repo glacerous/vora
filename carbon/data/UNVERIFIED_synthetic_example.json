@@ -1,5 +1,9 @@
 [
   {
+    "__DISCLAIMER__": "WARNING: THIS DATASET CONTAINS SYNTHETIC / ILLUSTRATIVE SCHEMA EXAMPLES FOR BENCHMARK PIPELINE VERIFICATION ONLY. IT DOES NOT CONTAIN EMPIRICAL FIELD GROUND-TRUTH MEASUREMENTS. DO NOT CITE AS VALIDATION PROOF.",
+    "is_synthetic_example": true
+  },
+  {
     "sample_id": "VORA-VAL-001",
     "tree_tag": "SWI-01",
     "species_scientific": "Swietenia macrophylla",

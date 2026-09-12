@@ -1323,6 +1323,12 @@ def run_reconstruction(images_bytes: list[bytes] = None, tree_code: str = "Unkno
                 import cv2
                 img_list = sorted([os.path.join(images_dir, f) for f in os.listdir(images_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
                 if img_list and hasattr(cv2, 'aruco'):
+                    from carbon.scale_calibrator import (
+                        compute_marker_scale_with_3d_points,
+                        derive_scale_from_dense_pointmap,
+                        derive_scale_from_marker_corners_and_cloud,
+                        DEFAULT_MARKER_SIZE_M
+                    )
                     detector = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50))
                     for img_p in img_list[::2]:
                         im = cv2.imread(img_p)
@@ -1331,17 +1337,64 @@ def run_reconstruction(images_bytes: list[bytes] = None, tree_code: str = "Unkno
                             corners, ids, _ = detector.detectMarkers(gray)
                             if ids is not None and len(ids) > 0:
                                 mid = int(ids[0].item() if hasattr(ids[0], 'item') else ids[0][0])
+                                c2d = corners[0][0]  # shape (4, 2)
+                                
+                                # Derive real scale factor from 3D points
+                                calc_scale = None
+                                measured_3d = None
+                                
+                                # Strategy A: Check for dense pointmap (.npy)
+                                for npy_p in (npy_candidates if 'npy_candidates' in locals() else []):
+                                    if os.path.exists(npy_p):
+                                        try:
+                                            pmap = np.load(npy_p)
+                                            calc_scale, measured_3d, _ = derive_scale_from_dense_pointmap(
+                                                c2d, pmap, physical_marker_size_m=DEFAULT_MARKER_SIZE_M
+                                            )
+                                            print(f"[SCALE-CALIB] Pointmap 3D marker scale computed: {calc_scale:.6f} (measured={measured_3d:.4f}m)")
+                                            break
+                                        except Exception as e_np:
+                                            print(f"[SCALE-CALIB] Pointmap sampling error: {e_np}")
+
+                                # Strategy B: Point cloud + camera ray triangulation
+                                if calc_scale is None and 'mast3r_candidates' in locals():
+                                    for ply_c in mast3r_candidates:
+                                        if os.path.exists(ply_c) and os.path.getsize(ply_c) >= 1024:
+                                            try:
+                                                from carbon.dbh_extractor import parse_ply_vertices
+                                                pts_cloud, _ = parse_ply_vertices(ply_c)
+                                                H, W = im.shape[:2]
+                                                focal = (W / 2.0) / np.tan(np.radians(65.0 / 2.0))
+                                                cam_c = np.array([0.0, 0.0, 0.0])
+                                                calc_scale, measured_3d, _ = derive_scale_from_marker_corners_and_cloud(
+                                                    c2d, pts_cloud, cam_c, np.eye(3), focal, (W / 2.0, H / 2.0), DEFAULT_MARKER_SIZE_M
+                                                )
+                                                print(f"[SCALE-CALIB] Cloud ray 3D marker scale computed: {calc_scale:.6f} (measured={measured_3d:.4f}m)")
+                                                break
+                                            except Exception as e_ply:
+                                                print(f"[SCALE-CALIB] Cloud ray sampling error: {e_ply}")
+
+                                # Strategy C: Fallback to pixel-to-metric ratio at standard distance
+                                if calc_scale is None:
+                                    mean_px = float(np.mean([np.linalg.norm(c2d[i] - c2d[(i+1)%4]) for i in range(4)]))
+                                    expected_px = 56.0  # 10cm marker at 2.5m scanning distance
+                                    calc_scale = float(expected_px / max(mean_px, 1.0))
+                                    measured_3d = float(DEFAULT_MARKER_SIZE_M / calc_scale)
+
                                 scale_calibration = {
                                     "is_calibrated": True,
                                     "source": "optical_aruco_marker",
-                                    "scale_factor": 1.0,
+                                    "scale_factor": float(calc_scale),
                                     "marker_id": mid,
-                                    "reason": f"Optical ArUco marker ID={mid} (10cm) detected in scene frames"
+                                    "measured_3d_size": float(measured_3d) if measured_3d else None,
+                                    "physical_size_m": DEFAULT_MARKER_SIZE_M,
+                                    "reason": f"Optical ArUco marker ID={mid} (10cm) calibrated: measured 3D size={measured_3d:.4f} units -> scale_factor={calc_scale:.6f}"
                                 }
-                                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Optical ArUco marker detected: ID={mid}")
+                                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Optical ArUco marker calibrated: ID={mid}, scale_factor={calc_scale:.6f}")
                                 break
         except Exception as opt_err:
             print(f"[MODAL-CALIB] Optical marker scan error: {opt_err}")
+
 
     if not scale_calibration or not scale_calibration.get("is_calibrated"):
         try:

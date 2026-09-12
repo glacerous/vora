@@ -196,3 +196,112 @@ def compute_marker_scale_with_3d_points(
 
     scale_factor = physical_marker_size_m / measured_mean_units
     return float(scale_factor), float(measured_mean_units)
+
+
+def derive_scale_from_dense_pointmap(
+    corners_2d: np.ndarray,
+    pointmap: np.ndarray,
+    physical_marker_size_m: float = DEFAULT_MARKER_SIZE_M
+) -> Tuple[float, float, np.ndarray]:
+    """
+    Computes metric scale factor directly from a dense (H, W, 3) reconstruction pointmap
+    by sampling 3D coordinates at the 4 detected 2D marker corners.
+    """
+    c2d = np.array(corners_2d, dtype=float)
+    if len(c2d) != 4:
+        raise ValueError("Requires exactly 4 2D corner points")
+
+    H, W = pointmap.shape[:2]
+    corners_3d = []
+    for pt in c2d:
+        x = int(np.clip(round(pt[0]), 0, W - 1))
+        y = int(np.clip(round(pt[1]), 0, H - 1))
+        p3 = pointmap[y, x]
+        if np.isnan(p3).any() or np.all(p3 == 0):
+            # Sample a 3x3 local patch if exact pixel is empty
+            win = pointmap[max(0, y-1):min(H, y+2), max(0, x-1):min(W, x+2)]
+            valid = win[~np.isnan(win).any(axis=-1) & (np.linalg.norm(win, axis=-1) > 1e-4)]
+            if len(valid) > 0:
+                p3 = np.median(valid, axis=0)
+            else:
+                raise ValueError("Marker corner fell on invalid/empty pointmap region")
+        corners_3d.append(p3)
+
+    corners_3d = np.array(corners_3d, dtype=float)
+    scale_factor, measured_size = compute_marker_scale_with_3d_points(corners_3d, physical_marker_size_m)
+    return float(scale_factor), float(measured_size), corners_3d
+
+
+def derive_scale_from_marker_corners_and_cloud(
+    corners_2d: np.ndarray,
+    points_3d: np.ndarray,
+    camera_center: np.ndarray,
+    camera_rotation: np.ndarray,
+    focal_length_px: float,
+    principal_point: Tuple[float, float],
+    physical_marker_size_m: float = DEFAULT_MARKER_SIZE_M
+) -> Tuple[float, float, np.ndarray]:
+    """
+    Computes exact metric scale factor by projecting 2D marker corner rays
+    onto the 3D point cloud surface, solving for the 3D marker extent:
+      scale_factor = physical_marker_size_m / measured_3d_side_units
+    Returns: (scale_factor, measured_3d_side_units, corners_3d)
+    """
+    c2d = np.array(corners_2d, dtype=float)
+    if len(c2d) != 4:
+        raise ValueError("Requires exactly 4 2D corner points")
+
+    cx, cy = principal_point
+    c2d_center = np.mean(c2d, axis=0)
+    ray_cam = np.array([(c2d_center[0] - cx) / focal_length_px, (c2d_center[1] - cy) / focal_length_px, 1.0])
+    ray_cam = ray_cam / np.linalg.norm(ray_cam)
+    ray_world = camera_rotation.T @ ray_cam
+
+    diff = points_3d - camera_center
+    along_ray = diff @ ray_world
+    valid_mask = along_ray > 0.1
+    if not np.any(valid_mask):
+        raise ValueError("No 3D points in front of camera")
+
+    diff_valid = diff[valid_mask]
+    along_valid = along_ray[valid_mask]
+    perp_dist = np.linalg.norm(diff_valid - np.outer(along_valid, ray_world), axis=1)
+
+    # Progressive search: prioritize closest points to the marker ray
+    for r in [0.08, 0.15, 0.25, 0.50]:
+        near_ray_mask = perp_dist < r
+        if np.sum(near_ray_mask) >= 3:
+            break
+
+    if np.sum(near_ray_mask) < 2:
+        # Scale-adaptive fallback for unscaled or non-metric coordinates
+        thresh = max(0.50, float(np.percentile(perp_dist, 5)))
+        near_ray_mask = perp_dist < thresh
+
+    if np.sum(near_ray_mask) < 2:
+        raise ValueError("Too few 3D points along marker ray to estimate depth")
+
+    # Segment the foreground surface from any occluded background clutter along the viewing ray:
+    # A depth discontinuity (gap > 0.35m) marks the transition from front trunk to background.
+    near_pts = np.sort(along_valid[near_ray_mask])
+    gaps = np.diff(near_pts)
+    gap_indices = np.where(gaps > 0.35)[0]
+    if len(gap_indices) > 0 and gap_indices[0] >= 2:
+        foreground_pts = near_pts[:gap_indices[0] + 1]
+    else:
+        foreground_pts = near_pts
+
+    marker_dist_along_ray = float(np.median(foreground_pts))
+    marker_depth = marker_dist_along_ray * float(ray_cam[2])
+
+    corners_3d = []
+    for c2 in c2d:
+        r_cam = np.array([(c2[0] - cx) / focal_length_px, (c2[1] - cy) / focal_length_px, 1.0])
+        p_cam = r_cam * marker_depth
+        p_world = camera_center + camera_rotation.T @ p_cam
+        corners_3d.append(p_world)
+
+    corners_3d = np.array(corners_3d, dtype=float)
+    scale_factor, measured_size = compute_marker_scale_with_3d_points(corners_3d, physical_marker_size_m)
+    return float(scale_factor), float(measured_size), corners_3d
+

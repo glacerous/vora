@@ -7,6 +7,11 @@ __pycache__/
 output/
 uploads/
 test_images/
+*.mp4
+
+# Prebuilt local binaries & dependencies
+bin/
+plugins/
 
 # Model files & checkpoints
 *.ply

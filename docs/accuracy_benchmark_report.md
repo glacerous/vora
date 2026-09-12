@@ -1,22 +1,25 @@
-# Vora Empirical Ground-Truth Accuracy Benchmark Report
+# Vora Accuracy Benchmark Pipeline (Illustrative Prototype Template)
 
-**Evaluation Date:** 2026-09-11 | **Total Physical Test Samples:** $N = 10$
+> [!WARNING]
+> **UNVALIDATED PROTOTYPE DATA / NOT FIELD-MEASURED:** The numbers in this document are derived from an illustrative demonstration schema (`UNVERIFIED_synthetic_example.json`) used solely to test evaluation pipelines. **They are NOT empirical field-measured values and must not be cited as proven field accuracy.** In literature, monocular smartphone photogrammetry error is typically estimated at **5–9%**, pending formal in-situ field validation campaigns.
 
-## 1. Executive Summary: Primary Accuracy Metrics
+**Pipeline Benchmark Test Run:** 2026-09-12 | **Illustrative Test Samples:** $N = 10$
 
-| Metric Parameter | Physical Field Value | Target / Reference | Method / Instrument |
+## 1. Executive Summary: Primary Accuracy Metrics (Illustrative Example Only)
+
+| Metric Parameter | Illustrative Synthetic Value (Not Field Validated) | Target / Reference | Method / Instrument |
 | :--- | :--- | :--- | :--- |
-| **Sample Count ($N$)** | **10 trees** | $\ge 10$ trees | Multi-species agroforestry & arboretum |
-| **DBH Mean Absolute Error (MAE)** | **1.08 cm** | $\le 1.50$ cm | Forestry Pi-Tape (Yamayo 2m) |
-| **DBH Mean Absolute % Error (MAPE)** | **3.58%** | $\le 6.0\%$ | Automated 3D RANSAC + Alpha-Shape |
+| **Sample Count ($N$)** | **10 trees** | $\ge 10$ trees | Multi-species agroforestry & arboretum template |
+| **DBH Mean Absolute Error (MAE)** | **1.08 cm** *(illustrative example)* | $\le 1.50$ cm | Forestry Pi-Tape (Yamayo 2m) |
+| **DBH Mean Absolute % Error (MAPE)** | **3.58%** *(illustrative example)* | $\le 6.0\%$ | Automated 3D RANSAC + Alpha-Shape |
 | **DBH Root Mean Square Error (RMSE)** | **1.10 cm** | $\le 1.80$ cm | L2 residual spread |
-| **DBH Error Range (Min / Max)** | **0.80 cm – 1.40 cm** (1.9% – 5.0%) | Full distribution | All 10 test trees |
-| **Height Mean Absolute Error (MAE)** | **0.51 m** (3.19%) | $\le 1.0$ m | Nikon Forestry Pro II Hypsometer |
+| **DBH Error Range (Min / Max)** | **0.80 cm – 1.40 cm** (1.9% – 5.0%) | Full distribution | Example test suite |
+| **Height Mean Absolute Error (MAE)** | **0.51 m** (3.19%) *(illustrative example)* | $\le 1.0$ m | Nikon Forestry Pro II Hypsometer |
 | **Height Root Mean Square Error (RMSE)** | **0.53 m** | $\le 1.2$ m | L2 vertical residual spread |
 
 ---
 
-## 2. Complete Sample-by-Sample Ground-Truth Roster
+## 2. Sample-by-Sample Synthetic Roster (Demonstration Schema)
 
 | Sample ID | Species | Phone Model | Lighting | Slope | GT DBH (cm) | Vora DBH (cm) | Error (cm / %) | Scale Calibration |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -33,7 +36,7 @@
 
 ---
 
-## 3. Stratified Sub-Group Analysis
+## 3. Stratified Sub-Group Analysis (Illustrative Template)
 
 ### A. By Environmental Lighting Condition
 

@@ -23,16 +23,19 @@ import math
 import argparse
 from typing import List, Dict, Any
 
-DATASET_PATH = os.path.join(os.path.dirname(__file__), "carbon", "data", "validation_dataset.json")
+DATASET_PATH = os.path.join(os.path.dirname(__file__), "carbon", "data", "UNVERIFIED_synthetic_example.json")
 REPORT_PATH = os.path.join(os.path.dirname(__file__), "docs", "accuracy_benchmark_report.md")
 
 
 def load_dataset(path: str = DATASET_PATH) -> List[Dict[str, Any]]:
     if not os.path.exists(path):
-        print(f"[ERROR] Validation dataset not found at: {path}")
+        print(f"[ERROR] Example dataset not found at: {path}")
         return []
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    # Filter out disclaimer/metadata objects
+    return [r for r in data if isinstance(r, dict) and "ground_truth_dbh_cm" in r]
+
 
 
 def compute_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -89,26 +92,29 @@ def stratify_by_key(records: List[Dict[str, Any]], key: str) -> Dict[str, List[D
 
 def generate_markdown_report(records: List[Dict[str, Any]], overall: Dict[str, Any]) -> str:
     md = []
-    md.append("# Vora Empirical Ground-Truth Accuracy Benchmark Report")
+    md.append("# Vora Accuracy Benchmark Pipeline (Illustrative Prototype Template)")
     md.append("")
-    md.append(f"**Evaluation Date:** 2026-09-11 | **Total Physical Test Samples:** $N = {overall['sample_count']}$")
+    md.append("> [!WARNING]")
+    md.append("> **UNVALIDATED PROTOTYPE DATA / NOT FIELD-MEASURED:** The numbers in this document are derived from an illustrative demonstration schema (`UNVERIFIED_synthetic_example.json`) used solely to test evaluation pipelines. **They are NOT empirical field-measured values and must not be cited as proven field accuracy.** In literature, monocular smartphone photogrammetry error is typically estimated at **5–9%**, pending formal in-situ field validation campaigns.")
     md.append("")
-    md.append("## 1. Executive Summary: Primary Accuracy Metrics")
+    md.append(f"**Pipeline Benchmark Test Run:** 2026-09-12 | **Illustrative Test Samples:** $N = {overall['sample_count']}$")
     md.append("")
-    md.append("| Metric Parameter | Physical Field Value | Target / Reference | Method / Instrument |")
+    md.append("## 1. Executive Summary: Primary Accuracy Metrics (Illustrative Example Only)")
+    md.append("")
+    md.append("| Metric Parameter | Illustrative Synthetic Value (Not Field Validated) | Target / Reference | Method / Instrument |")
     md.append("| :--- | :--- | :--- | :--- |")
-    md.append(f"| **Sample Count ($N$)** | **{overall['sample_count']} trees** | $\\ge 10$ trees | Multi-species agroforestry & arboretum |")
-    md.append(f"| **DBH Mean Absolute Error (MAE)** | **{overall['dbh_mae_cm']:.2f} cm** | $\\le 1.50$ cm | Forestry Pi-Tape (Yamayo 2m) |")
-    md.append(f"| **DBH Mean Absolute % Error (MAPE)** | **{overall['dbh_mape_pct']:.2f}%** | $\\le 6.0\\%$ | Automated 3D RANSAC + Alpha-Shape |")
+    md.append(f"| **Sample Count ($N$)** | **{overall['sample_count']} trees** | $\\ge 10$ trees | Multi-species agroforestry & arboretum template |")
+    md.append(f"| **DBH Mean Absolute Error (MAE)** | **{overall['dbh_mae_cm']:.2f} cm** *(illustrative example)* | $\\le 1.50$ cm | Forestry Pi-Tape (Yamayo 2m) |")
+    md.append(f"| **DBH Mean Absolute % Error (MAPE)** | **{overall['dbh_mape_pct']:.2f}%** *(illustrative example)* | $\\le 6.0\\%$ | Automated 3D RANSAC + Alpha-Shape |")
     md.append(f"| **DBH Root Mean Square Error (RMSE)** | **{overall['dbh_rmse_cm']:.2f} cm** | $\\le 1.80$ cm | L2 residual spread |")
-    md.append(f"| **DBH Error Range (Min / Max)** | **{overall['dbh_min_err_cm']:.2f} cm – {overall['dbh_max_err_cm']:.2f} cm** ({overall['dbh_min_pct_err']:.1f}% – {overall['dbh_max_pct_err']:.1f}%) | Full distribution | All 10 test trees |")
+    md.append(f"| **DBH Error Range (Min / Max)** | **{overall['dbh_min_err_cm']:.2f} cm – {overall['dbh_max_err_cm']:.2f} cm** ({overall['dbh_min_pct_err']:.1f}% – {overall['dbh_max_pct_err']:.1f}%) | Full distribution | Example test suite |")
     if "height_mae_m" in overall:
-        md.append(f"| **Height Mean Absolute Error (MAE)** | **{overall['height_mae_m']:.2f} m** ({overall['height_mape_pct']:.2f}%) | $\\le 1.0$ m | Nikon Forestry Pro II Hypsometer |")
+        md.append(f"| **Height Mean Absolute Error (MAE)** | **{overall['height_mae_m']:.2f} m** ({overall['height_mape_pct']:.2f}%) *(illustrative example)* | $\\le 1.0$ m | Nikon Forestry Pro II Hypsometer |")
         md.append(f"| **Height Root Mean Square Error (RMSE)** | **{overall['height_rmse_m']:.2f} m** | $\\le 1.2$ m | L2 vertical residual spread |")
     md.append("")
     md.append("---")
     md.append("")
-    md.append("## 2. Complete Sample-by-Sample Ground-Truth Roster")
+    md.append("## 2. Sample-by-Sample Synthetic Roster (Demonstration Schema)")
     md.append("")
     md.append("| Sample ID | Species | Phone Model | Lighting | Slope | GT DBH (cm) | Vora DBH (cm) | Error (cm / %) | Scale Calibration |")
     md.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
@@ -127,7 +133,7 @@ def generate_markdown_report(records: List[Dict[str, Any]], overall: Dict[str, A
     md.append("")
     md.append("---")
     md.append("")
-    md.append("## 3. Stratified Sub-Group Analysis")
+    md.append("## 3. Stratified Sub-Group Analysis (Illustrative Template)")
     md.append("")
 
     # Stratified by Lighting
@@ -139,6 +145,7 @@ def generate_markdown_report(records: List[Dict[str, Any]], overall: Dict[str, A
         m = compute_metrics(grp)
         md.append(f"| `{lit}` | {m['sample_count']} | {m['dbh_gt_mean_cm']:.1f} | {m['dbh_mae_cm']:.2f} cm | **{m['dbh_mape_pct']:.2f}%** |")
     md.append("")
+
 
     # Stratified by Phone Model
     md.append("### B. By Smartphone Hardware Model")

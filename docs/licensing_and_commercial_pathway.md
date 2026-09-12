@@ -59,16 +59,19 @@ Vora resolves the licensing bottleneck through strict architectural decoupling. 
 └──────────────────────────────────────┘    └──────────────────────────────────────┘
 ```
 
+> [!NOTE]
+> **CURRENT IMPLEMENTATION STATUS:** The dual-engine interface and legal manifest are fully implemented in [`carbon/reconstruction_engine.py`](file:///c:/codes/3dtest/carbon/reconstruction_engine.py). However, the underlying CUDA pipeline for `CommercialPermissiveEngine` (`gsplat` + `GLOMAP`) is an **architected migration pathway and is not yet functionally implemented** on the active GPU deployment. Attempting to invoke `reconstruct()` under `COMMERCIAL_PERMISSIVE` mode currently raises `NotImplementedError`. Active 3D reconstructions currently execute via `EngineMode.RESEARCH` (`InstantSplat` + `MASt3R`).
+
 ### Key Technical Properties of the Abstraction:
 1. **Engine-Agnostic Geometric Interface:**
-   Both backends output an identical tuple: `(points3d.ply, model.splat, camera_poses.json)`.
+   Both backends are specified to output an identical tuple: `(points3d.ply, model.splat, camera_poses.json)`.
 2. **Runtime Mode Configuration:**
    The backend engine is selected via a single environment variable:
    ```bash
-   # For academic competition benchmarking:
+   # For academic competition benchmarking (Active):
    export VORA_ENGINE_MODE="research_instantsplat_mast3r"
 
-   # For production enterprise and paid smallholder service deployment:
+   # For production enterprise and paid smallholder service deployment (Architected):
    export VORA_ENGINE_MODE="commercial_permissive_gsplat"
    ```
 3. **Zero IP Contamination:**
@@ -81,13 +84,15 @@ Vora resolves the licensing bottleneck through strict architectural decoupling. 
 | Evaluation Metric | Research Engine (`InstantSplat + MASt3R`) | Commercial Engine (`GLOMAP + gsplat`) | Impact on Business Viability |
 | :--- | :--- | :--- | :--- |
 | **Legal Status** | Non-Commercial Only | **Fully Commercial Permitted** | Required for paid smallholder carbon screening service |
+| **Implementation Status** | **Functionally Active** | **Architected Pathway (Not Yet Implemented)** | Interface raises `NotImplementedError` pending CUDA port |
 | **GPU Memory Footprint** | ~14–18 GB VRAM (requires A10G/A100) | **~6–8 GB VRAM (runs on T4 / RTX 4070)** | **Reduces cloud compute cost by ~50%** |
 | **Processing Time per Tree** | 45–75 seconds | 60–90 seconds | Acceptable for asynchronous batch processing |
 | **Metric Scale Support** | Geometric Prior + Optical Marker | Physical ArUco Marker + Sensor Intrinsics | Higher determinism on commercial track |
-| **Enterprise Readiness** | Experimental Prototype | **Enterprise SaaS Ready** | Clear path to SOC2 and ISO carbon verification |
+| **Enterprise Readiness** | Experimental Prototype | **Enterprise SaaS Ready Architecture** | Clear path to SOC2 and ISO carbon verification |
 
 ---
 
 ## 5. Conclusion
 
-The non-commercial status of MASt3R and InstantSplat is an **infrastructure choice of convenience for research**, not an architectural barrier. By establishing the `carbon/reconstruction_engine.py` abstraction layer, Vora guarantees that any commercial carbon screening, monetization, or IDXCarbon verification partnership operates on a **100% permissively licensed Apache 2.0 / BSD foundation**.
+The non-commercial status of MASt3R and InstantSplat is an **infrastructure choice of convenience for research**, not an architectural barrier. By establishing the `carbon/reconstruction_engine.py` abstraction layer, Vora demonstrates an architected clean-room migration plan where commercial carbon screening or monetization can switch to a **100% permissively licensed Apache 2.0 / BSD foundation** without modifying any downstream carbon MRV analytics.
+
