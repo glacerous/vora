@@ -943,9 +943,9 @@
         <div class="control-group" id="point-size-group" style="display: none;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
                 <span class="control-label">Point Thickness</span>
-                <span id="point-size-val" style="font-size: 11px; font-weight: 700; color: #0284c7;">0.08m</span>
+                <span id="point-size-val" style="font-size: 11px; font-weight: 700; color: #0284c7;">0.04m</span>
             </div>
-            <input type="range" id="point-size-slider" min="0.005" max="0.300" step="0.005" value="0.080"
+            <input type="range" id="point-size-slider" min="0.002" max="0.120" step="0.002" value="0.040"
                 style="width: 100%; accent-color: #0284c7; cursor: pointer; height: 4px; margin-top: 4px;" />
         </div>
     </div>
@@ -1866,14 +1866,14 @@
                     const hasColors = geometry.attributes.color !== undefined;
 
                     const sliderEl = document.getElementById('point-size-slider');
-                    const initialSize = sliderEl ? parseFloat(sliderEl.value) : 0.08;
+                    const initialSize = sliderEl ? parseFloat(sliderEl.value) : 0.04;
 
                     // Use custom ShaderMaterial for guaranteed circular points.
                     // THREE.PointsMaterial renders square quads; only a custom GLSL discard
                     // in the fragment shader reliably produces true circular splats.
                     const material = new THREE.ShaderMaterial({
                         uniforms: {
-                            pointSize: { value: initialSize * 3000.0 }, // tuned so 0.08m → ~80px at 3m camera dist
+                            pointSize: { value: initialSize * 800.0 }, // 0.04m * 800 / 3m ≈ 10px — fills gaps without blobbing
                             opacity:   { value: 0.95 },
                             useVertexColor: { value: hasColors ? 1.0 : 0.0 },
                             fallbackColor: { value: new THREE.Color(0x38bdf8) }
@@ -1899,8 +1899,9 @@
                                 vec2 uv = gl_PointCoord - vec2(0.5);
                                 float r = dot(uv, uv);
                                 if (r > 0.25) discard;
-                                // Soft wide Gaussian — neighbors blend together for solid filled surface
-                                float alpha = opacity * exp(-r * 5.0);
+                                // Tight Gaussian: solid colored core, small soft edge
+                                // High exponent keeps individual point colors visible (bark/rock texture)
+                                float alpha = opacity * exp(-r * 10.0);
                                 gl_FragColor = vec4(vColor, alpha);
                             }
                         `,
@@ -1919,8 +1920,7 @@
                             const valLabel = document.getElementById('point-size-val');
                             if (valLabel) valLabel.textContent = val.toFixed(3) + 'm';
                             if (pointCloudObj && pointCloudObj.material && pointCloudObj.material.uniforms) {
-                                // ShaderMaterial uses uniforms.pointSize (3000 matches slider scale)
-                                pointCloudObj.material.uniforms.pointSize.value = val * 3000.0;
+                                pointCloudObj.material.uniforms.pointSize.value = val * 800.0;
                             }
                         };
                     }
