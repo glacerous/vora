@@ -996,6 +996,8 @@ def _reconstruct_thread(
                 iterations=max(iterations, 3000),
                 camera_poses=camera_poses
             )
+            if not c_res.success:
+                raise RuntimeError(f"Commercial reconstruction failed: {c_res.error_message}")
             with open(c_res.points3d_ply_path, "rb") as f_ply:
                 c_ply_bytes = f_ply.read()
             with open(c_res.splat_model_path, "rb") as f_splat:
