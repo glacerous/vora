@@ -1896,47 +1896,14 @@
                     const sliderEl = document.getElementById('point-size-slider');
                     const initialSize = sliderEl ? parseFloat(sliderEl.value) : 0.04;
 
-                    // Use custom ShaderMaterial for guaranteed circular points.
-                    // THREE.PointsMaterial renders square quads; only a custom GLSL discard
-                    // in the fragment shader reliably produces true circular splats.
-                    const material = new THREE.ShaderMaterial({
-                        uniforms: {
-                            pointSize: { value: initialSize * 800.0 }, // 0.04m * 800 / 3m ≈ 10px — fills gaps without blobbing
-                            opacity:   { value: 0.95 },
-                            useVertexColor: { value: hasColors ? 1.0 : 0.0 },
-                            fallbackColor: { value: new THREE.Color(0x38bdf8) }
-                        },
-                        vertexShader: /* glsl */`
-                            uniform float pointSize;
-                            varying vec3 vColor;
-                            attribute vec3 color;
-                            uniform float useVertexColor;
-                            uniform vec3 fallbackColor;
-                            void main() {
-                                vColor = (useVertexColor > 0.5) ? color : fallbackColor;
-                                vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-                                gl_PointSize = pointSize / (-mvPosition.z + 0.001);
-                                gl_Position = projectionMatrix * mvPosition;
-                            }
-                        `,
-                        fragmentShader: /* glsl */`
-                            uniform float opacity;
-                            varying vec3 vColor;
-                            void main() {
-                                // Discard fragments outside unit circle — eliminates square corners
-                                vec2 uv = gl_PointCoord - vec2(0.5);
-                                float r = dot(uv, uv);
-                                if (r > 0.25) discard;
-                                // Gamma correction: PLY colors are linear, output is sRGB
-                                // pow(x, 1/2.2) brightens the colors to look natural
-                                vec3 gammaCorrected = pow(clamp(vColor, 0.0, 1.0), vec3(0.4545));
-                                float alpha = opacity * exp(-r * 10.0);
-                                gl_FragColor = vec4(gammaCorrected, alpha);
-                            }
-                        `,
-                        transparent: true,
-                        depthWrite: false,
-                        blending: THREE.NormalBlending
+                    // Plain PointsMaterial — renders solid colored SQUARES that tile like a game texture.
+                    // This is the desired "voxel/game texture" look. No circular shader needed.
+                    const material = new THREE.PointsMaterial({
+                        size: initialSize,
+                        vertexColors: hasColors,
+                        color: hasColors ? 0xffffff : 0x38bdf8,
+                        sizeAttenuation: true,
+                        depthWrite: false
                     });
 
                     pointCloudObj = new THREE.Points(geometry, material);
@@ -1948,8 +1915,9 @@
                             const val = parseFloat(e.target.value);
                             const valLabel = document.getElementById('point-size-val');
                             if (valLabel) valLabel.textContent = val.toFixed(3) + 'm';
-                            if (pointCloudObj && pointCloudObj.material && pointCloudObj.material.uniforms) {
-                                pointCloudObj.material.uniforms.pointSize.value = val * 800.0;
+                            if (pointCloudObj && pointCloudObj.material) {
+                                pointCloudObj.material.size = val;
+                                pointCloudObj.material.needsUpdate = true;
                             }
                         };
                     }
