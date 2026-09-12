@@ -1461,6 +1461,34 @@
 
             if (pointCloudObj) {
                 pointCloudObj.visible = (currentRenderMode === 'laser' || currentRenderMode === 'hybrid');
+
+                // Auto-fit camera to point cloud when switching to Laser Scan only mode
+                if (currentRenderMode === 'laser' && pointCloudObj.visible && viewer && viewer.camera) {
+                    try {
+                        pointCloudObj.geometry.computeBoundingBox();
+                        const box = pointCloudObj.geometry.boundingBox.clone();
+                        // Transform bounding box by the parent group matrix (syncGroup)
+                        if (syncGroup) box.applyMatrix4(syncGroup.matrixWorld);
+                        const center = new THREE.Vector3();
+                        const size   = new THREE.Vector3();
+                        box.getCenter(center);
+                        box.getSize(size);
+                        const maxDim = Math.max(size.x, size.y, size.z);
+                        const fov = viewer.camera.fov * (Math.PI / 180);
+                        const dist = (maxDim / 2) / Math.tan(fov / 2) * 1.4; // 1.4 = padding
+                        const cam = viewer.camera;
+                        const controls = viewer.controls || viewer.orbitControls;
+                        cam.position.set(center.x, center.y + size.y * 0.1, center.z + dist);
+                        cam.lookAt(center);
+                        if (controls && controls.target) {
+                            controls.target.copy(center);
+                            controls.update && controls.update();
+                        }
+                        console.log('Camera fitted to laser scan bounding box, dist:', dist.toFixed(2));
+                    } catch(camErr) {
+                        console.warn('Could not auto-fit camera to point cloud:', camErr);
+                    }
+                }
             }
 
             const ptGroup = document.getElementById('point-size-group');
@@ -1899,10 +1927,11 @@
                                 vec2 uv = gl_PointCoord - vec2(0.5);
                                 float r = dot(uv, uv);
                                 if (r > 0.25) discard;
-                                // Tight Gaussian: solid colored core, small soft edge
-                                // High exponent keeps individual point colors visible (bark/rock texture)
+                                // Gamma correction: PLY colors are linear, output is sRGB
+                                // pow(x, 1/2.2) brightens the colors to look natural
+                                vec3 gammaCorrected = pow(clamp(vColor, 0.0, 1.0), vec3(0.4545));
                                 float alpha = opacity * exp(-r * 10.0);
-                                gl_FragColor = vec4(vColor, alpha);
+                                gl_FragColor = vec4(gammaCorrected, alpha);
                             }
                         `,
                         transparent: true,
