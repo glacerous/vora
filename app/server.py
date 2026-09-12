@@ -956,6 +956,30 @@ def _reconstruct_thread(
             raise RuntimeError("Job cancelled by user")
 
         r2_frames_prefix = job_st.get("r2_frames_prefix")
+        if not r2_frames_prefix and tree_code:
+            try:
+                candidate_prefix = f"tree_scans/{tree_code}/frames/"
+                b_name = os.environ.get("R2_BUCKET_NAME", "")
+                acc_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+                ak = os.environ.get("R2_ACCESS_KEY_ID", "")
+                sk = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+                if b_name and acc_id and ak and sk:
+                    _s3 = boto3.client(
+                        "s3",
+                        endpoint_url=f"https://{acc_id}.r2.cloudflarestorage.com",
+                        aws_access_key_id=ak,
+                        aws_secret_access_key=sk,
+                        config=Config(signature_version="s3v4"),
+                        region_name="auto",
+                    )
+                    _objs = _s3.list_objects_v2(Bucket=b_name, Prefix=candidate_prefix, MaxKeys=5)
+                    if _objs.get("Contents"):
+                        r2_frames_prefix = candidate_prefix
+                        job_st["r2_frames_prefix"] = candidate_prefix
+                        print(f"[RECONSTRUCT] Found existing frames in R2 prefix '{candidate_prefix}'! Auto-binding.")
+            except Exception as _r2_check_err:
+                print(f"[RECONSTRUCT] Failed R2 frame check: {_r2_check_err}")
+
         job_frames_dir = get_job_frames_dir(tree_code)
         imgs = []
         files = []
