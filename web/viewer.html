@@ -324,6 +324,8 @@
         .mrv-badge-vio { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4); }
         .mrv-badge-prior { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
         .mrv-badge-uncalibrated { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
+        .mrv-badge-fit-success { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
+        .mrv-badge-fit-fallback { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
 
         .mrv-species-row {
             font-size: 12px;
@@ -953,7 +955,10 @@
     <div class="mrv-inspector-card" id="mrv-inspector-card">
         <div class="mrv-card-header">
             <div class="mrv-tree-title" id="mrv-tree-code">POHON-SCAN</div>
-            <span id="mrv-scale-badge" class="mrv-badge mrv-badge-prior">Geometric Prior</span>
+            <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+                <span id="mrv-scale-badge" class="mrv-badge mrv-badge-prior">Geometric Prior</span>
+                <span id="mrv-fit-badge" class="mrv-badge mrv-badge-fit-success">Multi-Slice Fit</span>
+            </div>
         </div>
         <div class="mrv-species-row" id="mrv-species-name">Forest Scan Analysis</div>
         
@@ -1532,6 +1537,21 @@
                             } else {
                                 badge.classList.add('mrv-badge-uncalibrated');
                                 badge.textContent = 'Uncalibrated';
+                            }
+                        }
+
+                        const fitBadge = document.getElementById('mrv-fit-badge');
+                        if (fitBadge) {
+                            fitBadge.className = 'mrv-badge';
+                            if (metrics.fit_method === 'multi_slice_fit') {
+                                fitBadge.classList.add('mrv-badge-fit-success');
+                                fitBadge.textContent = 'Multi-Slice Fit';
+                            } else if (metrics.fit_method === 'robust_fallback') {
+                                fitBadge.classList.add('mrv-badge-fit-fallback');
+                                fitBadge.textContent = 'Fallback Fit (Low Conf)';
+                            } else {
+                                fitBadge.classList.add('mrv-badge-fit-success');
+                                fitBadge.textContent = metrics.fit_method || 'Circle Fit';
                             }
                         }
 

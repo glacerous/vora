@@ -579,6 +579,7 @@ def run_carbon_analysis(
                 "height_m":                None,
                 "confidence":              f"FAILED - points3d.ply tidak tersedia, hasil DBH tidak valid ({err_msg})",
                 "method":                  "None",
+                "fit_method":              "none",
                 "slice_points_count":      0,
                 "mean_fit_error_cm":       0.0,
                 "scale_factor_used":       scale_factor,
@@ -682,6 +683,7 @@ def run_carbon_analysis(
             "height_validated":        height_validated,
             "height_validation_reason": height_validation_reason,
             "quality_status":          quality_status,
+            "fit_method":              dbh_result.get("fit_method", "multi_slice_fit"),
             "inlier_ratio":            inlier_ratio,
             "biomass_kg":              carbon_result["total_biomass_kg"],
             "above_ground_biomass_kg": carbon_result["above_ground_biomass_kg"],
@@ -706,7 +708,7 @@ def run_carbon_analysis(
         }
         try:
             from carbon.cost_model import calculate_tree_scan_cost
-            res_dict["cost_breakdown"] = calculate_tree_scan_cost(execution_time_sec=60.0, storage_mb=15.0)
+            res_dict["cost_breakdown"] = calculate_tree_scan_cost(execution_time_sec=30.0, storage_mb=15.0)
         except Exception:
             pass
         return res_dict
@@ -981,7 +983,7 @@ def _reconstruct_thread(
         else:
             print(f"[RECONSTRUCT] Uploading {len(imgs)} frames to GPU cloud (background removed on Modal: {remove_background})...")
         
-        active_engine_mode = os.environ.get("VORA_ENGINE_MODE", "research_instantsplat_mast3r")
+        active_engine_mode = os.environ.get("VORA_ENGINE_MODE", "commercial_permissive_gsplat")
         if active_engine_mode == "commercial_permissive_gsplat":
             print(f"[RECONSTRUCT] Commercial Permissive Mode active: routing to CommercialPermissiveEngine (COLMAP+gsplat)...")
             from carbon.reconstruction_engine import CommercialPermissiveEngine
@@ -991,7 +993,7 @@ def _reconstruct_thread(
             c_res = c_engine.reconstruct(
                 frames_dir=job_frames_dir,
                 output_dir=c_out_dir,
-                iterations=iterations,
+                iterations=max(iterations, 3000),
                 camera_poses=camera_poses
             )
             with open(c_res.points3d_ply_path, "rb") as f_ply:

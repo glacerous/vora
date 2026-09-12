@@ -58,7 +58,7 @@ class CostBreakdown:
 
 
 def calculate_tree_scan_cost(
-    execution_time_sec: float = 60.0,
+    execution_time_sec: float = 30.0,
     storage_mb: float = 15.0,
     retention_months: int = 12,
     recording_time_min: float = 3.0,

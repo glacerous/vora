@@ -141,7 +141,7 @@ class CommercialPermissiveEngine(BaseReconstructionEngine):
         frames_dir: str,
         output_dir: str,
         scale_calibration: Optional[Dict[str, Any]] = None,
-        iterations: int = 500,
+        iterations: int = 3000,
         camera_poses: Optional[List[Dict[str, Any]]] = None
     ) -> ReconstructionResult:
         import time
@@ -261,8 +261,8 @@ def get_engine(mode: Optional[str] = None) -> BaseReconstructionEngine:
       - VORA_ENGINE_MODE = 'commercial_permissive_gsplat'
       - VORA_ENGINE_MODE = 'research_instantsplat_mast3r' (default)
     """
-    active_mode = mode or os.environ.get("VORA_ENGINE_MODE", EngineMode.RESEARCH.value)
-    if active_mode == EngineMode.COMMERCIAL_PERMISSIVE.value:
-        return CommercialPermissiveEngine()
-    return ResearchEngine()
+    active_mode = mode or os.environ.get("VORA_ENGINE_MODE", EngineMode.COMMERCIAL_PERMISSIVE.value)
+    if active_mode == EngineMode.RESEARCH.value:
+        return ResearchEngine()
+    return CommercialPermissiveEngine()
 

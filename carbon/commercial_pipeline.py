@@ -26,7 +26,8 @@ logger = logging.getLogger("CommercialPipeline")
 # Modal App definition for cloud GPU training
 try:
     import modal
-    commercial_app = modal.App("vora-commercial-gsplat")
+    commercial_app = modal.App("vora-commercial-engine")
+    app = commercial_app
     
     commercial_image = (
         modal.Image.from_registry("dockerzhiwen/instantsplat_public:2.0")
@@ -41,7 +42,7 @@ except ImportError:
 
 if commercial_app is not None:
     @commercial_app.function(image=commercial_image, gpu="a10g", timeout=600)
-    def train_gsplat_cloud(bundle_zip_bytes: bytes, num_iterations: int = 200) -> dict:
+    def train_gsplat_cloud(bundle_zip_bytes: bytes, num_iterations: int = 3000) -> dict:
         """
         Executes 3D Gaussian training initialized from COLMAP sparse point cloud
         using gsplat rasterization API. 100% Apache 2.0 compliant.

@@ -706,8 +706,10 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
             inlier_count += np.sum(inlier_mask)
 
     method_used = "MASt3R RANSAC ground-separated trunk cylinder"
+    fit_method = "multi_slice_fit"
     if not radii_pass2:
         logger.warning("[MAST3R DBH] Multi-slice circle fit failed, using robust fallback.")
+        fit_method = "robust_fallback"
         pts_2d = np.column_stack((np.dot(trunk_pts, u1_pass2), np.dot(trunk_pts, u2_pass2)))
         xc, yc, R, mean_err, inlier_mask = fit_circle_robust(pts_2d)
         if R is None or R <= 0 or R > CROP_RADIUS * 2.0:
@@ -763,6 +765,7 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
         "height_m":           float(round(estimated_height_m, 2)),
         "confidence_note":    confidence,
         "method":             method_used,
+        "fit_method":         fit_method,
         "slice_points_count": slice_count,
         "mean_fit_error_cm":  mean_err_cm,
         "inlier_ratio":       inlier_ratio,
