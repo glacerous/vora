@@ -1209,8 +1209,8 @@ def _reconstruct_thread(
         t_dl_pts_end = time.time()
         print(f"[TIMING] Save/download points3d.ply: {t_dl_pts_end - t_dl_pts_start:.4f}s")
 
-        # Ensure local points3d.ply is cleaned for local DBH extraction
-        if points3d_path and os.path.exists(points3d_path):
+        # Ensure local points3d.ply is cleaned for research engine (skip on commercial gsplat)
+        if active_engine_mode != "commercial_permissive_gsplat" and points3d_path and os.path.exists(points3d_path):
             try:
                 from carbon.dbh_extractor import clean_and_filter_ply
                 clean_and_filter_ply(points3d_path)

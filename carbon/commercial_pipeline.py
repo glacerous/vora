@@ -383,13 +383,25 @@ if commercial_app is not None:
             sh0 = final_colors.unsqueeze(1)
             shN = torch.empty((final_means.shape[0], 0, 3), device=device, dtype=torch.float32)
 
+            # 1. Native 32-byte .splat binary (direct linear scale, linear opacity, direct RGB)
             splat_bytes = gsplat.export_splats(
                 means=final_means, scales=final_scales, quats=final_quats,
                 opacities=final_opacities, sh0=sh0, shN=shN, format="splat"
             )
+
+            # 2. Inria 3DGS compliant PLY (log scale, logit opacity, SH DC coefficients)
+            # GaussianSplats3D PlyParser expects log(scale) to apply Math.exp(),
+            # logit(opacity) to apply sigmoid(), and SH DC (C0=0.28209479) to extract RGB.
+            SH_C0 = 0.28209479177387814
+            ply_sh0 = (sh0 - 0.5) / SH_C0
             ply_bytes = gsplat.export_splats(
-                means=final_means, scales=final_scales, quats=final_quats,
-                opacities=final_opacities, sh0=sh0, shN=shN, format="ply"
+                means=final_means,
+                scales=scales.detach(),
+                quats=final_quats,
+                opacities=opacities.detach(),
+                sh0=ply_sh0,
+                shN=shN,
+                format="ply"
             )
 
         # Cleanup
@@ -628,12 +640,14 @@ if commercial_app is not None:
                 shN=shN,
                 format="splat"
             )
+            SH_C0 = 0.28209479177387814
+            ply_sh0 = (sh0 - 0.5) / SH_C0
             ply_bytes = gsplat.export_splats(
                 means=final_means,
-                scales=final_scales,
+                scales=scales.detach(),
                 quats=final_quats,
-                opacities=final_opacities,
-                sh0=sh0,
+                opacities=opacities.detach(),
+                sh0=ply_sh0,
                 shN=shN,
                 format="ply"
             )

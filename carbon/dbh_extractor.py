@@ -659,7 +659,17 @@ def extract_dbh_from_mast3r(ply_path: str, scale_factor: float = 1.0,
     centered = trunk_pts - trunk_mean
     cov = np.cov(centered.T)
     eigvals, eigvecs = np.linalg.eigh(cov)
-    v_pass2 = eigvecs[:, -1]
+    # Ensure trunk axis aligns primarily with ground normal (upwards)
+    # A standing tree trunk grows upward out of the ground; an axis perpendicular to normal is a horizontal lateral artifact
+    alignments = [abs(float(np.dot(eigvecs[:, i], normal))) for i in range(3)]
+    vert_candidates = [(alignments[i], eigvals[i], i) for i in range(3) if alignments[i] >= 0.4]
+    if vert_candidates:
+        # Choose the vertical candidate with largest eigenvalue
+        best_idx = max(vert_candidates, key=lambda c: c[1])[2]
+        v_pass2 = eigvecs[:, best_idx]
+    else:
+        # Fallback to ground normal directly
+        v_pass2 = normal.copy()
 
     # Ensure v_pass2 points upwards relative to ground
     if np.dot(v_pass2, normal) < 0:
