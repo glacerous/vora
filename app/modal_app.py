@@ -44,8 +44,8 @@ image = (
     )
     .run_commands(
         "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y curl",
-        "curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs",
-        "git clone https://github.com/mkkellogg/GaussianSplats3D.git /workspace/GaussianSplats3D && cd /workspace/GaussianSplats3D && npm install && npm run build"
+        "curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs",
+        "npm install -g @playcanvas/splat-transform"
     )
 )
 
@@ -1210,26 +1210,27 @@ def run_reconstruction(images_bytes: list[bytes] = None, tree_code: str = "Unkno
         # Non-fatal: if cleanup fails, we still return the unfiltered PLY
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: outlier removal failed ({cleanup_err}), returning unfiltered PLY")
 
-    # Convert PLY to KSPLAT
-    ksplat_path = output_file_path.replace(".ply", ".ksplat")
+    # Convert PLY to SPZ using PlayCanvas splat-transform
+    spz_path = output_file_path.replace(".ply", ".spz")
     splat_data = b""
     try:
         conv_cmd = [
-            "node", "/workspace/GaussianSplats3D/util/create-ksplat.js",
-            output_file_path, ksplat_path,
-            "1", "1"
+            "splat-transform",
+            output_file_path,
+            "-H", "0",
+            spz_path
         ]
         conv_res = subprocess.run(conv_cmd, capture_output=True, text=True)
-        if conv_res.returncode == 0:
-            with open(ksplat_path, "rb") as f:
+        if conv_res.returncode == 0 and os.path.exists(spz_path):
+            with open(spz_path, "rb") as f:
                 splat_data = f.read()
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KSPLAT conversion successful: {len(splat_data):,} bytes")
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] SPZ conversion successful: {len(splat_data):,} bytes")
         else:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KSPLAT conversion failed: {conv_res.stderr}. Returning raw PLY instead.")
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] SPZ conversion failed: {conv_res.stderr}. Returning raw PLY instead.")
             with open(output_file_path, "rb") as f:
                 splat_data = f.read()
     except Exception as conv_err:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KSPLAT conversion exception: {conv_err}. Returning raw PLY instead.")
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] SPZ conversion exception: {conv_err}. Returning raw PLY instead.")
         with open(output_file_path, "rb") as f:
             splat_data = f.read()
 
@@ -1426,25 +1427,26 @@ def run_reconstruction(images_bytes: list[bytes] = None, tree_code: str = "Unkno
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Uploading files directly to Cloudflare R2 from Modal...")
         try:
             if output_file_path and os.path.exists(output_file_path):
-                # Convert PLY to KSPLAT on Modal
-                ksplat_path = output_file_path.replace(".ply", ".ksplat")
+                # Convert PLY to SPZ on Modal via PlayCanvas splat-transform
+                spz_path = output_file_path.replace(".ply", ".spz")
                 try:
                     import subprocess
                     conv_cmd = [
-                        "node", "/workspace/GaussianSplats3D/util/create-ksplat.js",
-                        output_file_path, ksplat_path,
-                        "1", "1"  # compression level = 1, alpha removal threshold = 1
+                        "splat-transform",
+                        output_file_path,
+                        "-H", "0",
+                        spz_path
                     ]
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Converting splat PLY to KSPLAT: {' '.join(conv_cmd)}")
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Converting splat PLY to SPZ: {' '.join(conv_cmd)}")
                     conv_res = subprocess.run(conv_cmd, capture_output=True, text=True)
-                    if conv_res.returncode == 0:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KSPLAT conversion successful: {os.path.getsize(ksplat_path):,} bytes")
-                        splat_url = upload_to_r2(ksplat_path, tree_code, custom_timestamp=ts, custom_filename="result.ksplat")
+                    if conv_res.returncode == 0 and os.path.exists(spz_path):
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] SPZ conversion successful: {os.path.getsize(spz_path):,} bytes")
+                        splat_url = upload_to_r2(spz_path, tree_code, custom_timestamp=ts, custom_filename="result.spz")
                     else:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KSPLAT conversion failed: {conv_res.stderr}. Uploading raw PLY instead.")
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] SPZ conversion failed: {conv_res.stderr}. Uploading raw PLY instead.")
                         splat_url = upload_to_r2(output_file_path, tree_code, custom_timestamp=ts, custom_filename="result.ply")
                 except Exception as conv_err:
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] KSPLAT conversion exception: {conv_err}. Uploading raw PLY instead.")
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] SPZ conversion exception: {conv_err}. Uploading raw PLY instead.")
                     splat_url = upload_to_r2(output_file_path, tree_code, custom_timestamp=ts, custom_filename="result.ply")
             if len(mast3r_candidates) > 0 and os.path.exists(mast3r_candidates[0]):
                 try:
@@ -2146,23 +2148,24 @@ def convert_ply_on_modal(ply_bytes: bytes) -> bytes:
         temp_in.write(ply_bytes)
         temp_in_path = temp_in.name
         
-    temp_out_path = temp_in_path.replace(".ply", ".ksplat")
+    temp_out_path = temp_in_path.replace(".ply", ".spz")
     
     cmd = [
-        "node", "/workspace/GaussianSplats3D/util/create-ksplat.js",
-        temp_in_path, temp_out_path,
-        "1", "1"
+        "splat-transform",
+        temp_in_path,
+        "-H", "0",
+        temp_out_path
     ]
     res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
+    if res.returncode != 0 or not os.path.exists(temp_out_path):
         try:
             os.remove(temp_in_path)
         except:
             pass
-        raise RuntimeError(f"KSplat conversion failed: {res.stderr}")
+        raise RuntimeError(f"SPZ conversion failed: {res.stderr}")
         
     with open(temp_out_path, "rb") as f:
-        ksplat_bytes = f.read()
+        spz_bytes = f.read()
         
     try:
         os.remove(temp_in_path)
@@ -2170,7 +2173,7 @@ def convert_ply_on_modal(ply_bytes: bytes) -> bytes:
     except:
         pass
         
-    return ksplat_bytes
+    return spz_bytes
 
 
 @app.local_entrypoint()

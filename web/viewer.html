@@ -12,12 +12,13 @@
         href="https://fonts.googleapis.com/css2?family=Anton&family=Outfit:wght@300;400;600;800&family=Space+Grotesk:wght@400;700&display=swap"
         rel="stylesheet">
 
-    <!-- Import map for Three.js and Gaussian Splats 3D library -->
+    <!-- Import map for Three.js and Spark Gaussian Splats library -->
     <script type="importmap">
     {
         "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+            "three": "https://cdn.jsdelivr.net/npm/three@0.174.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.174.0/examples/jsm/",
+            "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.2.0/spark.module.js",
             "gaussian-splats-3d": "https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.0/build/gaussian-splats-3d.module.js"
         }
     }
@@ -1120,7 +1121,7 @@
         const _origFetch = window.fetch;
         window.fetch = function (input, init) {
             const url = typeof input === 'string' ? input : (input && input.url);
-            const isSplatFile = url && (url.endsWith('.ksplat') || url.endsWith('.ply') || url.endsWith('.splat') || url.includes('tree_scans'));
+            const isSplatFile = url && (url.endsWith('.ksplat') || url.endsWith('.ply') || url.endsWith('.splat') || url.endsWith('.spz') || url.endsWith('.sog') || url.includes('tree_scans'));
             if (isSplatFile) {
                 _tFetchStart = performance.now();
                 return _origFetch.apply(this, arguments).then(response => {
@@ -1163,9 +1164,119 @@
         // =========================================================================
 
         import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
         import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
         import { TransformControls } from 'three/addons/controls/TransformControls.js';
+        import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark';
         import * as GaussianSplats3D from 'gaussian-splats-3d';
+
+        // ── Modern Unified Gaussian Splat Viewer (Supports .spz, .sog, .ksplat, .ply) ──
+        class ModernSparkViewer {
+            constructor(options) {
+                this.rootElement = options.rootElement;
+                this.cameraUp = options.cameraUp || [0, -1, 0];
+                this.initialCameraPosition = options.initialCameraPosition || [0, -1, 4];
+                this.initialCameraLookAt = options.initialCameraLookAt || [0, 0, 0];
+                this.threeScene = new THREE.Scene();
+                this.camera = null;
+                this.renderer = null;
+                this.controls = null;
+                this.splatMesh = null;
+                this.sparkRenderer = null;
+                this._renderRunning = false;
+            }
+
+            init() {
+                const width = this.rootElement.clientWidth || window.innerWidth;
+                const height = this.rootElement.clientHeight || window.innerHeight;
+
+                this.camera = new THREE.PerspectiveCamera(65, width / height, 0.05, 1000);
+                this.camera.up.set(this.cameraUp[0], this.cameraUp[1], this.cameraUp[2]);
+                this.camera.position.set(this.initialCameraPosition[0], this.initialCameraPosition[1], this.initialCameraPosition[2]);
+                this.camera.lookAt(this.initialCameraLookAt[0], this.initialCameraLookAt[1], this.initialCameraLookAt[2]);
+
+                this.renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, powerPreference: 'high-performance' });
+                this.renderer.setSize(width, height);
+                this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+                this.rootElement.appendChild(this.renderer.domElement);
+
+                this.sparkRenderer = new SparkRenderer({ renderer: this.renderer });
+
+                this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+                this.controls.enableDamping = true;
+                this.controls.dampingFactor = 0.05;
+                this.controls.target.set(this.initialCameraLookAt[0], this.initialCameraLookAt[1], this.initialCameraLookAt[2]);
+
+                window.addEventListener('resize', () => {
+                    if (!this.camera || !this.renderer) return;
+                    const w = this.rootElement.clientWidth || window.innerWidth;
+                    const h = this.rootElement.clientHeight || window.innerHeight;
+                    this.camera.aspect = w / h;
+                    this.camera.updateProjectionMatrix();
+                    this.renderer.setSize(w, h);
+                });
+            }
+
+            addSplatScene(path, options = {}) {
+                return new Promise((resolve, reject) => {
+                    try {
+                        let isResolved = false;
+                        const onDone = () => {
+                            if (!isResolved) {
+                                isResolved = true;
+                                resolve();
+                            }
+                        };
+                        this.splatMesh = new SplatMesh({
+                            url: path,
+                            onProgress: (event) => {
+                                if (options.onProgress && event) {
+                                    if (event.lengthComputable && event.total > 0) {
+                                        const pct = Math.round((event.loaded / event.total) * 100);
+                                        options.onProgress(pct, `${pct}%`, 0);
+                                    } else {
+                                        options.onProgress(50, 'Processing Splat...', 1);
+                                    }
+                                }
+                            },
+                            onLoad: (mesh) => {
+                                this.splatMesh = mesh;
+                                onDone();
+                            }
+                        });
+                        this.threeScene.add(this.splatMesh);
+
+                        // Also attach to ready promise if available
+                        if (this.splatMesh.ready && typeof this.splatMesh.ready.then === 'function') {
+                            this.splatMesh.ready.then(() => onDone()).catch(err => {
+                                if (!isResolved) {
+                                    isResolved = true;
+                                    reject(err);
+                                }
+                            });
+                        }
+                    } catch (err) {
+                        reject(err);
+                    }
+                });
+            }
+
+            start() {
+                if (this._renderRunning) return;
+                this._renderRunning = true;
+
+                const renderLoop = () => {
+                    requestAnimationFrame(renderLoop);
+                    if (this.controls) {
+                        this.controls.update();
+                    }
+                    if (this.renderer && this.threeScene && this.camera) {
+                        this.renderer.render(this.threeScene, this.camera);
+                    }
+                };
+                renderLoop();
+            }
+        }
 
         let currentRenderMode = 'hybrid'; // splat | laser | hybrid
         let cadOverlayMode = 'all'; // all | cad_only | disabled
@@ -1199,16 +1310,24 @@
 
             // 3D Gaussian Splatting uses OpenCV / Y-down convention, so cameraUp is [0, -1, 0]
             // to make the scene appear right-side up in the browser.
-            viewer = new GaussianSplats3D.Viewer({
-
-                'cameraUp': [0, -1, 0],
-                'initialCameraPosition': [0, -1, 4],
-                'initialCameraLookAt': [0, 0, 0],
-                'selfDrivenMode': true,
-                'useBuiltInControls': true,
-                'sharedMemoryForWorkers': false,
-                'rootElement': document.getElementById('splat-container')
-            });
+            if (typeof SparkRenderer !== 'undefined') {
+                viewer = new ModernSparkViewer({
+                    'cameraUp': [0, -1, 0],
+                    'initialCameraPosition': [0, -1, 4],
+                    'initialCameraLookAt': [0, 0, 0],
+                    'rootElement': document.getElementById('splat-container')
+                });
+            } else {
+                viewer = new GaussianSplats3D.Viewer({
+                    'cameraUp': [0, -1, 0],
+                    'initialCameraPosition': [0, -1, 4],
+                    'initialCameraLookAt': [0, 0, 0],
+                    'selfDrivenMode': true,
+                    'useBuiltInControls': true,
+                    'sharedMemoryForWorkers': false,
+                    'rootElement': document.getElementById('splat-container')
+                });
+            }
 
             viewer.init();
             _tLibInitEnd = performance.now();
@@ -1339,7 +1458,10 @@
                     const mesh = () => viewer.splatMesh;
 
                     function rotateScene(axis, delta) {
-                        if (mesh()) mesh().rotation[axis] += delta;
+                        if (mesh()) {
+                            mesh().rotation[axis] += delta;
+                            mesh().updateMatrix();
+                        }
                     }
 
                     document.getElementById('rx-neg').onclick = () => rotateScene('x', -STEP);
@@ -1349,7 +1471,10 @@
                     document.getElementById('rz-neg').onclick = () => rotateScene('z', -STEP);
                     document.getElementById('rz-pos').onclick = () => rotateScene('z', STEP);
                     document.getElementById('rot-reset').onclick = () => {
-                        if (mesh()) mesh().rotation.set(0, 0, 0);
+                        if (mesh()) {
+                            mesh().rotation.set(0, 0, 0);
+                            mesh().updateMatrix();
+                        }
                     };
 
                     // ── Custom WASD + QE Flying Controls ─────────────────────────────

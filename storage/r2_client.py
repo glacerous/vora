@@ -40,7 +40,9 @@ def upload_splat(file_path: str, tree_code: str, custom_timestamp: int = None) -
     content_type = "application/octet-stream"
     if file_name.endswith(".ply"):
         content_type = "application/x-ply"
-    elif file_name.endswith(".splat"):
+    elif file_name.endswith(".spz"):
+        content_type = "application/x-spz"
+    elif file_name.endswith(".ksplat") or file_name.endswith(".splat"):
         content_type = "application/octet-stream"
         
     s3.upload_file(
