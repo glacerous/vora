@@ -2126,7 +2126,12 @@ async def splat_proxy(tree_code: str, filename: str):
 
 @app.post("/log", include_in_schema=False)
 async def client_log(data: dict = Body(...)):
-    print(f"[CLIENT LOG] {data.get('level', 'INFO')}: {data.get('message', '')}")
+    try:
+        msg = f"[CLIENT LOG] {data.get('level', 'INFO')}: {data.get('message', '')}"
+        sys.stdout.buffer.write((msg + "\n").encode("utf-8", errors="replace"))
+        sys.stdout.buffer.flush()
+    except Exception:
+        pass
     return {"status": "ok"}
 
 
